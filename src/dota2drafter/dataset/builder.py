@@ -47,13 +47,22 @@ class DatasetBuilder:
         y_tensors = [m.y_tensor for m in self._buffer]
 
         # Stack into batched tensors
-        x_batch = torch.stack(x_tensors)  # (N, 24, 3)
+        x_batch = torch.stack(x_tensors)  # (N, 24, 4)
         y_batch = torch.cat(y_tensors)  # (N,)
+
+        # Collect player data
+        radiant_players = []
+        dire_players = []
+        for m in self._buffer:
+            radiant_players.append(m.radiant_players)
+            dire_players.append(m.dire_players)
 
         dataset: dict[str, Any] = {
             "x": x_batch,
             "y": y_batch,
             "match_ids": match_ids,
+            "radiant_players": radiant_players,
+            "dire_players": dire_players,
         }
 
         self._batch_count += 1

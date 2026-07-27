@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -18,9 +18,12 @@ logger = logging.getLogger(__name__)
 class ProcessedMatch:
     """A single processed match ready for tensor conversion."""
 
-    x_tensor: torch.Tensor  # (24, 3) - draft sequence
+    x_tensor: torch.Tensor  # (24, 4) - draft sequence: [hero_val, is_pick, team, step_index]
     y_tensor: torch.Tensor  # (1,) - radiant_win label
     match_id: str
+    radiant_players: list[int] = field(default_factory=list)
+    dire_players: list[int] = field(default_factory=list)
+    player_comfort: torch.Tensor | None = None  # (B, 10, C) - optional comfort tensor
 
 
 class TensorTransformer:
@@ -45,8 +48,12 @@ class TensorTransformer:
         draft = match_data.get("draft", {})
         picks_bans = draft.get("picksBans", [])
 
+        # Extract player account IDs from STRATZ match data
+        radiant_players = self._extract_stratz_players(match_data, team=0)
+        dire_players = self._extract_stratz_players(match_data, team=1)
+
         steps: list[list[float]] = []
-        for pb in picks_bans:
+        for step_idx, pb in enumerate(picks_bans):
             is_pick = 1.0 if pb.get("type") == "pick" else 0.0
             team = float(pb.get("team", 0))
             hero_id = pb.get("hero", {}).get("id") if isinstance(pb.get("hero"), dict) else pb.get("hero")
@@ -57,12 +64,19 @@ class TensorTransformer:
             else:
                 hero_val = -1.0
 
-            steps.append([is_pick, team, hero_val])
+            # (24, 4): [hero_val, is_pick, team, step_index]
+            steps.append([is_pick, team, hero_val, float(step_idx)])
 
-        x_tensor = torch.tensor(steps, dtype=torch.float32)  # (24, 3)
+        x_tensor = torch.tensor(steps, dtype=torch.float32)  # (24, 4)
         y_tensor = torch.tensor([1.0 if radiant_win else 0.0], dtype=torch.float32)  # (1,)
 
-        return ProcessedMatch(x_tensor=x_tensor, y_tensor=y_tensor, match_id=match_id)
+        return ProcessedMatch(
+            x_tensor=x_tensor,
+            y_tensor=y_tensor,
+            match_id=match_id,
+            radiant_players=radiant_players,
+            dire_players=dire_players,
+        )
 
     def transform_opendota(self, match_data: dict[str, Any]) -> ProcessedMatch | None:
         """Transform an OpenDota match payload into tensors.
@@ -78,8 +92,12 @@ class TensorTransformer:
         radiant_win = match_data.get("radiant_win", False)
         picks_bans = match_data.get("picks_bans", [])
 
+        # Extract player account IDs from OpenDota match data
+        radiant_players = self._extract_opendota_players(match_data, team=0)
+        dire_players = self._extract_opendota_players(match_data, team=1)
+
         steps: list[list[float]] = []
-        for pb in picks_bans:
+        for step_idx, pb in enumerate(picks_bans):
             is_pick = 1.0 if pb.get("is_pick", False) else 0.0
             team = float(pb.get("team", 0))
             hero_id = pb.get("hero_id")
@@ -90,15 +108,70 @@ class TensorTransformer:
             else:
                 hero_val = -1.0
 
-            steps.append([is_pick, team, hero_val])
+            # (24, 4): [hero_val, is_pick, team, step_index]
+            steps.append([is_pick, team, hero_val, float(step_idx)])
 
-        x_tensor = torch.tensor(steps, dtype=torch.float32)  # (24, 3)
+        x_tensor = torch.tensor(steps, dtype=torch.float32)  # (24, 4)
         y_tensor = torch.tensor([1.0 if radiant_win else 0.0], dtype=torch.float32)  # (1,)
 
-        return ProcessedMatch(x_tensor=x_tensor, y_tensor=y_tensor, match_id=match_id)
+        return ProcessedMatch(
+            x_tensor=x_tensor,
+            y_tensor=y_tensor,
+            match_id=match_id,
+            radiant_players=radiant_players,
+            dire_players=dire_players,
+        )
 
     def transform(self, match_data: dict[str, Any], source: str = "stratz") -> ProcessedMatch | None:
         """Transform a match payload from the specified source."""
         if source == "stratz":
             return self.transform_stratz(match_data)
         return self.transform_opendota(match_data)
+
+    def _extract_stratz_players(self, match_data: dict[str, Any], team: int) -> list[int]:
+        """Extract account IDs for a team from STRATZ match data.
+
+        Args:
+            match_data: STRATZ match payload.
+            team: Team identifier (0 = Radiant, 1 = Dire).
+
+        Returns:
+            List of account IDs for the specified team.
+        """
+        players_key = "players"
+        players = match_data.get(players_key, [])
+
+        account_ids: list[int] = []
+        for player in players:
+            player_team = player.get("team", 0)
+            if player_team == team + 1:  # STRATZ uses 1-based team (1=Radiant, 2=Dire)
+                account_id = player.get("accountid")
+                if account_id is not None:
+                    account_ids.append(int(account_id))
+
+        return account_ids
+
+    def _extract_opendota_players(self, match_data: dict[str, Any], team: int) -> list[int]:
+        """Extract account IDs for a team from OpenDota match data.
+
+        Args:
+            match_data: OpenDota match payload.
+            team: Team identifier (0 = Radiant, 1 = Dire).
+
+        Returns:
+            List of account IDs for the specified team.
+        """
+        players = match_data.get("players", [])
+
+        account_ids: list[int] = []
+        for player in players:
+            player_team = player.get("player_slot", 0)
+            is_radiant = player_team < 128
+            player_team_idx = 0 if is_radiant else 1
+
+            if player_team_idx == team:
+                account_id = player.get("account_id")
+                if account_id is not None:
+                    account_ids.append(int(account_id))
+
+        return account_ids

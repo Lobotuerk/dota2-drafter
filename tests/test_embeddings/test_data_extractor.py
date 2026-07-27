@@ -106,3 +106,53 @@ def test_skip_gram_pair_dataclass() -> None:
 
     pair_with_neg = SkipGramPair(center=5, context=10, negative=15)
     assert pair_with_neg.negative == 15
+
+
+def test_data_extractor_hero_graph_correct_math() -> None:
+    extractor = DataExtractor(num_heroes=20)
+
+    # Construct 2 matches manually
+    # Match 1: Radiant [1, 2, 3, 4, 5], Dire [6, 7, 8, 9, 10]. Radiant wins (y=1).
+    steps1 = []
+    # 5 picks for Radiant
+    for i in range(5):
+        steps1.append([1.0, 0.0, float(i + 1)])
+    # 5 picks for Dire
+    for i in range(5):
+        steps1.append([1.0, 1.0, float(i + 6)])
+    # pad to 24 steps with bans or placeholders
+    for i in range(14):
+        steps1.append([0.0, 0.0, 1.0])
+
+    # Match 2: Radiant [1, 2, 3, 11, 12], Dire [6, 13, 14, 15, 16]. Dire wins (y=0).
+    steps2 = []
+    # Radiant picks
+    for h in [1, 2, 3, 11, 12]:
+        steps2.append([1.0, 0.0, float(h)])
+    # Dire picks
+    for h in [6, 13, 14, 15, 16]:
+        steps2.append([1.0, 1.0, float(h)])
+    for i in range(14):
+        steps2.append([0.0, 0.0, 1.0])
+
+    # Repeat each match 6 times to satisfy the threshold filters (total >= 5 and total >= 3)
+    x = torch.stack([torch.tensor(steps1)] * 6 + [torch.tensor(steps2)] * 6)  # (12, 24, 3)
+    y = torch.tensor([1.0] * 6 + [0.0] * 6)  # (12,)
+
+    batches = [{"x": x, "y": y}]
+    graph = extractor.build_hero_graph(batches)
+
+    # We want to find the synergy edge between 1 and 2.
+    # It should have a win rate of 0.5.
+    edge_index = graph.edge_index.tolist()
+    edges = list(zip(edge_index[0], edge_index[1]))
+
+    # Find index of edge (1, 2)
+    assert (1, 2) in edges
+    idx12 = edges.index((1, 2))
+    assert abs(graph.edge_attr[idx12].item() - 0.5) < 1e-5
+
+    # Find index of opposition edge (6, 1) (6 vs 1)
+    assert (6, 1) in edges
+    idx61 = edges.index((6, 1))
+    assert abs(graph.edge_attr[idx61].item() - 0.5) < 1e-5

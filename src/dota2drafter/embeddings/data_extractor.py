@@ -124,7 +124,7 @@ class DataExtractor:
 
         Returns a PyG Data object with edge_index and edge_attr.
         """
-        # Accumulate counts for win rate computation
+        # Accumulate [wins, total] counts for win rate computation
         synergy_counts: dict[tuple[int, int], list[int]] = {}
         opposition_counts: dict[tuple[int, int], list[int]] = {}
 
@@ -152,46 +152,59 @@ class DataExtractor:
                 dire_heroes = [int(h) for h in dire_picks.tolist() if h > 0]
 
                 # Synergy: co-pick pairs on same team
-                all_team_heroes = [(radiant_heroes, 0), (dire_heroes, 1)]
-                for team_heroes, _ in all_team_heroes:
-                    for i_idx, hi in enumerate(team_heroes):
-                        for hj in team_heroes[i_idx + 1 :]:
-                            pair = tuple(sorted((hi, hj)))
-                            if pair not in synergy_counts:
-                                synergy_counts[pair] = [0, 0]
-                            synergy_counts[pair][radiant_win] += 1
+                # Radiant co-picks
+                for i_idx, hi in enumerate(radiant_heroes):
+                    for hj in radiant_heroes[i_idx + 1 :]:
+                        pair = tuple(sorted((hi, hj)))
+                        if pair not in synergy_counts:
+                            synergy_counts[pair] = [0, 0]  # [wins, total]
+                        synergy_counts[pair][0] += radiant_win  # 1 if Radiant won, 0 otherwise
+                        synergy_counts[pair][1] += 1
 
-                # Opposition: hero i vs hero j (across teams)
+                # Dire co-picks
+                for i_idx, hi in enumerate(dire_heroes):
+                    for hj in dire_heroes[i_idx + 1 :]:
+                        pair = tuple(sorted((hi, hj)))
+                        if pair not in synergy_counts:
+                            synergy_counts[pair] = [0, 0]  # [wins, total]
+                        synergy_counts[pair][0] += (1 - radiant_win)  # 1 if Dire won, 0 otherwise
+                        synergy_counts[pair][1] += 1
+
+                # Opposition: hero u vs hero v (across teams)
                 for hi in radiant_heroes:
                     for hj in dire_heroes:
-                        opposition_counts[(hi, hj)] = [0, 0]
-                        opposition_counts[(hi, hj)][radiant_win] += 1
+                        # hi is Radiant, hj is Dire. hi wins if radiant_win == 1
+                        if (hi, hj) not in opposition_counts:
+                            opposition_counts[(hi, hj)] = [0, 0]  # [wins, total]
+                        opposition_counts[(hi, hj)][0] += radiant_win
+                        opposition_counts[(hi, hj)][1] += 1
+
+                        # hj is Dire, hi is Radiant. hj wins if radiant_win == 0
+                        if (hj, hi) not in opposition_counts:
+                            opposition_counts[(hj, hi)] = [0, 0]  # [wins, total]
+                        opposition_counts[(hj, hi)][0] += (1 - radiant_win)
+                        opposition_counts[(hj, hi)][1] += 1
 
         # Build edges
         edge_list: list[list[int]] = []
         edge_attr_list: list[float] = []
 
         # Synergy edges (undirected, stored as both directions)
-        for (hi, hj), wins in synergy_counts.items():
-            total = sum(wins)
+        for (hi, hj), (wins, total) in synergy_counts.items():
             if total < 5:
                 continue
-            win_rate = wins[radiant_win] / total if total > 0 else 0.0
+            win_rate = wins / total
             edge_list.append([hi, hj])
             edge_attr_list.append(win_rate)
             edge_list.append([hj, hi])
             edge_attr_list.append(win_rate)
 
         # Opposition edges (directed)
-        for (hi, hj), wins in opposition_counts.items():
-            total = sum(wins)
+        for (u, v), (wins, total) in opposition_counts.items():
             if total < 3:
                 continue
-            # Win rate of hi against hj
-            # If radiant_win=1, hi is on radiant; if hi is radiant, win_rate = wins[1]/total
-            # We need to track which team each hero was on — simplify: use raw ratio
-            win_rate = wins[1] / total if total > 0 else 0.0
-            edge_list.append([hi, hj])
+            win_rate = wins / total
+            edge_list.append([u, v])
             edge_attr_list.append(win_rate)
 
         if not edge_list:

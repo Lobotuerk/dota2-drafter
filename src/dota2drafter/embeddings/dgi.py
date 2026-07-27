@@ -258,8 +258,12 @@ class DGIModel(nn.Module):
     @classmethod
     def load(cls, path: str | Path, embed_dim: int) -> DGIModel:
         """Load a trained model from disk."""
+        try:
+            torch.serialization.add_safe_globals([torch.nn.parameter.UninitializedParameter])
+        except AttributeError:
+            pass
         model = cls(embed_dim)
-        model.load_state_dict(torch.load(path, weights_only=False))
+        model.load_state_dict(torch.load(path, weights_only=True))
         model.eval()
         logger.info("Loaded DGI model from %s", path)
         return model

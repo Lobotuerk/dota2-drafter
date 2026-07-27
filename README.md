@@ -4,15 +4,18 @@ A Python-based data ingestion pipeline that fetches, validates, and transforms D
 
 ## Table of Contents
 
-- [Setup & Verification](#setup--verification)
-- [Data Ingestion](#data-ingestion)
-- [Embedding Pre-training (Skip-Gram + DGI)](#embedding-pre-training-skip-gram--dgi)
-- [RGCN Training](#rgcn-training)
-- [Match Network Training (Transformer)](#match-network-training-transformer)
+- [Setup](#setup)
+- [Pipeline Overview](#pipeline-overview)
+- [Stage 1: Data Gathering](#stage-1-data-gathering)
+- [Stage 1b: Build Comfort Data](#stage-1b-build-comfort-data)
+- [Stage 2: Hero Embeddings](#stage-2-hero-embeddings)
+- [Stage 3: RGCN Training](#stage-3-rgcn-training)
+- [Stage 4: Transformer Training](#stage-4-transformer-training)
+- [Detailed Configuration](#detailed-configuration)
 
 ---
 
-## Setup & Verification
+## Setup
 
 ### Install dependencies
 
@@ -22,17 +25,9 @@ pip install -e .
 
 ### Run the test suite
 
-Verify your environment is correctly set up:
-
 ```bash
 pytest tests/
 ```
-
----
-
-## Data Ingestion
-
-The first stage fetches Dota 2 matches from the STRATZ and OpenDota APIs, validates draft sequences, and produces PyTorch tensor batches (`.pt` files).
 
 ### Environment Setup
 
@@ -43,203 +38,115 @@ cp .env.example .env
 
 Obtain a STRATZ API key from [https://www.stratz.com/account/api](https://www.stratz.com/account/api).
 
-### Configuration (`config.yaml`)
+---
 
-The pipeline is configured via `config.yaml`. Key settings:
+## Pipeline Overview
 
-| Setting | Description | Example |
-|---|---|---|
-| `patch` | Dota patch version to filter matches | `"7.35"` |
-| `tiers` | Tournament tiers to include | `[1, 2]` |
-| `stratz.api_key` | STRATZ API key (read from env var) | `"${STRATZ_API_KEY}"` |
-| `stratz.max_retries` | Retry attempts for API failures | `5` |
-| `stratz.retry_delay` | Delay between retries (seconds) | `2.0` |
-| `output.directory` | Where `.pt` batch files are saved | `"./data"` |
-| `output.chunk_size` | Matches per `.pt` file | `1000` |
-| `state.database_path` | SQLite database for tracking progress | `"./state.db"` |
+The pipeline consists of four sequential stages:
 
-### Execution
+1. **Data Gathering** — Fetch Dota 2 matches from STRATZ/OpenDota APIs, validate drafts, produce `.pt` tensor batches.
+2. **Hero Embeddings** — Train Skip-Gram + DGI unsupervised hero embeddings from draft co-occurrence data.
+3. **RGCN Training** — Train a Relational Graph Convolutional Network over the multi-relational hero graph.
+4. **Transformer Training** — Train the Hierarchical Sequence Transformer for match win-probability prediction.
+
+Each stage has a standalone script under `scripts/`. Run them in order.
+
+---
+
+## Stage 1: Data Gathering
+
+Runs the ingestion pipeline to fetch matches and produce PyTorch batch files.
 
 ```bash
-dota2-drafter config.yaml
+python scripts/01_gather_data.py
+python scripts/01_gather_data.py custom_config.yaml
 ```
 
-This reads the config, discovers leagues and matches, processes draft sequences, and saves the results as `.pt` files in the configured output directory (default `./data`).
+Reads configuration from `config.yaml`. Output is saved to `./data/` as `drafts_batch_*.pt` files.
 
-**Output format** — each `.pt` file contains a dictionary with:
-
-- `x`: `(N, 24, 3)` tensor of draft sequences
-- `y`: `(N,)` tensor of `radiant_win` labels
-- `match_ids`: list of match IDs for traceability
-- `radiant_players`: list of Radiant player account ID lists
-- `dire_players`: list of Dire player account ID lists
+**Configuration:** See `src/dota2drafter/README.md` for full parameter tables.
 
 ---
 
-## Embedding Pre-training (Skip-Gram + DGI)
+## Stage 1b: Build Comfort Data
 
-This stage trains node embeddings for heroes in two steps:
+Builds historical player comfort data (required before transformer training).
 
-1. **Skip-Gram** — learns co-occurrence-based embeddings from draft sequences.
-2. **DGI (Deep Graph Infomax)** — learns structural embeddings using the Skip-Gram features as initial node representations.
-
-### Python API
-
-```python
-from dota2drafter.embeddings.pretrainer import train_embeddings
-
-train_embeddings(
-    data_dir="data",          # Directory containing .pt batches from ingestion
-    output_file="models/skip_gram_dgi.pt",  # Path to save final embeddings
-    embed_dim=64,             # Dimension of the embedding space
-    skip_gram_epochs=10,      # Number of Skip-Gram training epochs
-    dgi_epochs=20,            # Number of DGI training epochs
-    learning_rate=1e-2,       # Learning rate for both optimizers
-    batch_size=256,           # Batch size for Skip-Gram DataLoader
-    device="cpu",             # Device to train on (auto-detected if None)
-)
+```bash
+python scripts/01b_build_comfort.py --data_dir data --output data/player_comfort.pt
+python scripts/01b_build_comfort.py --data_dir data --output data/player_comfort.pt --dim 10 --random
 ```
-
-### Configuration
-
-| Parameter | Default | Description |
-|---|---|---|
-| `data_dir` | *(required)* | Directory containing draft batch `.pt` files |
-| `output_file` | *(required)* | Path to save the final embedding weights |
-| `embed_dim` | `64` | Dimension of the embedding space |
-| `skip_gram_epochs` | `10` | Number of Skip-Gram training epochs |
-| `dgi_epochs` | `20` | Number of DGI training epochs |
-| `learning_rate` | `1e-2` | Learning rate for both Skip-Gram and DGI optimizers |
-| `batch_size` | `256` | Batch size for the Skip-Gram DataLoader |
-| `device` | `None` (auto) | Device to train on (`"cpu"` or `"cuda"`) |
-
-The function returns the path to the saved embedding weights. The output tensor is padded at index 0 (heroes are 1-indexed) and can be loaded directly as frozen embeddings for downstream stages.
 
 ---
 
-## RGCN Training
+## Stage 2: Hero Embeddings
 
-This stage trains a Relational Graph Convolutional Network (HeroRGCN) over the multi-relational hero graph using the frozen DGI embeddings as initial node features. The result is relation-aware structural embeddings.
+Trains Skip-Gram + DGI hero embeddings.
 
-### Python API
+```bash
+# Train
+python scripts/02_train_embeddings.py --mode train \
+    --data_dir data --output_file models/skip_gram_dgi.pt
 
-```python
-from dota2drafter.embeddings.train_rgcn import train_rgcn
-
-train_rgcn(
-    data_dir="data",                    # Directory containing .pt batches from ingestion
-    frozen_embeddings_path="models/skip_gram_dgi.pt",  # Path to DGI embeddings from previous stage
-    output_file="models/rgcn.pt",       # Path to save the trained RGCN model
-    d_model=64,                         # Embedding dimension
-    num_relations=3,                    # Number of edge types in the hero graph
-    rgcn_epochs=20,                     # Number of RGCN training epochs
-    learning_rate=1e-2,                 # Learning rate for the optimizer
-    num_layers=2,                       # Number of RGCN layers (1-2 recommended)
-    device="cpu",                       # Device to train on (auto-detected if None)
-    hidden_dim=None,                    # Hidden dimension (defaults to d_model)
-)
+# Predict (print embedding for a specific hero)
+python scripts/02_train_embeddings.py --mode predict \
+    --output_file models/skip_gram_dgi.pt --hero_id 1
 ```
 
-### Configuration
-
-| Parameter | Default | Description |
-|---|---|---|
-| `data_dir` | *(required)* | Directory containing draft batch `.pt` files |
-| `frozen_embeddings_path` | *(required)* | Path to saved DGI/Skip-Gram embeddings (`.pt` tensor) |
-| `output_file` | *(required)* | Path to save the trained RGCN model weights |
-| `d_model` | `64` | Embedding dimension |
-| `num_relations` | `3` | Number of edge types in the multi-relational hero graph |
-| `rgcn_epochs` | `20` | Number of RGCN training epochs |
-| `learning_rate` | `1e-2` | Learning rate for the optimizer |
-| `num_layers` | `2` | Number of RGCN layers (1-2 recommended) |
-| `device` | `None` (auto) | Device to train on (`"cpu"` or `"cuda"`) |
-| `hidden_dim` | `None` (== d_model) | Hidden dimension for RGCN layers |
-
-The function trains the HeroRGCN by maximizing mutual information between node embeddings and the global graph summary, then saves the trained model weights.
+**Configuration:** See `src/dota2drafter/embeddings/README.md` for full parameter tables.
 
 ---
 
-## Match Network Training (Transformer)
+## Stage 3: RGCN Training
 
-The final stage trains the downstream match prediction model, which combines a HierarchicalTransformer with a PlayerComfortNetwork for win-probability prediction.
+Trains the Relational GNN over the multi-relational hero graph.
 
-Since there is no dedicated CLI entry-point for the dataset loader combined with transformer training, use the following self-contained script to assemble the components:
+```bash
+# Train
+python scripts/03_train_rgcn.py --mode train \
+    --data_dir data \
+    --frozen_embeddings_path models/skip_gram_dgi.pt \
+    --output_file models/rgcn.pt
 
-```python
-import torch
-from pathlib import Path
-
-from dota2drafter.models.match_network import MatchNetwork
-from dota2drafter.training.transformer_trainer import TransformerTrainer, TrainingConfig
-
-# 1. Load batched data from ingestion
-x_drafts, y_labels, radiant_players, dire_players = [], [], [], []
-for pt_file in Path("data").glob("*.pt"):
-    batch = torch.load(pt_file)
-    for i in range(len(batch["x"])):
-        x_drafts.append(batch["x"][i])
-        y_labels.append(batch["y"][i])
-        radiant_players.append(batch["radiant_players"][i])
-        dire_players.append(batch["dire_players"][i])
-
-# 2. Load trained RGCN embeddings
-h_gnn = torch.load("models/rgcn.pt")
-
-# 3. Initialize the Match Network
-model = MatchNetwork(
-    d_model=64,
-    nhead=4,
-    num_layers=2,
-    dim_feedforward=128,
-    dropout=0.1,
-    num_heroes=120,
-    player_input_dim=10,
-    h_gnn=h_gnn
-)
-
-# 4. Configure and train
-config = TrainingConfig(
-    learning_rate=1e-3,
-    num_epochs=50,
-    batch_size=64,
-    device="cpu"
-)
-
-trainer = TransformerTrainer(model, config)
-metrics = trainer.train(
-    x_drafts=x_drafts,
-    y_labels=y_labels,
-    radiant_players=radiant_players,
-    dire_players=dire_players
-)
+# Predict (extract structural hero embeddings)
+python scripts/03_train_rgcn.py --mode predict \
+    --data_dir data \
+    --frozen_embeddings_path models/skip_gram_dgi.pt \
+    --rgcn_path models/rgcn.pt
 ```
 
-### Configuration
+**Configuration:** See `src/dota2drafter/embeddings/README.md` for full parameter tables.
 
-**MatchNetwork parameters:**
+---
 
-| Parameter | Default | Description |
-|---|---|---|
-| `d_model` | `128` | Transformer embedding dimension |
-| `nhead` | `4` | Number of attention heads |
-| `num_layers` | `4` | Number of TransformerDecoderLayer blocks |
-| `dim_feedforward` | `256` | Feedforward dimension in decoder layers |
-| `dropout` | `0.1` | Dropout rate |
-| `num_heroes` | `120` | Number of heroes K |
-| `player_input_dim` | `10` | Number of input features per player comfort vector |
-| `h_gnn` | `None` | Frozen RGCN hero embeddings of shape `(K+1, d_model)` |
+## Stage 4: Transformer Training
 
-**TrainingConfig parameters:**
+Trains the Hierarchical Sequence Transformer for match prediction.
 
-| Parameter | Default | Description |
-|---|---|---|
-| `learning_rate` | `1e-3` | Learning rate for the Adam optimizer |
-| `num_epochs` | `50` | Maximum number of training epochs |
-| `batch_size` | `64` | Batch size for training and validation |
-| `val_split` | `0.2` | Fraction of data reserved for validation |
-| `device` | `"cpu"` | Device to train on (`"cpu"` or `"cuda"`) |
-| `checkpoint_dir` | `"./checkpoints"` | Directory for saving best model checkpoints |
-| `patience` | `10` | Early stopping patience |
-| `min_delta` | `1e-4` | Minimum change to qualify as an improvement |
+```bash
+# Train (requires data from stages 1, 1b, and 3)
+python scripts/04_train_transformer.py --mode train \
+    --data_dir data \
+    --rgcn_path models/rgcn.pt \
+    --comfort_path data/player_comfort.pt \
+    --checkpoint_dir checkpoints
 
-The trainer automatically splits data into train/validation sets, runs the training loop with early stopping, and saves the best model checkpoint. The returned `TrainingMetrics` object contains full training and validation history (losses, accuracies, ROC-AUC scores).
+# Predict (requires a trained checkpoint)
+python scripts/04_train_transformer.py --mode predict \
+    --data_dir data \
+    --rgcn_path models/rgcn.pt \
+    --comfort_path data/player_comfort.pt \
+    --checkpoint_dir checkpoints
+```
+
+**Configuration:** See `src/dota2drafter/training/README.md` for full parameter tables.
+
+---
+
+## Detailed Configuration
+
+Full parameter tables for each module are available in the module READMEs:
+
+- **Ingestion config:** `src/dota2drafter/README.md`
+- **Embeddings & RGCN:** `src/dota2drafter/embeddings/README.md`
+- **Match Network & Training:** `src/dota2drafter/training/README.md`

@@ -88,6 +88,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device", type=str, default=None, help='Device: "cpu" or "cuda" (auto-detect if None)'
     )
+    parser.add_argument(
+        "--num_heroes", type=int, default=124, help="Number of heroes (default: 124)"
+    )
     return parser.parse_args()
 
 
@@ -141,13 +144,13 @@ def main() -> None:
             model_path=args.rgcn_path,
             frozen_embeddings_path=args.frozen_embeddings_path,
             d_model=args.d_model,
-            num_heroes=120,
+            num_heroes=args.num_heroes,
             num_relations=args.num_relations,
         )
 
         # Build the hero graph and extract embeddings
         data_dir = Path(args.data_dir)
-        extractor = DataExtractor(num_heroes=120)
+        extractor = DataExtractor(num_heroes=args.num_heroes)
         batches = extractor.load_batches(data_dir)
         hero_graph = extractor.build_hero_graph(batches)
 

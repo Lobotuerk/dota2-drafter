@@ -99,6 +99,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device", type=str, default=None, help='Device: "cpu" or "cuda" (auto-detect if None)'
     )
+    parser.add_argument(
+        "--num_heroes", type=int, default=124, help="Number of heroes (default: 124)"
+    )
     return parser.parse_args()
 
 
@@ -158,7 +161,7 @@ def main() -> None:
             num_layers=args.num_layers,
             dim_feedforward=args.dim_feedforward,
             dropout=args.dropout,
-            num_heroes=120,
+            num_heroes=args.num_heroes,
             player_input_dim=10,
             h_gnn=h_gnn,
         ).to(device)
@@ -216,7 +219,7 @@ def main() -> None:
             num_layers=args.num_layers,
             dim_feedforward=args.dim_feedforward,
             dropout=args.dropout,
-            num_heroes=120,
+            num_heroes=args.num_heroes,
             player_input_dim=10,
             h_gnn=h_gnn,
         ).to(device)

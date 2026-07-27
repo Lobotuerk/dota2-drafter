@@ -72,6 +72,9 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Hero ID to print embedding for (predict mode, default: 1)",
     )
+    parser.add_argument(
+        "--num_heroes", type=int, default=124, help="Number of heroes (default: 124)"
+    )
     return parser.parse_args()
 
 
@@ -109,7 +112,7 @@ def main() -> None:
         embeddings = load_frozen_embeddings(
             weights_path=args.output_file,
             embed_dim=args.embed_dim,
-            num_heroes=120,
+            num_heroes=args.num_heroes,
         )
         hero_id = args.hero_id
         emb = embeddings.weight[hero_id]

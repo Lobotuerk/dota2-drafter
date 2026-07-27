@@ -13,6 +13,11 @@ from torch_geometric.data import Data
 
 logger = logging.getLogger(__name__)
 
+# Edge type constants for multi-relational graph
+SYNERGY = 0        # r_syn: Co-Picked-Radiant / Co-Picked-Dire
+ANTAGONIST = 1     # r_ant: Mechanical counter-picks
+BANNED_AGAINST = 2 # r_ban: Banned-Against correlations
+
 
 @dataclass
 class SkipGramPair:
@@ -28,7 +33,8 @@ class DataExtractor:
 
     Parses (24, 3) draft tensors to generate:
     - Skip-Gram (center, context, negative) triples
-    - A hero interaction graph with synergy and opposition edges
+    - A multi-relational hero interaction graph with synergy,
+      antagonist, and banned-against edges
     """
 
     def __init__(self, num_heroes: int, negative_samples: int = 5) -> None:
@@ -116,17 +122,18 @@ class DataExtractor:
         self,
         batches: list[dict[str, Any]],
     ) -> Data:
-        """Build a hero interaction graph from match batches.
+        """Build a multi-relational hero interaction graph from match batches.
 
-        Creates a directed graph with:
-        - Synergy edges: co-pick win rates between heroes
-        - Opposition edges: head-to-head win rates
+        Creates a graph with three edge types compatible with PyG's RGCNConv:
+        - Edge type 0 (SYNERGY): Co-picked-Radiant/Dire undirected edges
+        - Edge type 1 (ANTAGONIST): Directed mechanical counter-pick edges
+        - Edge type 2 (BANNED_AGAINST): Directed banned-against edges
 
-        Returns a PyG Data object with edge_index and edge_attr.
+        Returns a PyG Data object with edge_index, edge_type, and edge_weight.
         """
-        # Accumulate [wins, total] counts for win rate computation
         synergy_counts: dict[tuple[int, int], list[int]] = {}
-        opposition_counts: dict[tuple[int, int], list[int]] = {}
+        antagonist_counts: dict[tuple[int, int], list[int]] = {}
+        ban_counts: dict[tuple[int, int], int] = {}
 
         for batch in batches:
             x_tensors: torch.Tensor = batch["x"]
@@ -151,78 +158,119 @@ class DataExtractor:
                 radiant_heroes = [int(h) for h in radiant_picks.tolist() if h > 0]
                 dire_heroes = [int(h) for h in dire_picks.tolist() if h > 0]
 
-                # Synergy: co-pick pairs on same team
-                # Radiant co-picks
+                # Extract ban steps (is_pick == 0.0)
+                ban_steps = draft[draft[:, 0] == 0.0]
+                radiant_bans = ban_steps[ban_steps[:, 1] == 0.0][:, 2].long().tolist()
+                dire_bans = ban_steps[ban_steps[:, 1] == 1.0][:, 2].long().tolist()
+
+                # --- Synergy edges (type 0, undirected) ---
+                # Co-picked pairs on same team
                 for i_idx, hi in enumerate(radiant_heroes):
-                    for hj in radiant_heroes[i_idx + 1 :]:
+                    for hj in radiant_heroes[i_idx + 1:]:
                         pair = tuple(sorted((hi, hj)))
                         if pair not in synergy_counts:
-                            synergy_counts[pair] = [0, 0]  # [wins, total]
-                        synergy_counts[pair][0] += radiant_win  # 1 if Radiant won, 0 otherwise
+                            synergy_counts[pair] = [0, 0]
+                        synergy_counts[pair][0] += radiant_win
                         synergy_counts[pair][1] += 1
 
-                # Dire co-picks
                 for i_idx, hi in enumerate(dire_heroes):
-                    for hj in dire_heroes[i_idx + 1 :]:
+                    for hj in dire_heroes[i_idx + 1:]:
                         pair = tuple(sorted((hi, hj)))
                         if pair not in synergy_counts:
-                            synergy_counts[pair] = [0, 0]  # [wins, total]
-                        synergy_counts[pair][0] += (1 - radiant_win)  # 1 if Dire won, 0 otherwise
+                            synergy_counts[pair] = [0, 0]
+                        synergy_counts[pair][0] += (1 - radiant_win)
                         synergy_counts[pair][1] += 1
 
-                # Opposition: hero u vs hero v (across teams)
+                # --- Antagonist edges (type 1, directed) ---
+                # hero i counter-picks hero j: i is on winning team, j on losing team
                 for hi in radiant_heroes:
                     for hj in dire_heroes:
-                        # hi is Radiant, hj is Dire. hi wins if radiant_win == 1
-                        if (hi, hj) not in opposition_counts:
-                            opposition_counts[(hi, hj)] = [0, 0]  # [wins, total]
-                        opposition_counts[(hi, hj)][0] += radiant_win
-                        opposition_counts[(hi, hj)][1] += 1
+                        if (hi, hj) not in antagonist_counts:
+                            antagonist_counts[(hi, hj)] = [0, 0]
+                        antagonist_counts[(hi, hj)][0] += radiant_win
+                        antagonist_counts[(hi, hj)][1] += 1
 
-                        # hj is Dire, hi is Radiant. hj wins if radiant_win == 0
-                        if (hj, hi) not in opposition_counts:
-                            opposition_counts[(hj, hi)] = [0, 0]  # [wins, total]
-                        opposition_counts[(hj, hi)][0] += (1 - radiant_win)
-                        opposition_counts[(hj, hi)][1] += 1
+                        if (hj, hi) not in antagonist_counts:
+                            antagonist_counts[(hj, hi)] = [0, 0]
+                        antagonist_counts[(hj, hi)][0] += (1 - radiant_win)
+                        antagonist_counts[(hj, hi)][1] += 1
+
+                # --- Banned-Against edges (type 2, directed) ---
+                # hero i picked by Team A, hero j banned by Team B
+                for pick_h in radiant_heroes:
+                    for ban_h in dire_bans:
+                        ban_h = int(ban_h)
+                        if ban_h > 0:
+                            ban_counts[(pick_h, ban_h)] = ban_counts.get((pick_h, ban_h), 0) + 1
+
+                for pick_h in dire_heroes:
+                    for ban_h in radiant_bans:
+                        ban_h = int(ban_h)
+                        if ban_h > 0:
+                            ban_counts[(pick_h, ban_h)] = ban_counts.get((pick_h, ban_h), 0) + 1
 
         # Build edges
         edge_list: list[list[int]] = []
-        edge_attr_list: list[float] = []
+        edge_type_list: list[int] = []
+        edge_weight_list: list[float] = []
 
-        # Synergy edges (undirected, stored as both directions)
+        # Synergy edges (type 0, undirected)
         for (hi, hj), (wins, total) in synergy_counts.items():
             if total < 5:
                 continue
             win_rate = wins / total
             edge_list.append([hi, hj])
-            edge_attr_list.append(win_rate)
+            edge_type_list.append(SYNERGY)
+            edge_weight_list.append(win_rate)
             edge_list.append([hj, hi])
-            edge_attr_list.append(win_rate)
+            edge_type_list.append(SYNERGY)
+            edge_weight_list.append(win_rate)
 
-        # Opposition edges (directed)
-        for (u, v), (wins, total) in opposition_counts.items():
+        # Antagonist edges (type 1, directed)
+        for (u, v), (wins, total) in antagonist_counts.items():
             if total < 3:
                 continue
             win_rate = wins / total
             edge_list.append([u, v])
-            edge_attr_list.append(win_rate)
+            edge_type_list.append(ANTAGONIST)
+            edge_weight_list.append(win_rate)
+
+        # Banned-Against edges (type 2, directed)
+        max_count = max(ban_counts.values()) if ban_counts else 1
+        for (pick_h, ban_h), count in ban_counts.items():
+            normalized = count / max_count
+            edge_list.append([pick_h, ban_h])
+            edge_type_list.append(BANNED_AGAINST)
+            edge_weight_list.append(normalized)
 
         if not edge_list:
-            logger.warning("No edges found in hero interaction graph")
+            logger.warning("No edges found in multi-relational hero graph")
             edge_index = torch.empty((2, 0), dtype=torch.long)
-            return Data(edge_index=edge_index, edge_attr=torch.empty((0, 1)))
+            edge_type = torch.empty((0,), dtype=torch.long)
+            edge_weight = torch.empty((0, 1), dtype=torch.float32)
+            return Data(
+                edge_index=edge_index,
+                edge_type=edge_type,
+                edge_weight=edge_weight,
+                num_nodes=self._num_heroes,
+            )
 
         edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous()
-        edge_attr = torch.tensor(edge_attr_list, dtype=torch.float32).unsqueeze(1)
+        edge_type = torch.tensor(edge_type_list, dtype=torch.long)
+        edge_weight = torch.tensor(edge_weight_list, dtype=torch.float32).unsqueeze(1)
 
         logger.info(
-            "Built hero graph: %d nodes, %d edges",
+            "Built multi-relational hero graph: %d nodes, %d edges (syn=%d, ant=%d, ban=%d)",
             self._num_heroes,
             edge_index.shape[1],
+            sum(1 for t in edge_type_list if t == SYNERGY),
+            sum(1 for t in edge_type_list if t == ANTAGONIST),
+            sum(1 for t in edge_type_list if t == BANNED_AGAINST),
         )
         return Data(
             edge_index=edge_index,
-            edge_attr=edge_attr,
+            edge_type=edge_type,
+            edge_weight=edge_weight,
             num_nodes=self._num_heroes,
         )
 

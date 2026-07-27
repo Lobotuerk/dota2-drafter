@@ -2,7 +2,7 @@
 
 import torch
 from pathlib import Path
-from dota2drafter.embeddings.data_extractor import DataExtractor, SkipGramPair
+from dota2drafter.embeddings.data_extractor import DataExtractor, SkipGramPair, SYNERGY, ANTAGONIST, BANNED_AGAINST
 
 
 def _create_mock_batches(tmp_path: Path, num_matches: int = 10) -> Path:
@@ -70,6 +70,11 @@ def test_data_extractor_hero_graph(tmp_path: Path) -> None:
     assert graph.edge_index.shape[0] == 2
     # Should have synergy edges between co-picked heroes
     assert graph.edge_index.shape[1] > 0
+    # Multi-relational graph should have edge_type and edge_weight
+    assert hasattr(graph, "edge_type")
+    assert hasattr(graph, "edge_weight")
+    assert graph.edge_type.shape[0] == graph.edge_index.shape[1]
+    assert graph.edge_weight.shape[0] == graph.edge_index.shape[1]
 
 
 def test_data_extractor_negative_sampling(tmp_path: Path) -> None:
@@ -142,17 +147,68 @@ def test_data_extractor_hero_graph_correct_math() -> None:
     batches = [{"x": x, "y": y}]
     graph = extractor.build_hero_graph(batches)
 
-    # We want to find the synergy edge between 1 and 2.
-    # It should have a win rate of 0.5.
     edge_index = graph.edge_index.tolist()
     edges = list(zip(edge_index[0], edge_index[1]))
 
-    # Find index of edge (1, 2)
+    # Find the synergy edge between 1 and 2 (type 0)
     assert (1, 2) in edges
     idx12 = edges.index((1, 2))
-    assert abs(graph.edge_attr[idx12].item() - 0.5) < 1e-5
+    assert graph.edge_type[idx12].item() == SYNERGY
+    assert abs(graph.edge_weight[idx12].item() - 0.5) < 1e-5
 
-    # Find index of opposition edge (6, 1) (6 vs 1)
+    # Find the antagonist edge (6, 1) - type 1
     assert (6, 1) in edges
     idx61 = edges.index((6, 1))
-    assert abs(graph.edge_attr[idx61].item() - 0.5) < 1e-5
+    assert graph.edge_type[idx61].item() == ANTAGONIST
+    assert abs(graph.edge_weight[idx61].item() - 0.5) < 1e-5
+
+
+def test_data_extractor_multirelational_edge_types(tmp_path: Path) -> None:
+    """Test that all three edge types are present in the graph."""
+    extractor = DataExtractor(num_heroes=20)
+
+    # Create matches with picks and bans
+    steps = []
+    # 5 Radiant picks
+    for i in range(5):
+        steps.append([1.0, 0.0, float(i + 1)])
+    # 5 Dire picks
+    for i in range(5):
+        steps.append([1.0, 1.0, float(i + 6)])
+    # 2 Radiant bans (steps 20-21)
+    steps.append([0.0, 0.0, 11.0])
+    steps.append([0.0, 0.0, 12.0])
+    # 2 Dire bans (steps 22-23)
+    steps.append([0.0, 1.0, 2.0])
+    steps.append([0.0, 1.0, 3.0])
+
+    x = torch.stack([torch.tensor(steps)] * 20)  # Repeat to satisfy thresholds
+    y = torch.tensor([1.0] * 20)
+
+    batches = [{"x": x, "y": y}]
+    graph = extractor.build_hero_graph(batches)
+
+    # Check all edge types are present
+    unique_types = set(graph.edge_type.tolist())
+    assert SYNERGY in unique_types, "Synergy edges (type 0) should be present"
+    assert ANTAGONIST in unique_types, "Antagonist edges (type 1) should be present"
+    assert BANNED_AGAINST in unique_types, "Banned-against edges (type 2) should be present"
+
+
+def test_data_extractor_empty_graph(tmp_path: Path) -> None:
+    """Test that an empty graph returns valid tensors with correct shapes."""
+    extractor = DataExtractor(num_heroes=20)
+
+    # Create a batch with no picks
+    steps = [[0.0, 0.0, 1.0]] * 24
+    x = torch.tensor(steps, dtype=torch.float32).unsqueeze(0)
+    y = torch.tensor([1.0])
+
+    batches = [{"x": x, "y": y}]
+    graph = extractor.build_hero_graph(batches)
+
+    assert graph.num_nodes == 20
+    assert graph.edge_index.shape[0] == 2
+    assert graph.edge_index.shape[1] == 0
+    assert graph.edge_type.shape[0] == 0
+    assert graph.edge_weight.shape[0] == 0

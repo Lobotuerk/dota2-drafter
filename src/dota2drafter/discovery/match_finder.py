@@ -48,7 +48,7 @@ class MatchFinder:
             self._state_db.upsert_matches(new_matches)
             logger.info("Registered %d matches for league %s", len(new_matches), league_id)
 
-       return new_matches
+        return new_matches
 
     async def find_all_matches(self, leagues: list[dict[str, Any]]) -> int:
         """Discover matches from all leagues concurrently."""

@@ -48,7 +48,7 @@ class DatasetBuilder:
 
         # Stack into batched tensors
         x_batch = torch.stack(x_tensors)  # (N, 24, 3)
-        y_batch = torch.cat([y.squeeze(0) for y in y_tensors])  # (N,)
+        y_batch = torch.cat(y_tensors)  # (N,)
 
         dataset: dict[str, Any] = {
             "x": x_batch,

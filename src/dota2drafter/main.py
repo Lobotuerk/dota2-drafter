@@ -125,7 +125,7 @@ async def run_pipeline(config: PipelineConfig) -> None:
 
         tasks = [
             _process_match(
-                match_id, league_id, stratz_client, opendota_client,
+                match_id, stratz_client, opendota_client,
                 transformer, state_db, dataset_builder,
             )
             for match_id, league_id in pending

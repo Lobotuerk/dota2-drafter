@@ -1,0 +1,243 @@
+"""Unit tests for MatchNetwork / HierarchicalTransformer."""
+
+import pytest
+import torch
+
+from dota2drafter.models.match_network import (
+    HierarchicalTransformer,
+    MatchNetwork,
+    JointEmbedding,
+    SinusoidalPositionalEncoding,
+)
+
+
+def test_joint_embedding_forward():
+    """Test joint embedding forward pass."""
+    d_model = 64
+    num_heroes = 120
+    batch_size = 4
+
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+    joint = JointEmbedding(d_model=d_model, num_heroes=num_heroes, h_gnn=h_gnn)
+
+    # Input: (B, 24, 4)
+    x_draft = torch.zeros(batch_size, 24, 4)
+    # Set valid hero indices (1-based)
+    for b in range(batch_size):
+        for t in range(24):
+            x_draft[b, t, 2] = (t % num_heroes) + 1  # hero_val
+            x_draft[b, t, 0] = 1.0  # is_pick
+            x_draft[b, t, 1] = t % 2  # team
+            x_draft[b, t, 3] = float(t)  # step_index
+
+    z = joint(x_draft)
+    assert z.shape == (batch_size, 24, d_model)
+    assert z.dtype == torch.float32
+
+
+def test_joint_embedding_with_bans():
+    """Test joint embedding with bans (is_pick=0, hero_val=-1)."""
+    d_model = 64
+    num_heroes = 120
+    batch_size = 2
+
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+    joint = JointEmbedding(d_model=d_model, num_heroes=num_heroes, h_gnn=h_gnn)
+
+    x_draft = torch.zeros(batch_size, 24, 4)
+    for t in range(24):
+        x_draft[0, t, 2] = (t % num_heroes) + 1
+        x_draft[0, t, 0] = 0.0  # ban
+        x_draft[0, t, 1] = 0
+        x_draft[0, t, 3] = float(t)
+
+    z = joint(x_draft)
+    assert z.shape == (batch_size, 24, d_model)
+
+
+def test_hierarchical_transformer_forward():
+    """Test HierarchicalTransformer forward pass."""
+    d_model = 64
+    nhead = 4
+    num_layers = 2
+    num_heroes = 120
+    batch_size = 4
+
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    model = HierarchicalTransformer(
+        d_model=d_model,
+        nhead=nhead,
+        num_layers=num_layers,
+        dim_feedforward=128,
+        dropout=0.0,
+        num_heroes=num_heroes,
+        h_gnn=h_gnn,
+    )
+
+    x_draft = torch.zeros(batch_size, 24, 4)
+    for t in range(24):
+        x_draft[:, t, 2] = (t % num_heroes) + 1
+        x_draft[:, t, 0] = 1.0
+        x_draft[:, t, 1] = t % 2
+        x_draft[:, t, 3] = float(t)
+
+    player_pref_vectors = torch.randn(batch_size, 10, d_model)
+
+    logits = model(x_draft, player_pref_vectors)
+    assert logits.shape == (batch_size,)
+    assert logits.dtype == torch.float32
+
+
+def test_hierarchical_transformer_predict_proba():
+    """Test predict_proba returns values in [0, 1]."""
+    d_model = 64
+    num_heroes = 120
+    batch_size = 4
+
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    model = HierarchicalTransformer(
+        d_model=d_model,
+        nhead=4,
+        num_layers=2,
+        dim_feedforward=128,
+        dropout=0.0,
+        num_heroes=num_heroes,
+        h_gnn=h_gnn,
+    )
+
+    x_draft = torch.zeros(batch_size, 24, 4)
+    for t in range(24):
+        x_draft[:, t, 2] = (t % num_heroes) + 1
+        x_draft[:, t, 0] = 1.0
+        x_draft[:, t, 1] = t % 2
+        x_draft[:, t, 3] = float(t)
+
+    player_pref_vectors = torch.randn(batch_size, 10, d_model)
+
+    proba = model.predict_proba(x_draft, player_pref_vectors)
+    assert proba.shape == (batch_size,)
+    assert (proba >= 0).all()
+    assert (proba <= 1).all()
+
+
+def test_match_network_forward():
+    """Test full MatchNetwork forward pass."""
+    d_model = 64
+    num_heroes = 120
+    batch_size = 4
+    player_input_dim = 10
+
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    model = MatchNetwork(
+        d_model=d_model,
+        nhead=4,
+        num_layers=2,
+        dim_feedforward=128,
+        dropout=0.0,
+        num_heroes=num_heroes,
+        player_input_dim=player_input_dim,
+        h_gnn=h_gnn,
+    )
+
+    x_draft = torch.zeros(batch_size, 24, 4)
+    for t in range(24):
+        x_draft[:, t, 2] = (t % num_heroes) + 1
+        x_draft[:, t, 0] = 1.0
+        x_draft[:, t, 1] = t % 2
+        x_draft[:, t, 3] = float(t)
+
+    player_comfort = torch.randn(batch_size, 10, player_input_dim)
+
+    logits = model(x_draft, player_comfort)
+    assert logits.shape == (batch_size,)
+
+
+def test_match_network_predict_proba():
+    """Test MatchNetwork predict_proba returns values in [0, 1]."""
+    d_model = 64
+    num_heroes = 120
+    batch_size = 4
+    player_input_dim = 10
+
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    model = MatchNetwork(
+        d_model=d_model,
+        nhead=4,
+        num_layers=2,
+        dim_feedforward=128,
+        dropout=0.0,
+        num_heroes=num_heroes,
+        player_input_dim=player_input_dim,
+        h_gnn=h_gnn,
+    )
+
+    x_draft = torch.zeros(batch_size, 24, 4)
+    for t in range(24):
+        x_draft[:, t, 2] = (t % num_heroes) + 1
+        x_draft[:, t, 0] = 1.0
+        x_draft[:, t, 1] = t % 2
+        x_draft[:, t, 3] = float(t)
+
+    player_comfort = torch.randn(batch_size, 10, player_input_dim)
+
+    proba = model.predict_proba(x_draft, player_comfort)
+    assert proba.shape == (batch_size,)
+    assert (proba >= 0).all()
+    assert (proba <= 1).all()
+
+
+def test_match_network_requires_grad():
+    """Test that MatchNetwork parameters require gradients."""
+    d_model = 64
+    num_heroes = 120
+    player_input_dim = 10
+
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    model = MatchNetwork(
+        d_model=d_model,
+        nhead=4,
+        num_layers=2,
+        dim_feedforward=128,
+        dropout=0.0,
+        num_heroes=num_heroes,
+        player_input_dim=player_input_dim,
+        h_gnn=h_gnn,
+    )
+
+    for name, param in model.named_parameters():
+        assert param.requires_grad, f"Parameter {name} should require gradients"
+
+
+def test_sinusoidal_positional_encoding():
+    """Test sinusoidal positional encoding dimensions."""
+    d_model = 64
+    pe = SinusoidalPositionalEncoding(d_model=d_model, max_len=24)
+
+    x = torch.randn(4, 24, d_model)
+    output = pe(x)
+
+    assert output.shape == (4, 24, d_model)
+
+
+def test_match_network_default_h_gnn():
+    """Test MatchNetwork with auto-initialized h_gnn."""
+    model = MatchNetwork(
+        d_model=64,
+        nhead=4,
+        num_layers=2,
+        dim_feedforward=128,
+        num_heroes=120,
+        player_input_dim=10,
+    )
+
+    batch_size = 2
+    x_draft = torch.zeros(batch_size, 24, 4)
+    player_comfort = torch.randn(batch_size, 10, 10)
+
+    logits = model(x_draft, player_comfort)
+    assert logits.shape == (batch_size,)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 from pathlib import Path
 
 from rich.console import Console
@@ -157,24 +156,4 @@ async def run_pipeline(config: PipelineConfig) -> None:
     console.print(f"  Output:     {ds_stats['output_dir']}")
 
 
-def main() -> None:
-    """CLI entry point."""
-    config_path = "config.yaml"
-    if len(sys.argv) > 1:
-        config_path = sys.argv[1]
 
-    try:
-        config = load_config(config_path)
-    except FileNotFoundError as e:
-        console.print(f"[bold red]Error:[/bold red] {e}")
-        sys.exit(1)
-
-    try:
-        asyncio.run(run_pipeline(config))
-    except KeyboardInterrupt:
-        console.print("\n[bold yellow]Interrupted by user.[/bold yellow]")
-        sys.exit(130)
-
-
-if __name__ == "__main__":
-    main()

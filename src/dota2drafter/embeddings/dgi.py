@@ -158,8 +158,10 @@ class DGIModel(nn.Module):
         edge_index = graph.edge_index.to(device)
         num_nodes = graph.num_nodes
 
-        # Use edge_attr as initial node features if available, else identity
-        if hasattr(graph, "edge_attr") and graph.edge_attr is not None:
+        # Use graph.x if provided (e.g. from Skip-Gram), else fallback to edge_attr or identity
+        if hasattr(graph, "x") and graph.x is not None:
+            x = graph.x.to(device)
+        elif hasattr(graph, "edge_attr") and graph.edge_attr is not None:
             # edge_attr is (num_edges, 1); derive node features from edge statistics
             x = self._derive_node_features(graph, device)
         else:
@@ -201,7 +203,9 @@ class DGIModel(nn.Module):
         self.eval()
         edge_index = graph.edge_index.to(device)
 
-        if hasattr(graph, "edge_attr") and graph.edge_attr is not None:
+        if hasattr(graph, "x") and graph.x is not None:
+            x = graph.x.to(device)
+        elif hasattr(graph, "edge_attr") and graph.edge_attr is not None:
             x = self._derive_node_features(graph, device)
         else:
             x = torch.eye(graph.num_nodes, device=device)

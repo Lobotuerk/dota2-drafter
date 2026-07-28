@@ -33,9 +33,14 @@ class StateDatabase:
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     tier INTEGER NOT NULL,
-                    patch TEXT NOT NULL
+                    patch TEXT NOT NULL,
+                    ended INTEGER NOT NULL DEFAULT 0
                 )
             """)
+            try:
+                conn.execute("ALTER TABLE leagues ADD COLUMN ended INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS matches (
                     match_id TEXT PRIMARY KEY,
@@ -60,14 +65,20 @@ class StateDatabase:
         finally:
             conn.close()
 
-    def insert_league(self, league_id: str, name: str, tier: int, patch: str) -> None:
+    def insert_league(self, league_id: str, name: str, tier: int, patch: str, ended: int = 0) -> None:
         """Insert or update a league record."""
         with self._connection() as conn:
             conn.execute(
-                """INSERT OR REPLACE INTO leagues (id, name, tier, patch)
-                   VALUES (?, ?, ?, ?)""",
-                (league_id, name, tier, patch),
+                """INSERT OR REPLACE INTO leagues (id, name, tier, patch, ended)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (league_id, name, tier, patch, ended),
             )
+
+    def get_ended_league_ids(self) -> set[str]:
+        """Get the set of all league IDs that are marked as ended."""
+        with self._connection() as conn:
+            cursor = conn.execute("SELECT id FROM leagues WHERE ended = 1")
+            return {row["id"] for row in cursor.fetchall()}
 
     def upsert_matches(self, matches: list[tuple[str, str, str | None]]) -> None:
         """Insert or update multiple match records.
@@ -76,7 +87,7 @@ class StateDatabase:
         """
         with self._connection() as conn:
             conn.executemany(
-                """INSERT OR REPLACE INTO matches (match_id, status, league_id)
+                """INSERT OR IGNORE INTO matches (match_id, status, league_id)
                    VALUES (?, ?, ?)""",
                 matches,
             )
@@ -108,6 +119,16 @@ class StateDatabase:
                 f"UPDATE matches SET {sets} WHERE match_id = ?",
                 values,
             )
+
+    def mark_completed_batch(self, matches: list[tuple[str, bool]]) -> None:
+        """Mark multiple matches as completed in a single transaction."""
+        with self._connection() as conn:
+            for match_id, radiant_win in matches:
+                win_val = 1 if radiant_win else 0
+                conn.execute(
+                    "UPDATE matches SET status = 'completed', radiant_win = ?, updated_at = CURRENT_TIMESTAMP WHERE match_id = ?",
+                    (win_val, match_id),
+                )
 
     def mark_failed(self, match_id: str, error: str) -> None:
         """Mark a match as failed with an error message."""

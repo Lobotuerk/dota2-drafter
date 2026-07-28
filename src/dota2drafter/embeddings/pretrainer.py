@@ -51,8 +51,19 @@ def train_embeddings(
 
     # Step 1: Extract data
     logger.info("Step 1: Extracting data from %s", data_dir)
-    extractor = DataExtractor(num_heroes=124)  # Standard Dota 2 hero count
-    batches = extractor.load_batches(data_dir)
+    temp_extractor = DataExtractor(num_heroes=124)  # Temporary to load batches
+    batches = temp_extractor.load_batches(data_dir)
+
+    max_hero_idx = 124
+    for batch in batches:
+        x_tensors = batch["x"]
+        if x_tensors.dim() == 3:
+            max_hero_idx = max(max_hero_idx, int(x_tensors[:, :, 2].max().item()))
+        else:
+            max_hero_idx = max(max_hero_idx, int(x_tensors[:, 2].max().item()))
+
+    logger.info("Detected actual maximum hero index in dataset: %d", max_hero_idx)
+    extractor = DataExtractor(num_heroes=max_hero_idx)
 
     num_heroes = extractor._num_heroes
     logger.info("Extracting Skip-Gram pairs and building hero graph...")
@@ -108,12 +119,11 @@ def train_embeddings(
     final_embeddings = dgi.get_embeddings(hero_graph, device)
     logger.info("Extracted DGI embeddings: shape %s", tuple(final_embeddings.shape))
 
-    # Pad embeddings with a zero vector at index 0 (heroes are 1-indexed)
-    zero_pad = torch.zeros(1, final_embeddings.shape[1], dtype=final_embeddings.dtype)
-    padded_embeddings = torch.cat([zero_pad, final_embeddings], dim=0)
+    # Zero out row 0 to ensure index 0 is a clean padding vector (heroes are 1-indexed)
+    final_embeddings[0] = 0.0
 
     # Save final embeddings
-    torch.save(padded_embeddings.cpu(), output_path)
+    torch.save(final_embeddings.cpu(), output_path)
     logger.info("Saved final embeddings to %s", output_path)
 
     return output_path
@@ -143,18 +153,27 @@ def load_frozen_embeddings(
     if not isinstance(weights, torch.Tensor):
         raise ValueError(f"Expected a tensor of embeddings, got {type(weights)}")
 
-    expected_shape = (num_heroes + 1, embed_dim)
-    if weights.shape != torch.Size(expected_shape):
+    actual_num_heroes = weights.shape[0] - 1
+    if weights.shape[1] != embed_dim:
         raise ValueError(
-            f"Embedding shape mismatch: expected {expected_shape}, "
-            f"got {tuple(weights.shape)}. "
-            f"Check embed_dim={embed_dim} and num_heroes={num_heroes}."
+            f"Embedding shape mismatch: expected second dimension to be {embed_dim}, "
+            f"got {weights.shape[1]}. "
+            f"Check embed_dim={embed_dim}."
+        )
+
+    if actual_num_heroes != num_heroes:
+        logger.warning(
+            "Embedding shape mismatch: expected %d heroes, but the saved weights "
+            "contain embeddings for %d heroes. Adapting dynamically to %d heroes.",
+            num_heroes,
+            actual_num_heroes,
+            actual_num_heroes,
         )
 
     embedding = nn.Embedding.from_pretrained(weights, freeze=True)
     logger.info(
         "Loaded frozen embedding: %d heroes, %d dim",
-        num_heroes,
+        actual_num_heroes,
         embed_dim,
     )
     return embedding

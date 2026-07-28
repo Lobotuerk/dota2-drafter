@@ -126,6 +126,32 @@ def load_data(data_dir: str):
     return x_drafts, y_labels, radiant_players, dire_players
 
 
+def load_h_gnn(rgcn_path: Path, max_hero_idx: int, d_model: int, data_dir: Path) -> torch.Tensor:
+    """Load RGCN embeddings, dynamically extracting them if a state_dict is provided."""
+    h_gnn_loaded = torch.load(rgcn_path, weights_only=True)
+    if isinstance(h_gnn_loaded, dict) and any(k.startswith("rgcn_layers.") for k in h_gnn_loaded):
+        from dota2drafter.embeddings.rgcn import HeroRGCN
+        from dota2drafter.embeddings.data_extractor import DataExtractor
+        
+        frozen_path = Path("models/skip_gram_dgi.pt")
+        frozen_weights = torch.load(frozen_path, weights_only=True)
+        
+        rgcn_model = HeroRGCN.load(
+            path=rgcn_path,
+            frozen_embeddings=frozen_weights,
+            d_model=d_model,
+        )
+        
+        extractor = DataExtractor(num_heroes=max_hero_idx)
+        batches = extractor.load_batches(data_dir)
+        hero_graph = extractor.build_hero_graph(batches)
+        
+        h_gnn = rgcn_model.get_embeddings(hero_graph)
+        console.print(f"[bold green]Extracted raw H_GNN embeddings of shape {tuple(h_gnn.shape)} from loaded model state_dict.[/bold green]")
+        return h_gnn
+    return h_gnn_loaded
+
+
 def main() -> None:
     args = parse_args()
 
@@ -148,8 +174,14 @@ def main() -> None:
         console.print("[bold blue]Loading data...[/bold blue]")
         x_drafts, y_labels, radiant_players, dire_players = load_data(args.data_dir)
 
+        # Dynamically compute max hero index from loaded data
+        max_hero_idx = args.num_heroes
+        for draft in x_drafts:
+            max_hero_idx = max(max_hero_idx, int(draft[:, 2].max().item()))
+        console.print(f"[bold green]Detected actual maximum hero index in dataset: {max_hero_idx}[/bold green]")
+
         console.print("[bold blue]Loading RGCN embeddings...[/bold blue]")
-        h_gnn = torch.load(args.rgcn_path, weights_only=True)
+        h_gnn = load_h_gnn(Path(args.rgcn_path), max_hero_idx, args.d_model, Path(args.data_dir))
 
         console.print("[bold blue]Loading comfort map...[/bold blue]")
         player_comfort_map = torch.load(args.comfort_path, weights_only=True)
@@ -161,7 +193,7 @@ def main() -> None:
             num_layers=args.num_layers,
             dim_feedforward=args.dim_feedforward,
             dropout=args.dropout,
-            num_heroes=args.num_heroes,
+            num_heroes=max_hero_idx,
             player_input_dim=10,
             h_gnn=h_gnn,
         ).to(device)
@@ -209,7 +241,13 @@ def main() -> None:
         console.print("[bold blue]Loading data for prediction...[/bold blue]")
         x_drafts, y_labels, radiant_players, dire_players = load_data(args.data_dir)
 
-        h_gnn = torch.load(args.rgcn_path, weights_only=True)
+        # Dynamically compute max hero index from loaded data
+        max_hero_idx = args.num_heroes
+        for draft in x_drafts:
+            max_hero_idx = max(max_hero_idx, int(draft[:, 2].max().item()))
+        console.print(f"[bold green]Detected actual maximum hero index in dataset: {max_hero_idx}[/bold green]")
+
+        h_gnn = load_h_gnn(Path(args.rgcn_path), max_hero_idx, args.d_model, Path(args.data_dir))
         player_comfort_map = torch.load(args.comfort_path, weights_only=True)
 
         device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -219,12 +257,13 @@ def main() -> None:
             num_layers=args.num_layers,
             dim_feedforward=args.dim_feedforward,
             dropout=args.dropout,
-            num_heroes=args.num_heroes,
+            num_heroes=max_hero_idx,
             player_input_dim=10,
             h_gnn=h_gnn,
         ).to(device)
 
-        trainer_instance = TransformerTrainer(model)
+        config = TrainingConfig(device=str(device))
+        trainer_instance = TransformerTrainer(model, config)
         trainer_instance.load_checkpoint(best_checkpoint)
 
         console.print(f"[bold blue]Running prediction on {len(x_drafts)} matches...[/bold blue]")
@@ -237,8 +276,8 @@ def main() -> None:
                 if account_id in player_comfort_map:
                     comfort_rows.append(player_comfort_map[account_id])
                 else:
-                    comfort_rows.append(torch.zeros(10, device=device))
-            player_comfort = torch.stack(comfort_rows).unsqueeze(0)
+                    comfort_rows.append(torch.zeros(10))
+            player_comfort = torch.stack(comfort_rows).unsqueeze(0).to(device)
 
             prob = model.predict_proba(x_draft, player_comfort)
             console.print(f"  Match {i}: win probability = {prob.item():.4f}")

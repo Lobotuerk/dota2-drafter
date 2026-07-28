@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 
 
 @dataclass
@@ -105,6 +106,7 @@ def _load_state(data: dict[str, Any], config: PipelineConfig) -> StateConfig:
 
 def load_config(path: str | Path = "config.yaml") -> PipelineConfig:
     """Load pipeline configuration from a YAML file."""
+    load_dotenv()
     config_path = Path(path)
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")

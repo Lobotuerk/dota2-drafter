@@ -132,7 +132,7 @@ def load_data(data_dir: str):
     return x_drafts, y_labels, radiant_players, dire_players
 
 
- def load_h_gnn(
+def load_h_gnn(
         rgcn_path: Path,
         frozen_embeddings_path: Path,
         max_hero_idx: int,

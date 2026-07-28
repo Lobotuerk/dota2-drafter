@@ -102,7 +102,7 @@ async def run_pipeline(config: PipelineConfig) -> None:
     hero_indexer = HeroIndexer()
     validator = DraftValidator()
     transformer = TensorTransformer(hero_indexer, validator)
-    dataset_builder = DatasetBuilder(config.output, state_db)
+    dataset_builder = DatasetBuilder(config.output)
 
     # Step 1: Hero mapping
     console.print("\n[bold yellow]Step 1/5:[/bold yellow] Fetching hero roster...")

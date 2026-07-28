@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, cast
 
 import aiohttp
@@ -179,7 +180,6 @@ class StratzClient:
         leagues_data = data.get("data", {}).get("leagues", [])
         
         mapped = []
-        import time
         now = int(time.time())
         two_weeks_ago = now - 14 * 24 * 3600
         for league in leagues_data:

@@ -1,7 +1,7 @@
-import pytest
 import torch
-from dota2drafter.processor.hero_indexer import HeroIndexer
+
 from dota2drafter.processor.draft_validator import DraftValidator
+from dota2drafter.processor.hero_indexer import HeroIndexer
 from dota2drafter.processor.tensor_transformer import TensorTransformer
 
 
@@ -49,9 +49,9 @@ def test_tensor_transformer_stratz():
     assert processed.x_tensor[10, 3].item() == 10.0
     assert processed.x_tensor[23, 3].item() == 23.0
 
-    # Player fields should be empty lists when no player data in payload
-    assert processed.radiant_players == []
-    assert processed.dire_players == []
+    # Player fields should be zero-padded lists when no player data in payload
+    assert processed.radiant_players == [0, 0, 0, 0, 0]
+    assert processed.dire_players == [0, 0, 0, 0, 0]
 
 
 def test_tensor_transformer_opendota():

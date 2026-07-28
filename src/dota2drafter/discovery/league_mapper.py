@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Any
 
+from dota2drafter.api.opendota_client import OpenDotaClient
 from dota2drafter.api.stratz_client import StratzClient
 from dota2drafter.config import ConcurrencyConfig, PipelineConfig
 from dota2drafter.state import StateDatabase
@@ -31,6 +33,8 @@ LIQUIPEDIA_TIER_1_NAMES = [
     "WePlay! Tournaments",
     "WTA Esports Games",
     "DPC League",
+    "Esports World Cup",
+    "EWC",
 ]
 
 LIQUIPEDIA_TIER_2_NAMES = [
@@ -43,6 +47,8 @@ LIQUIPEDIA_TIER_2_NAMES = [
     "SberLeague",
     "FALLFALL",
     "DPC Tournament",
+    "European Pro League",
+    "EPL",
 ]
 
 
@@ -52,11 +58,13 @@ class LeagueMapper:
     def __init__(
         self,
         stratz_client: StratzClient,
+        opendota_client: OpenDotaClient,
         state_db: StateDatabase,
         config: PipelineConfig,
         concurrency: ConcurrencyConfig,
     ) -> None:
         self._stratz = stratz_client
+        self._opendota = opendota_client
         self._state_db = state_db
         self._config = config
         self._semaphore = asyncio.Semaphore(concurrency.max_connections_per_host)
@@ -73,33 +81,89 @@ class LeagueMapper:
         return False
 
     async def discover_leagues(self) -> list[dict[str, Any]]:
-        """Discover all tier 1 and 2 leagues with matches on or after cutoff_date."""
+        """Discover all tier 1 and 2 leagues with matches on or after cutoff_date using OpenDota exclusively."""
         logger.info(
             "Discovering tier %s leagues with cutoff_date %s",
             self._config.tiers,
             self._config.cutoff_date,
         )
 
-        leagues = await self._stratz.fetch_leagues(self._config.tiers, self._config.cutoff_date)
         matched = []
 
-        for league in leagues:
-            league_id = league.get("id", "")
-            league_name = league.get("name", "")
-            league_tier = league.get("tier", 0)
+        # Discover from OpenDota (exclusively)
+        logger.info("Discovering leagues from OpenDota pro matches...")
+        opendota_leagues = {}
+        try:
+            raw_leagues = await self._opendota.fetch_leagues()
+            for l in raw_leagues:
+                l_id = str(l.get("leagueid", ""))
+                if l_id:
+                    opendota_leagues[l_id] = l.get("tier")
+        except Exception as e:
+            logger.warning("Failed to fetch global leagues from OpenDota: %s", e)
 
-            if not league_id:
+        opendota_discovered = {}
+        less_than_match_id = None
+        cutoff_timestamp = int(datetime.fromisoformat(self._config.cutoff_date).timestamp())
+
+        try:
+            while True:
+                matches = await self._opendota.fetch_recent_pro_matches(less_than_match_id)
+                if not matches:
+                    break
+
+                last_match_time = None
+                for m in matches:
+                    start_time = m.get("start_time")
+                    if start_time is not None:
+                        last_match_time = start_time
+                        if start_time >= cutoff_timestamp:
+                            league_id = str(m.get("leagueid", ""))
+                            league_name = m.get("league_name") or ""
+                            if league_id:
+                                opendota_discovered[league_id] = league_name
+
+                if last_match_time is None or last_match_time < cutoff_timestamp:
+                    break
+
+                less_than_match_id = matches[-1].get("match_id")
+                await asyncio.sleep(0.5)  # rate limiting polite sleep
+        except Exception as e:
+            logger.warning("Failed to discover leagues from OpenDota pro matches: %s", e)
+
+        opendota_tier_map = {
+            "premium": 1,
+            "professional": 2,
+            "amateur": 3,
+        }
+
+        for league_id, league_name in opendota_discovered.items():
+            # Check if already discovered via STRATZ
+            if any(str(l.get("id")) == league_id for l in matched):
                 continue
 
-            # STRATZ already filters by tier, but also check Liquipedia names
-            is_match = league_tier in self._config.tiers or self._is_tier_match(
-                league_name, self._config.tiers
-            )
+            # Look up tier, defaulting to professional (2)
+            od_tier_str = opendota_leagues.get(league_id, "professional")
+            league_tier = opendota_tier_map.get(od_tier_str, 2)
 
-            if is_match:
+            # Name-based overrides to correct tier misclassifications from the APIs
+            name_lower = league_name.lower()
+            is_tier1 = any(t1.lower() in name_lower for t1 in LIQUIPEDIA_TIER_1_NAMES)
+            is_tier2 = any(t2.lower() in name_lower for t2 in LIQUIPEDIA_TIER_2_NAMES)
+            
+            if is_tier1:
+                league_tier = 1
+            elif is_tier2:
+                league_tier = 2
+
+            if league_tier in self._config.tiers:
                 self._state_db.insert_league(league_id, league_name, league_tier)
-                matched.append(league)
-                logger.debug("Found league: %s (ID: %s, tier: %s)", league_name, league_id, league_tier)
+                matched.append({
+                    "id": int(league_id),
+                    "name": league_name,
+                    "tier": league_tier
+                })
+                logger.info("Found league from OpenDota: %s (ID: %s, tier: %s)", league_name, league_id, league_tier)
 
         logger.info("Discovered %d tier 1/2 leagues with cutoff_date %s", len(matched), self._config.cutoff_date)
         return matched

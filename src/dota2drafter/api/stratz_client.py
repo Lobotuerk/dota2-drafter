@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, cast
 
 import aiohttp
@@ -11,7 +12,7 @@ from tenacity import (
     retry,
     retry_if_exception_type,
     stop_after_attempt,
-    wait_exponential,
+    wait_random_exponential,
 )
 
 from dota2drafter.config import StratzConfig
@@ -90,15 +91,38 @@ class StratzClient:
             "Content-Type": "application/json",
             "User-Agent": "STRATZ_API",
         }
+        self._session: aiohttp.ClientSession | None = None
+
+    async def __aenter__(self) -> "StratzClient":
+        await self._ensure_session()
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.close()
+
+    async def _ensure_session(self) -> None:
+        if self._session is None:
+            self._session = aiohttp.ClientSession(
+                headers=self._headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            )
+
+    async def close(self) -> None:
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
 
     @retry(
         stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
+        wait=wait_random_exponential(multiplier=1, max=30),
         retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError)),
         reraise=True,
     )
     async def _graphql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
         """Execute a GraphQL query with retry logic."""
+        await self._ensure_session()
+        assert self._session is not None
+
         payload: dict[str, Any] = {"query": query}
         if variables:
             payload["variables"] = variables
@@ -110,35 +134,28 @@ class StratzClient:
             base_url = base_url[:-4]
         url = f"{base_url.rstrip('/')}/graphql"
 
-        async with aiohttp.ClientSession(
-            headers=self._headers,
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as session:
-            async with session.post(
-                url,
-                json=payload,
-            ) as resp:
-                if resp.status == 429:
-                    logger.warning("Rate limited by STRATZ API, waiting...")
-                    await asyncio.sleep(self._config.retry_delay)
-                    raise aiohttp.ClientResponseError(
-                        request_info=resp.request_info,
-                        history=resp.history,
-                        status=429,
-                    )
-                if resp.status == 400:
-                    try:
-                        data = await resp.json()
-                        if "errors" in data:
-                            errors = data["errors"]
-                            logger.error("GraphQL 400 errors: %s", errors)
-                            raise RuntimeError(f"GraphQL 400 errors: {errors}")
-                    except Exception as json_err:
-                        if isinstance(json_err, RuntimeError):
-                            raise
-                        logger.error("Failed to parse 400 error body: %s", json_err)
-                resp.raise_for_status()
-                data = await resp.json()
+        async with self._session.post(url, json=payload) as resp:
+            if resp.status == 429:
+                logger.warning("Rate limited by STRATZ API, waiting...")
+                await asyncio.sleep(self._config.retry_delay)
+                raise aiohttp.ClientResponseError(
+                    request_info=resp.request_info,
+                    history=resp.history,
+                    status=429,
+                )
+            if resp.status == 400:
+                try:
+                    data = await resp.json()
+                    if "errors" in data:
+                        errors = data["errors"]
+                        logger.error("GraphQL 400 errors: %s", errors)
+                        raise RuntimeError(f"GraphQL 400 errors: {errors}")
+                except Exception as json_err:
+                    if isinstance(json_err, RuntimeError):
+                        raise
+                    logger.error("Failed to parse 400 error body: %s", json_err)
+            resp.raise_for_status()
+            data = await resp.json()
 
         if "errors" in data:
             errors = data["errors"]
@@ -171,15 +188,16 @@ class StratzClient:
         for t in tiers:
             stratz_tiers.extend(int_tier_to_stratz.get(t, []))
             
-        request_params = {"take": 1000}
+        request_params: dict[str, Any] = {"take": 1000}
         if stratz_tiers:
             request_params["tiers"] = stratz_tiers
+        if patch:
+            request_params["patchIds"] = [patch]
             
         data = await self._graphql(LEAGUES_QUERY, {"request": request_params})
         leagues_data = data.get("data", {}).get("leagues", [])
         
         mapped = []
-        import time
         now = int(time.time())
         two_weeks_ago = now - 14 * 24 * 3600
         for league in leagues_data:
@@ -199,11 +217,13 @@ class StratzClient:
     ) -> list[dict[str, Any]]:
         """Fetch match IDs for a specific league and patch."""
         league_id_int = int(league_id)
-        request_params = {
+        request_params: dict[str, Any] = {
             "take": min(limit, 100),
             "skip": 0,
-            "isParsed": True
+            "isParsed": True,
         }
+        if patch:
+            request_params["patchIds"] = [patch]
         data = await self._graphql(
             MATCHES_BY_LEAGUE_QUERY,
             {"leagueId": league_id_int, "request": request_params},

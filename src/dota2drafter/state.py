@@ -87,7 +87,7 @@ class StateDatabase:
         """
         with self._connection() as conn:
             conn.executemany(
-                """INSERT OR IGNORE INTO matches (match_id, status, league_id)
+                """INSERT OR REPLACE INTO matches (match_id, status, league_id)
                    VALUES (?, ?, ?)""",
                 matches,
             )

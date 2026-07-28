@@ -41,7 +41,8 @@ class DataExtractor:
         self._num_heroes = num_heroes
         self._negative_samples = negative_samples
 
-    def load_batches(self, data_dir: str | Path) -> list[dict[str, Any]]:
+    @staticmethod
+    def load_batches(data_dir: str | Path) -> list[dict[str, Any]]:
         """Load all .pt batch files from the data directory.
 
         Returns a list of dicts with keys 'x', 'y', 'match_ids'.

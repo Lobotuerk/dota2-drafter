@@ -51,10 +51,9 @@ def train_embeddings(
 
     # Step 1: Extract data
     logger.info("Step 1: Extracting data from %s", data_dir)
-    temp_extractor = DataExtractor(num_heroes=124)  # Temporary to load batches
-    batches = temp_extractor.load_batches(data_dir)
+    batches = DataExtractor.load_batches(data_dir)
 
-    max_hero_idx = 124
+    max_hero_idx = 0
     for batch in batches:
         x_tensors = batch["x"]
         if x_tensors.dim() == 3:
@@ -62,6 +61,7 @@ def train_embeddings(
         else:
             max_hero_idx = max(max_hero_idx, int(x_tensors[:, 2].max().item()))
 
+    max_hero_idx = max(max_hero_idx, 124)
     logger.info("Detected actual maximum hero index in dataset: %d", max_hero_idx)
     extractor = DataExtractor(num_heroes=max_hero_idx)
 

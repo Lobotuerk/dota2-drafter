@@ -8,12 +8,17 @@ principal variation extraction.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import torch
 
-from dota2drafter.search.mcts_engine import MCTSConfig, MCTSEngine, get_principal_variation, get_recommendations
+from dota2drafter.search.mcts_engine import (
+    MCTSConfig,
+    MCTSEngine,
+    get_principal_variation,
+    get_recommendations,
+)
 from dota2drafter.search.state import DraftMove, DraftState
 
 logger = logging.getLogger(__name__)

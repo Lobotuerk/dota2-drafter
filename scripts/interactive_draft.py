@@ -33,7 +33,6 @@ import torch
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 
 from dota2drafter.models.match_network import MatchNetwork
 from dota2drafter.processor.hero_indexer import HeroIndexer
@@ -121,7 +120,7 @@ def load_hero_indexer(data_dir: str) -> HeroIndexer:
     indexer_path = Path(data_dir) / "hero_indexer.json"
     if indexer_path.exists():
         import json
-        with open(indexer_path, "r") as f:
+        with open(indexer_path) as f:
             hero_data = json.load(f)
         heroes = [{"id": api_id, "playable": True} for api_id in hero_data.keys()]
         indexer.build_mapping(heroes)
@@ -143,7 +142,7 @@ def load_hero_names(path: str) -> dict[int, str]:
     if not mapping_path.exists():
         return {}
 
-    with open(mapping_path, "r") as f:
+    with open(mapping_path) as f:
         raw = json.load(f)
 
     hero_names: dict[int, str] = {}
@@ -163,8 +162,8 @@ def load_h_gnn(
     """Load RGCN embeddings, dynamically extracting them if a state_dict is provided."""
     h_gnn_loaded = torch.load(rgcn_path, weights_only=True)
     if isinstance(h_gnn_loaded, dict) and any(k.startswith("rgcn_layers.") for k in h_gnn_loaded):
-        from dota2drafter.embeddings.rgcn import HeroRGCN
         from dota2drafter.embeddings.data_extractor import DataExtractor
+        from dota2drafter.embeddings.rgcn import HeroRGCN
 
         frozen_weights = torch.load(frozen_embeddings_path, weights_only=True)
 
@@ -486,7 +485,7 @@ def main() -> None:
                 # Ask user to confirm or pick from recommendations
                 console.print()
                 choice = console.input(
-                    f"[bold]Accept top recommendation? [y/n]: [/bold]"
+                    "[bold]Accept top recommendation? [y/n]: [/bold]"
                 ).strip().lower()
 
                 if choice != "y":

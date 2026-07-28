@@ -112,7 +112,10 @@ class PlayerComfortDataset(Dataset):
 
         # Radiant players (first 5)
         for account_id in self.radiant_players[idx]:
-            if account_id in self.player_comfort_map:
+            if account_id == 0:
+                # Anonymous account: secure zero vector
+                comfort_rows.append(torch.zeros(self.player_input_dim))
+            elif account_id in self.player_comfort_map:
                 comfort_rows.append(self.player_comfort_map[account_id])
             else:
                 # Default: zero vector if no comfort data available
@@ -120,7 +123,10 @@ class PlayerComfortDataset(Dataset):
 
         # Dire players (next 5)
         for account_id in self.dire_players[idx]:
-            if account_id in self.player_comfort_map:
+            if account_id == 0:
+                # Anonymous account: secure zero vector
+                comfort_rows.append(torch.zeros(self.player_input_dim))
+            elif account_id in self.player_comfort_map:
                 comfort_rows.append(self.player_comfort_map[account_id])
             else:
                 comfort_rows.append(torch.zeros(self.player_input_dim))
@@ -279,6 +285,12 @@ class TransformerTrainer:
         train_indices = indices[val_size:]
         val_indices = indices[:val_size]
 
+        # Determine player_input_dim from the first comfort tensor in the map
+        player_input_dim = 10  # default fallback
+        if player_comfort_map:
+            first_tensor = next(iter(player_comfort_map.values()))
+            player_input_dim = first_tensor.size(0)
+
         # Create datasets
         train_dataset = PlayerComfortDataset(
             x_drafts=[x_drafts[i] for i in train_indices],
@@ -286,6 +298,7 @@ class TransformerTrainer:
             radiant_players=[radiant_players[i] for i in train_indices],
             dire_players=[dire_players[i] for i in train_indices],
             player_comfort_map=player_comfort_map,
+            player_input_dim=player_input_dim,
         )
 
         val_dataset = PlayerComfortDataset(
@@ -294,6 +307,7 @@ class TransformerTrainer:
             radiant_players=[radiant_players[i] for i in val_indices],
             dire_players=[dire_players[i] for i in val_indices],
             player_comfort_map=player_comfort_map,
+            player_input_dim=player_input_dim,
         )
 
         train_loader = DataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True)

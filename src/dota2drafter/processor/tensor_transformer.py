@@ -23,6 +23,8 @@ class ProcessedMatch:
     match_id: str
     radiant_players: list[int] = field(default_factory=list)
     dire_players: list[int] = field(default_factory=list)
+    radiant_heroes: list[int] = field(default_factory=list)
+    dire_heroes: list[int] = field(default_factory=list)
     player_comfort: torch.Tensor | None = None  # (B, 10, C) - optional comfort tensor
 
 
@@ -48,9 +50,9 @@ class TensorTransformer:
         draft = match_data.get("draft", {})
         picks_bans = draft.get("picksBans", [])
 
-        # Extract player account IDs from STRATZ match data
-        radiant_players = self._extract_stratz_players(match_data, team=0)
-        dire_players = self._extract_stratz_players(match_data, team=1)
+        # Extract player account IDs and hero IDs from STRATZ match data
+        radiant_players, radiant_heroes = self._extract_stratz_players(match_data, team=0)
+        dire_players, dire_heroes = self._extract_stratz_players(match_data, team=1)
 
         steps: list[list[float]] = []
         for step_idx, pb in enumerate(picks_bans):
@@ -76,6 +78,8 @@ class TensorTransformer:
             match_id=match_id,
             radiant_players=radiant_players,
             dire_players=dire_players,
+            radiant_heroes=radiant_heroes,
+            dire_heroes=dire_heroes,
         )
 
     def transform_opendota(self, match_data: dict[str, Any]) -> ProcessedMatch | None:
@@ -92,9 +96,9 @@ class TensorTransformer:
         radiant_win = match_data.get("radiant_win", False)
         picks_bans = match_data.get("picks_bans", [])
 
-        # Extract player account IDs from OpenDota match data
-        radiant_players = self._extract_opendota_players(match_data, team=0)
-        dire_players = self._extract_opendota_players(match_data, team=1)
+        # Extract player account IDs and hero IDs from OpenDota match data
+        radiant_players, radiant_heroes = self._extract_opendota_players(match_data, team=0)
+        dire_players, dire_heroes = self._extract_opendota_players(match_data, team=1)
 
         steps: list[list[float]] = []
         for step_idx, pb in enumerate(picks_bans):
@@ -120,6 +124,8 @@ class TensorTransformer:
             match_id=match_id,
             radiant_players=radiant_players,
             dire_players=dire_players,
+            radiant_heroes=radiant_heroes,
+            dire_heroes=dire_heroes,
         )
 
     def transform(self, match_data: dict[str, Any], source: str = "stratz") -> ProcessedMatch | None:
@@ -128,42 +134,54 @@ class TensorTransformer:
             return self.transform_stratz(match_data)
         return self.transform_opendota(match_data)
 
-    def _extract_stratz_players(self, match_data: dict[str, Any], team: int) -> list[int]:
-        """Extract account IDs for a team from STRATZ match data.
+    def _extract_stratz_players(self, match_data: dict[str, Any], team: int) -> tuple[list[int], list[int]]:
+        """Extract account IDs and hero IDs for a team from STRATZ match data.
 
         Args:
             match_data: STRATZ match payload.
             team: Team identifier (0 = Radiant, 1 = Dire).
 
         Returns:
-            List of account IDs for the specified team.
+            Tuple of (account_ids, hero_ids) for the specified team.
         """
         players_key = "players"
         players = match_data.get(players_key, [])
 
         account_ids: list[int] = []
+        hero_ids: list[int] = []
         for player in players:
             player_team = player.get("team", 0)
             if player_team == team + 1:  # STRATZ uses 1-based team (1=Radiant, 2=Dire)
                 account_id = player.get("accountid")
-                if account_id is not None:
-                    account_ids.append(int(account_id))
+                hero_id = player.get("hero_id")
+                account_ids.append(int(account_id) if account_id is not None else 0)
+                if hero_id is not None:
+                    mapped = self._hero_indexer.map_hero_id(int(hero_id))
+                    hero_ids.append(mapped if mapped is not None else -1)
+                else:
+                    hero_ids.append(-1)
 
-        return account_ids
+        # Zero-pad to exactly 5 elements
+        while len(account_ids) < 5:
+            account_ids.append(0)
+            hero_ids.append(-1)
 
-    def _extract_opendota_players(self, match_data: dict[str, Any], team: int) -> list[int]:
-        """Extract account IDs for a team from OpenDota match data.
+        return account_ids, hero_ids
+
+    def _extract_opendota_players(self, match_data: dict[str, Any], team: int) -> tuple[list[int], list[int]]:
+        """Extract account IDs and hero IDs for a team from OpenDota match data.
 
         Args:
             match_data: OpenDota match payload.
             team: Team identifier (0 = Radiant, 1 = Dire).
 
         Returns:
-            List of account IDs for the specified team.
+            Tuple of (account_ids, hero_ids) for the specified team.
         """
         players = match_data.get("players", [])
 
         account_ids: list[int] = []
+        hero_ids: list[int] = []
         for player in players:
             player_team = player.get("player_slot", 0)
             is_radiant = player_team < 128
@@ -171,7 +189,17 @@ class TensorTransformer:
 
             if player_team_idx == team:
                 account_id = player.get("account_id")
-                if account_id is not None:
-                    account_ids.append(int(account_id))
+                hero_id = player.get("hero_id")
+                account_ids.append(int(account_id) if account_id is not None else 0)
+                if hero_id is not None:
+                    mapped = self._hero_indexer.map_hero_id(int(hero_id))
+                    hero_ids.append(mapped if mapped is not None else -1)
+                else:
+                    hero_ids.append(-1)
 
-        return account_ids
+        # Zero-pad to exactly 5 elements
+        while len(account_ids) < 5:
+            account_ids.append(0)
+            hero_ids.append(-1)
+
+        return account_ids, hero_ids

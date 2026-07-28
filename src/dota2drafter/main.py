@@ -37,7 +37,7 @@ async def _process_match(
     state_db: StateDatabase,
     dataset_builder: DatasetBuilder,
 ) -> str:
-    """Fetch and process a single match."""
+    """Fetch and process a single match using STRATZ first, with OpenDota fallback."""
     try:
         match_data = await stratz_client.fetch_match_details(match_id)
 
@@ -46,7 +46,7 @@ async def _process_match(
             match_data = await opendota_client.fetch_match(match_id_int)
 
         if match_data is None:
-            state_db.mark_failed(match_id, "No data from either API")
+            state_db.mark_failed(match_id, "No data from either STRATZ or OpenDota API")
             return "failed"
 
         source = "stratz" if match_data.get("draft") else "opendota"
@@ -59,6 +59,7 @@ async def _process_match(
         radiant_win = match_data.get("radiantWin")
         if radiant_win is None:
             radiant_win = match_data.get("radiant_win")
+
         state_db.mark_completed(match_id, radiant_win)
         dataset_builder.add(processed)
 
@@ -98,92 +99,111 @@ async def run_pipeline(config: PipelineConfig) -> None:
 
     stratz_client = StratzClient(config.stratz)
     opendota_client = OpenDotaClient(config.opendota)
-    state_db = StateDatabase(config.state.database_path)
-    hero_indexer = HeroIndexer()
-    validator = DraftValidator()
-    transformer = TensorTransformer(hero_indexer, validator)
-    dataset_builder = DatasetBuilder(config.output)
-
-    # Step 1: Hero mapping
-    console.print("\n[bold yellow]Step 1/5:[/bold yellow] Fetching hero roster...")
     try:
-        heroes = await stratz_client.fetch_heroes()
+        state_db = StateDatabase(config.state.database_path)
+        hero_indexer = HeroIndexer()
+        validator = DraftValidator()
+        transformer = TensorTransformer(hero_indexer, validator)
+        dataset_builder = DatasetBuilder(config.output)
+
+        # Step 1: Hero mapping
+        console.print("\n[bold yellow]Step 1/5:[/bold yellow] Fetching hero roster...")
+        heroes = []
+        try:
+            raw_heroes = await opendota_client.fetch_heroes()
+            heroes = []
+            for h in raw_heroes:
+                heroes.append({
+                    "id": h.get("id"),
+                    "name": h.get("name"),
+                    "playable": True  # All heroes returned by OpenDota are playable
+                })
+        except Exception as e:
+            logger.warning("Failed to fetch heroes from OpenDota (%s). Trying STRATZ...", e)
+
         if not heroes:
-            logger.warning("No heroes fetched from STRATZ, falling back to OpenDota...")
-            heroes = await opendota_client.fetch_heroes()
-        hero_indexer.build_mapping(heroes)
-        console.print(f"  [green]OK[/green] Hero mapping built: K={hero_indexer.get_contiguous_count()}")
-    except Exception as e:
-        logger.error("Failed to fetch heroes: %s", e)
-        raise
+            try:
+                heroes = await stratz_client.fetch_heroes()
+            except Exception as e:
+                logger.error("Failed to fetch heroes from fallback STRATZ API: %s", e)
+                raise RuntimeError("Could not retrieve hero roster from either OpenDota or STRATZ APIs.") from e
 
-    # Step 2: League discovery
-    console.print("\n[bold yellow]Step 2/5:[/bold yellow] Discovering leagues...")
-    league_mapper = LeagueMapper(stratz_client, state_db, config, config.concurrency)
-    leagues = await league_mapper.discover_leagues()
-    console.print(f"  [green]OK[/green] Found {len(leagues)} tier 1/2 leagues")
+        try:
+            hero_indexer.build_mapping(heroes)
+            console.print(f"  [green]OK[/green] Hero mapping built: K={hero_indexer.get_contiguous_count()}")
+        except Exception as e:
+            logger.error("Failed to build hero mapping: %s", e)
+            raise
 
-    if not leagues:
-        console.print("\n[bold yellow]No leagues found for this cutoff_date. Exiting.[/bold yellow]")
-        return
+        # Step 2: League discovery
+        console.print("\n[bold yellow]Step 2/5:[/bold yellow] Discovering leagues...")
+        league_mapper = LeagueMapper(stratz_client, opendota_client, state_db, config, config.concurrency)
+        leagues = await league_mapper.discover_leagues()
+        console.print(f"  [green]OK[/green] Found {len(leagues)} tier 1/2 leagues")
 
-    # Step 3: Match discovery
-    console.print("\n[bold yellow]Step 3/5:[/bold yellow] Discovering matches...")
-    match_finder = MatchFinder(stratz_client, state_db, config, config.concurrency)
-    
-    # Filter out leagues that have already ended and already exist in our local database
-    ended_league_ids = state_db.get_ended_league_ids()
-    active_leagues = [l for l in leagues if l["id"] not in ended_league_ids]
-    console.print(f"  Querying {len(active_leagues)} active leagues (skipped {len(leagues) - len(active_leagues)} already ended leagues)")
-    
-    total_new = await match_finder.find_all_matches(active_leagues)
-    console.print(f"  [green]OK[/green] Registered {total_new} new matches")
+        if leagues:
+            # Step 3: Match discovery
+            console.print("\n[bold yellow]Step 3/5:[/bold yellow] Discovering matches...")
+            match_finder = MatchFinder(stratz_client, opendota_client, state_db, config, config.concurrency)
+            
+            # Filter out leagues that have already ended and already exist in our local database
+            ended_league_ids = state_db.get_ended_league_ids()
+            active_leagues = [l for l in leagues if l["id"] not in ended_league_ids]
+            console.print(f"  Querying {len(active_leagues)} active leagues (skipped {len(leagues) - len(active_leagues)} already ended leagues)")
+            
+            total_new = await match_finder.find_all_matches(active_leagues)
+            console.print(f"  [green]OK[/green] Registered {total_new} new matches")
+        else:
+            console.print("\n[bold yellow]No new leagues discovered. Skipping match discovery and proceeding to process existing pending matches.[/bold yellow]")
 
-    # Step 4 & 5: Fetch, process, and save
-    console.print("\n[bold yellow]Step 4/5:[/bold yellow] Processing matches...")
-    total_processed = 0
-    total_invalid = 0
-    total_failed = 0
-    batch_size = config.concurrency.max_workers
+        # Step 4 & 5: Fetch, process, and save
+        console.print("\n[bold yellow]Step 4/5:[/bold yellow] Processing matches...")
+        total_processed = 0
+        total_invalid = 0
+        total_failed = 0
+        batch_size = config.concurrency.max_workers
 
-    try:
-        while True:
-            pending = state_db.get_pending_matches(limit=batch_size)
-            if not pending:
-                break
+        try:
+            while True:
+                pending = state_db.get_pending_matches(limit=batch_size)
+                if not pending:
+                    break
 
-            tasks = [
-                _process_match(
-                    match_id, stratz_client, opendota_client,
-                    transformer, state_db, dataset_builder,
-                )
-                for match_id, league_id in pending
-            ]
+                tasks = [
+                    _process_match(
+                        match_id, stratz_client, opendota_client,
+                        transformer, state_db, dataset_builder,
+                    )
+                    for match_id, league_id in pending
+                ]
 
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+                results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            for result in results:
-                if isinstance(result, Exception):
-                    total_failed += 1
-                elif result == "invalid":
-                    total_invalid += 1
-                elif result == "processed":
-                    total_processed += 1
+                for result in results:
+                    if isinstance(result, Exception):
+                        total_failed += 1
+                    elif result == "invalid":
+                        total_invalid += 1
+                    elif result == "processed":
+                        total_processed += 1
 
-            console.print(f"  Progress: {total_processed} processed, {total_invalid} invalid, {total_failed} failed")
+                console.print(f"  Progress: {total_processed} processed, {total_invalid} invalid, {total_failed} failed")
+        finally:
+            dataset_builder.flush()
+
+        # Print summary
+        console.print("\n[bold blue]Pipeline Complete![/bold blue]")
+        stats = state_db.get_stats()
+        console.print(f"  Completed:  {stats.get('completed', 0)}")
+        console.print(f"  Invalid:    {stats.get('invalid', 0)}")
+        console.print(f"  Failed:     {stats.get('failed', 0)}")
+        console.print(f"  Pending:    {stats.get('pending', 0)}")
+        ds_stats = dataset_builder.get_stats()
+        console.print(f"  Batches:    {ds_stats['batches_saved']}")
+        console.print(f"  Output:     {ds_stats['output_dir']}")
+
     finally:
-        dataset_builder.flush()
-
-    # Print summary
-    console.print("\n[bold blue]Pipeline Complete![/bold blue]")
-    stats = state_db.get_stats()
-    console.print(f"  Completed:  {stats.get('completed', 0)}")
-    console.print(f"  Invalid:    {stats.get('invalid', 0)}")
-    console.print(f"  Failed:     {stats.get('failed', 0)}")
-    console.print(f"  Pending:    {stats.get('pending', 0)}")
-    ds_stats = dataset_builder.get_stats()
-    console.print(f"  Batches:    {ds_stats['batches_saved']}")
-    console.print(f"  Output:     {ds_stats['output_dir']}")
+        await stratz_client.close()
 
 
 

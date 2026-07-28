@@ -1,7 +1,10 @@
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from dota2drafter.config import PipelineConfig
+from dota2drafter.discovery.league_mapper import LeagueMapper
+from dota2drafter.discovery.match_finder import MatchFinder
 from dota2drafter.main import _process_match, run_pipeline
 
 
@@ -21,7 +24,6 @@ async def test_process_match_success():
         "draft": {"picksBans": []}
     }
     stratz_client.fetch_match_details.return_value = mock_stratz_match
-    stratz_client.fetch_match_details.return_value = mock_stratz_match
     
     # Setup transformer mock
     mock_processed = MagicMock()
@@ -39,6 +41,7 @@ async def test_process_match_success():
     
     assert result == "processed"
     stratz_client.fetch_match_details.assert_called_once_with("10001")
+    opendota_client.fetch_match.assert_not_called()
     transformer.transform.assert_called_once_with(mock_stratz_match, source="stratz")
     state_db.mark_completed.assert_called_once_with("10001", True)
     dataset_builder.add.assert_called_once_with(mock_processed)
@@ -109,5 +112,126 @@ async def test_process_match_validation_fail():
     )
     
     assert result == "invalid"
+    stratz_client.fetch_match_details.assert_called_once_with("10001")
+    opendota_client.fetch_match.assert_not_called()
     state_db.mark_invalid.assert_called_once_with("10001")
     dataset_builder.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch("dota2drafter.main.StratzClient")
+@patch("dota2drafter.main.OpenDotaClient")
+@patch("dota2drafter.main.StateDatabase")
+@patch("dota2drafter.main.LeagueMapper")
+@patch("dota2drafter.main.MatchFinder")
+@patch("dota2drafter.main.DatasetBuilder")
+async def test_run_pipeline_hero_fallback(
+    mock_dataset_builder_cls,
+    mock_match_finder_cls,
+    mock_league_mapper_cls,
+    mock_state_db_cls,
+    mock_opendota_client_cls,
+    mock_stratz_client_cls,
+):
+    # Setup mocks
+    mock_stratz_client = mock_stratz_client_cls.return_value
+    mock_stratz_client.fetch_heroes = AsyncMock(return_value=[
+        {"id": 1, "name": "npc_dota_hero_antimage", "playable": True},
+        {"id": 2, "name": "npc_dota_hero_axe", "playable": True},
+    ])
+    mock_stratz_client.close = AsyncMock()
+
+    mock_opendota_client = mock_opendota_client_cls.return_value
+    mock_opendota_client.fetch_heroes = AsyncMock(side_effect=Exception("OpenDota 429 Limit"))
+
+    mock_state_db = mock_state_db_cls.return_value
+    mock_state_db.get_ended_league_ids.return_value = set()
+    mock_state_db.get_pending_matches.return_value = []
+    mock_state_db.get_stats.return_value = {}
+
+    mock_league_mapper = mock_league_mapper_cls.return_value
+    mock_league_mapper.discover_leagues = AsyncMock(return_value=[
+        {"id": "18477", "name": "League 1", "tier": 1}
+    ])
+
+    mock_match_finder = mock_match_finder_cls.return_value
+    mock_match_finder.find_all_matches = AsyncMock(return_value=0)
+
+    mock_dataset_builder = mock_dataset_builder_cls.return_value
+    mock_dataset_builder.get_stats.return_value = {"batches_saved": 0, "output_dir": "./data"}
+
+    # Execute
+    config = PipelineConfig()
+    await run_pipeline(config)
+
+    # Verifications
+    mock_opendota_client.fetch_heroes.assert_called_once()
+    mock_stratz_client.fetch_heroes.assert_called_once()
+    mock_stratz_client.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_league_mapper_opendota_discovery():
+    # Setup mocks
+    stratz_client = AsyncMock()
+    stratz_client.fetch_leagues.return_value = [] # STRATZ returns empty
+
+    opendota_client = AsyncMock()
+    opendota_client.fetch_leagues.return_value = [
+        {"leagueid": 19944, "tier": "professional", "name": "EPL Masters 2026"}
+    ]
+
+    state_db = MagicMock()
+    config = PipelineConfig()
+    from dota2drafter.config import ConcurrencyConfig
+    concurrency = ConcurrencyConfig()
+
+    mapper = LeagueMapper(stratz_client, opendota_client, state_db, config, concurrency)
+    
+    # Run
+    call_count = 0
+    async def mock_pro_matches(less_than_id=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return [
+                {"leagueid": 19944, "league_name": "EPL Masters 2026", "start_time": int(datetime.fromisoformat(config.cutoff_date).timestamp()) + 3600, "match_id": 8906479441}
+            ]
+        return []
+    
+    opendota_client.fetch_recent_pro_matches.side_effect = mock_pro_matches
+
+    leagues = await mapper.discover_leagues()
+
+    assert len(leagues) == 1
+    assert leagues[0]["id"] == 19944
+    assert leagues[0]["name"] == "EPL Masters 2026"
+    assert leagues[0]["tier"] == 2
+    state_db.insert_league.assert_called_once_with("19944", "EPL Masters 2026", 2)
+
+
+@pytest.mark.asyncio
+async def test_match_finder_opendota_fallback():
+    # Setup mocks
+    stratz_client = AsyncMock()
+    stratz_client.fetch_matches_by_league.side_effect = Exception("STRATZ error")
+
+    opendota_client = AsyncMock()
+    opendota_client.fetch_league_matches.return_value = [
+        {"match_id": 8906479441, "start_time": int(datetime.fromisoformat("2026-06-04").timestamp()) + 3600}
+    ]
+
+    state_db = MagicMock()
+    config = PipelineConfig()
+    config.cutoff_date = "2026-06-04"
+    from dota2drafter.config import ConcurrencyConfig
+    concurrency = ConcurrencyConfig()
+
+    finder = MatchFinder(stratz_client, opendota_client, state_db, config, concurrency)
+
+    # Run
+    matches = await finder.find_matches_for_league("19944")
+
+    assert len(matches) == 1
+    assert matches[0] == ("8906479441", "pending", "19944")
+    state_db.upsert_matches.assert_called_once_with([("8906479441", "pending", "19944")])

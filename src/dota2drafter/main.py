@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
 
 from rich.console import Console
 from rich.logging import RichHandler
 
 from dota2drafter.api.opendota_client import OpenDotaClient
 from dota2drafter.api.stratz_client import StratzClient
-from dota2drafter.config import PipelineConfig, load_config
+from dota2drafter.config import PipelineConfig
 from dota2drafter.dataset.builder import DatasetBuilder
 from dota2drafter.discovery.league_mapper import LeagueMapper
 from dota2drafter.discovery.match_finder import MatchFinder
@@ -67,19 +66,19 @@ async def _process_match(
 
     except Exception as e:
         import aiohttp
-        
+
         # Check if the error is temporary (rate limit, timeout, server errors)
         is_temporary = False
-        
+
         # Check for aiohttp.ClientResponseError
         if isinstance(e, aiohttp.ClientResponseError):
             if e.status in (429, 500, 502, 503, 504, 520):
                 is_temporary = True
-                
+
         # Check for connection or timeout errors
         elif isinstance(e, (aiohttp.ClientConnectorError, asyncio.TimeoutError)):
             is_temporary = True
-            
+
         if is_temporary:
             logger.warning(
                 "Temporary error processing match %s (will remain pending): %s",
@@ -87,7 +86,7 @@ async def _process_match(
                 e,
             )
             return "failed"
-            
+
         # For actual permanent code/schema or hard errors, mark as failed in DB
         state_db.mark_failed(match_id, str(e))
         return "failed"
@@ -126,35 +125,52 @@ async def run_pipeline(config: PipelineConfig) -> None:
                 heroes = await stratz_client.fetch_heroes()
             except Exception as e:
                 logger.error("Failed to fetch heroes from fallback STRATZ API: %s", e)
-                raise RuntimeError("Could not retrieve hero roster from either OpenDota or STRATZ APIs.") from e
+                raise RuntimeError(
+                    "Could not retrieve hero roster from either OpenDota or STRATZ APIs."
+                ) from e
 
         try:
             hero_indexer.build_mapping(heroes)
-            console.print(f"  [green]OK[/green] Hero mapping built: K={hero_indexer.get_contiguous_count()}")
+            console.print(
+                f"  [green]OK[/green] Hero mapping built: K={hero_indexer.get_contiguous_count()}"
+            )
         except Exception as e:
             logger.error("Failed to build hero mapping: %s", e)
             raise
 
         # Step 2: League discovery
         console.print("\n[bold yellow]Step 2/5:[/bold yellow] Discovering leagues...")
-        league_mapper = LeagueMapper(stratz_client, opendota_client, state_db, config, config.concurrency)
+        league_mapper = LeagueMapper(
+            stratz_client, opendota_client, state_db, config, config.concurrency
+        )
         leagues = await league_mapper.discover_leagues()
         console.print(f"  [green]OK[/green] Found {len(leagues)} tier 1/2 leagues")
 
         if leagues:
             # Step 3: Match discovery
             console.print("\n[bold yellow]Step 3/5:[/bold yellow] Discovering matches...")
-            match_finder = MatchFinder(stratz_client, opendota_client, state_db, config, config.concurrency)
-            
+            match_finder = MatchFinder(
+                stratz_client, opendota_client, state_db, config, config.concurrency
+            )
+
             # Filter out leagues that have already ended and already exist in our local database
             ended_league_ids = state_db.get_ended_league_ids()
-            active_leagues = [l for l in leagues if l["id"] not in ended_league_ids]
-            console.print(f"  Querying {len(active_leagues)} active leagues (skipped {len(leagues) - len(active_leagues)} already ended leagues)")
-            
+            active_leagues = [
+                league for league in leagues if league["id"] not in ended_league_ids
+            ]
+            skipped_count = len(leagues) - len(active_leagues)
+            console.print(
+                f"  Querying {len(active_leagues)} active leagues "
+                f"(skipped {skipped_count} already ended leagues)"
+            )
+
             total_new = await match_finder.find_all_matches(active_leagues)
             console.print(f"  [green]OK[/green] Registered {total_new} new matches")
         else:
-            console.print("\n[bold yellow]No new leagues discovered. Skipping match discovery and proceeding to process existing pending matches.[/bold yellow]")
+            console.print(
+                "\n[bold yellow]No new leagues discovered. Skipping match discovery and "
+                "proceeding to process existing pending matches.[/bold yellow]"
+            )
 
         # Step 4 & 5: Fetch, process, and save
         console.print("\n[bold yellow]Step 4/5:[/bold yellow] Processing matches...")
@@ -187,7 +203,10 @@ async def run_pipeline(config: PipelineConfig) -> None:
                     elif result == "processed":
                         total_processed += 1
 
-                console.print(f"  Progress: {total_processed} processed, {total_invalid} invalid, {total_failed} failed")
+                console.print(
+                    f"  Progress: {total_processed} processed, "
+                    f"{total_invalid} invalid, {total_failed} failed"
+                )
         finally:
             dataset_builder.flush()
 

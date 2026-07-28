@@ -1,7 +1,7 @@
-import pytest
 import torch
-from dota2drafter.processor.hero_indexer import HeroIndexer
+
 from dota2drafter.processor.draft_validator import DraftValidator
+from dota2drafter.processor.hero_indexer import HeroIndexer
 from dota2drafter.processor.tensor_transformer import TensorTransformer
 
 

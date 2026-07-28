@@ -1,7 +1,8 @@
-import asyncio
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
+
 from dota2drafter.config import PipelineConfig
 from dota2drafter.discovery.league_mapper import LeagueMapper
 from dota2drafter.discovery.match_finder import MatchFinder
@@ -16,7 +17,7 @@ async def test_process_match_success():
     transformer = MagicMock()
     state_db = MagicMock()
     dataset_builder = MagicMock()
-    
+
     # Valid mock match details from STRATZ
     mock_stratz_match = {
         "id": "10001",
@@ -24,11 +25,11 @@ async def test_process_match_success():
         "draft": {"picksBans": []}
     }
     stratz_client.fetch_match_details.return_value = mock_stratz_match
-    
+
     # Setup transformer mock
     mock_processed = MagicMock()
     transformer.transform.return_value = mock_processed
-    
+
     # Run _process_match
     result = await _process_match(
         "10001",
@@ -38,7 +39,7 @@ async def test_process_match_success():
         state_db,
         dataset_builder
     )
-    
+
     assert result == "processed"
     stratz_client.fetch_match_details.assert_called_once_with("10001")
     opendota_client.fetch_match.assert_not_called()
@@ -55,7 +56,7 @@ async def test_process_match_opendota_fallback():
     transformer = MagicMock()
     state_db = MagicMock()
     dataset_builder = MagicMock()
-    
+
     # STRATZ returns None, fallback to OpenDota
     stratz_client.fetch_match_details.return_value = None
     mock_opendota_match = {
@@ -65,10 +66,10 @@ async def test_process_match_opendota_fallback():
         "picks_bans": []
     }
     opendota_client.fetch_match.return_value = mock_opendota_match
-    
+
     mock_processed = MagicMock()
     transformer.transform.return_value = mock_processed
-    
+
     result = await _process_match(
         "10001",
         stratz_client,
@@ -77,7 +78,7 @@ async def test_process_match_opendota_fallback():
         state_db,
         dataset_builder
     )
-    
+
     assert result == "processed"
     stratz_client.fetch_match_details.assert_called_once_with("10001")
     opendota_client.fetch_match.assert_called_once_with(10001)
@@ -94,14 +95,14 @@ async def test_process_match_validation_fail():
     transformer = MagicMock()
     state_db = MagicMock()
     dataset_builder = MagicMock()
-    
+
     mock_stratz_match = {
         "id": "10001",
         "draft": {"picksBans": []}
     }
     stratz_client.fetch_match_details.return_value = mock_stratz_match
     transformer.transform.return_value = None  # Validation/transform failed
-    
+
     result = await _process_match(
         "10001",
         stratz_client,
@@ -110,7 +111,7 @@ async def test_process_match_validation_fail():
         state_db,
         dataset_builder
     )
-    
+
     assert result == "invalid"
     stratz_client.fetch_match_details.assert_called_once_with("10001")
     opendota_client.fetch_match.assert_not_called()
@@ -187,18 +188,24 @@ async def test_league_mapper_opendota_discovery():
     concurrency = ConcurrencyConfig()
 
     mapper = LeagueMapper(stratz_client, opendota_client, state_db, config, concurrency)
-    
+
     # Run
     call_count = 0
     async def mock_pro_matches(less_than_id=None):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
+            cutoff_ts = int(datetime.fromisoformat(config.cutoff_date).timestamp())
             return [
-                {"leagueid": 19944, "league_name": "EPL Masters 2026", "start_time": int(datetime.fromisoformat(config.cutoff_date).timestamp()) + 3600, "match_id": 8906479441}
+                {
+                    "leagueid": 19944,
+                    "league_name": "EPL Masters 2026",
+                    "start_time": cutoff_ts + 3600,
+                    "match_id": 8906479441,
+                }
             ]
         return []
-    
+
     opendota_client.fetch_recent_pro_matches.side_effect = mock_pro_matches
 
     leagues = await mapper.discover_leagues()
@@ -217,8 +224,9 @@ async def test_match_finder_opendota_fallback():
     stratz_client.fetch_matches_by_league.side_effect = Exception("STRATZ error")
 
     opendota_client = AsyncMock()
+    cutoff_ts = int(datetime.fromisoformat("2026-06-04").timestamp())
     opendota_client.fetch_league_matches.return_value = [
-        {"match_id": 8906479441, "start_time": int(datetime.fromisoformat("2026-06-04").timestamp()) + 3600}
+        {"match_id": 8906479441, "start_time": cutoff_ts + 3600}
     ]
 
     state_db = MagicMock()

@@ -82,7 +82,9 @@ class OpenDotaClient:
         """Fetch all leagues from OpenDota."""
         return await self._get("leagues")
 
-    async def fetch_recent_pro_matches(self, less_than_match_id: int | None = None) -> list[dict[str, Any]]:
+    async def fetch_recent_pro_matches(
+        self, less_than_match_id: int | None = None
+    ) -> list[dict[str, Any]]:
         """Fetch the most recent professional matches from OpenDota."""
         endpoint = "proMatches"
         if less_than_match_id is not None:

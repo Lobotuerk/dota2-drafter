@@ -32,7 +32,7 @@ class MatchFinder:
 
     async def find_matches_for_league(self, league_id: str) -> list[tuple[str, str]]:
         """Fetch match IDs for a single league and register them in the state DB."""
-        matches_data = await self._stratz.fetch_matches_by_league(league_id, self._config.patch, self._batch_size)
+        matches_data = await self._stratz.fetch_matches_by_league(league_id, self._config.cutoff_date, self._batch_size)
         new_matches = []
 
         for match_entry in matches_data:

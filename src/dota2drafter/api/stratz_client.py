@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime
 from typing import Any, cast
 
 import aiohttp
@@ -164,8 +165,8 @@ class StratzClient:
 
         return data
 
-    async def fetch_leagues(self, tiers: list[int], patch: str) -> list[dict[str, Any]]:
-        """Fetch tier 1 and 2 leagues for a given patch."""
+    async def fetch_leagues(self, tiers: list[int], cutoff_date: str) -> list[dict[str, Any]]:
+        """Fetch tier 1 and 2 leagues with matches on or after cutoff_date."""
         int_tier_to_stratz = {
             1: ["INTERNATIONAL", "MAJOR", "DPC_LEAGUE_FINALS", "DPC_LEAGUE"],
             2: ["PROFESSIONAL", "MINOR", "DPC_QUALIFIER", "DPC_LEAGUE_QUALIFIER"],
@@ -191,39 +192,37 @@ class StratzClient:
         request_params: dict[str, Any] = {"take": 1000}
         if stratz_tiers:
             request_params["tiers"] = stratz_tiers
-        if patch:
-            request_params["patchIds"] = [patch]
+            
+        cutoff_timestamp = int(datetime.fromisoformat(cutoff_date).timestamp())
             
         data = await self._graphql(LEAGUES_QUERY, {"request": request_params})
         leagues_data = data.get("data", {}).get("leagues", [])
         
         mapped = []
-        now = int(time.time())
-        two_weeks_ago = now - 14 * 24 * 3600
         for league in leagues_data:
             t_str = league.get("tier", "UNSET")
             last_match = league.get("lastMatchDate")
-            ended = 1 if last_match and last_match < two_weeks_ago else 0
+            if last_match is None or last_match < cutoff_timestamp:
+                continue
             mapped.append({
                 "id": league.get("id"),
                 "name": league.get("displayName") or league.get("name") or "",
                 "tier": stratz_tier_to_int.get(t_str, 0),
-                "ended": ended
             })
         return mapped
 
     async def fetch_matches_by_league(
-        self, league_id: str, patch: str, limit: int = 1000
+        self, league_id: str, cutoff_date: str, limit: int = 1000
     ) -> list[dict[str, Any]]:
-        """Fetch match IDs for a specific league and patch."""
+        """Fetch match IDs for a specific league with matches after cutoff_date."""
         league_id_int = int(league_id)
+        cutoff_timestamp = int(datetime.fromisoformat(cutoff_date).timestamp())
         request_params: dict[str, Any] = {
             "take": min(limit, 100),
             "skip": 0,
             "isParsed": True,
+            "startDateTime": cutoff_timestamp,
         }
-        if patch:
-            request_params["patchIds"] = [patch]
         data = await self._graphql(
             MATCHES_BY_LEAGUE_QUERY,
             {"leagueId": league_id_int, "request": request_params},
@@ -272,8 +271,8 @@ class StratzClient:
             
         return mapped_match
 
-    async def fetch_heroes(self, patch: str) -> list[dict[str, Any]]:
-        """Fetch the hero roster for a given patch."""
+    async def fetch_heroes(self) -> list[dict[str, Any]]:
+        """Fetch the current hero roster."""
         data = await self._graphql(HEROES_QUERY)
         heroes_data = data.get("data", {}).get("constants", {}).get("heroes", [])
         

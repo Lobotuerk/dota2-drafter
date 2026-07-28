@@ -1,4 +1,4 @@
-"""Tests for StratzClient connection pooling and patch filtering."""
+"""Tests for StratzClient connection pooling and date-based filtering."""
 
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
@@ -93,8 +93,8 @@ async def test_stratz_client_close_clears_session():
 
 
 @pytest.mark.asyncio
-async def test_fetch_leagues_includes_patch_filtering():
-    """Verify that fetch_leagues injects patchIds into the request."""
+async def test_fetch_leagues_includes_date_filtering():
+    """Verify that fetch_leagues uses cutoff_date for filtering."""
     config = StratzConfig(api_key="test-key")
     client = StratzClient(config)
 
@@ -113,19 +113,18 @@ async def test_fetch_leagues_includes_patch_filtering():
     mock_session.post = mock_post
 
     with patch("aiohttp.ClientSession", return_value=mock_session):
-        await client.fetch_leagues([1], "7.35")
+        await client.fetch_leagues([1], "2026-06-04")
 
     call_args = mock_session.post.call_args
     payload = call_args.kwargs.get("json", call_args[1].get("json", {}))
     variables = payload.get("variables", {})
     request = variables.get("request", {})
-    assert "patchIds" in request
-    assert request["patchIds"] == ["7.35"]
+    assert "patchIds" not in request
 
 
 @pytest.mark.asyncio
-async def test_fetch_matches_by_league_includes_patch_filtering():
-    """Verify that fetch_matches_by_league injects patchIds into the request."""
+async def test_fetch_matches_by_league_includes_date_filtering():
+    """Verify that fetch_matches_by_league uses startDateTime for filtering."""
     config = StratzConfig(api_key="test-key")
     client = StratzClient(config)
 
@@ -146,25 +145,30 @@ async def test_fetch_matches_by_league_includes_patch_filtering():
     mock_session.post = mock_post
 
     with patch("aiohttp.ClientSession", return_value=mock_session):
-        await client.fetch_matches_by_league("123", "7.35")
+        await client.fetch_matches_by_league("123", "2026-06-04")
 
     call_args = mock_session.post.call_args
     payload = call_args.kwargs.get("json", call_args[1].get("json", {}))
     variables = payload.get("variables", {})
     request = variables.get("request", {})
-    assert "patchIds" in request
-    assert request["patchIds"] == ["7.35"]
+    assert "patchIds" not in request
+    assert "startDateTime" in request
 
 
 @pytest.mark.asyncio
-async def test_fetch_leagues_without_patch():
-    """Verify that fetch_leagues works without patch parameter."""
+async def test_fetch_leagues_filters_by_cutoff_date():
+    """Verify that fetch_leagues filters leagues by cutoff_date."""
     config = StratzConfig(api_key="test-key")
     client = StratzClient(config)
 
     mock_response = MagicMock()
     mock_response.status = 200
-    mock_response.json = AsyncMock(return_value={"data": {"leagues": []}})
+    mock_response.json = AsyncMock(
+        return_value={"data": {"leagues": [
+            {"id": "1", "name": "League1", "displayName": "League1", "tier": "MAJOR", "lastMatchDate": 1700000000},
+            {"id": "2", "name": "League2", "displayName": "League2", "tier": "MAJOR", "lastMatchDate": None},
+        ]}}
+    )
     mock_response.raise_for_status = MagicMock()
     mock_response.__aenter__ = AsyncMock(return_value=mock_response)
     mock_response.__aexit__ = AsyncMock(return_value=None)
@@ -177,10 +181,9 @@ async def test_fetch_leagues_without_patch():
     mock_session.post = mock_post
 
     with patch("aiohttp.ClientSession", return_value=mock_session):
-        await client.fetch_leagues([1], "")
+        result = await client.fetch_leagues([1], "2023-01-01")
 
-    call_args = mock_session.post.call_args
-    payload = call_args.kwargs.get("json", call_args[1].get("json", {}))
-    variables = payload.get("variables", {})
-    request = variables.get("request", {})
-    assert "patchIds" not in request
+    # League1 has lastMatchDate=1700000000 (2023-11-14), cutoff is 2023-01-01 (timestamp ~1672531200)
+    # So League1 should be included, League2 with None should be filtered out
+    assert len(result) == 1
+    assert result[0]["id"] == "1"

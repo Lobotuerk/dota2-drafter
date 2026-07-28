@@ -10,7 +10,7 @@ def test_upsert_matches_replaces_existing(tmp_path):
     db_path = tmp_path / "test_state.db"
     state_db = StateDatabase(db_path)
 
-    state_db.insert_league("123", "DreamLeague", 1, "7.35")
+    state_db.insert_league("123", "DreamLeague", 1)
 
     # Insert a match
     state_db.upsert_matches([("10001", "pending", "123")])
@@ -30,7 +30,7 @@ def test_upsert_matches_inserts_new(tmp_path):
     db_path = tmp_path / "test_state.db"
     state_db = StateDatabase(db_path)
 
-    state_db.insert_league("123", "DreamLeague", 1, "7.35")
+    state_db.insert_league("123", "DreamLeague", 1)
 
     state_db.upsert_matches([("10001", "pending", "123")])
 
@@ -44,7 +44,7 @@ def test_upsert_matches_batch_replaces(tmp_path):
     db_path = tmp_path / "test_state.db"
     state_db = StateDatabase(db_path)
 
-    state_db.insert_league("123", "DreamLeague", 1, "7.35")
+    state_db.insert_league("123", "DreamLeague", 1)
 
     # Insert multiple matches
     state_db.upsert_matches([

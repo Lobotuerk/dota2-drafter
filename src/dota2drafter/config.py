@@ -46,7 +46,7 @@ class StateConfig:
 
 @dataclass
 class PipelineConfig:
-    patch: str = "7.35"
+    cutoff_date: str = "2026-06-04"
     tiers: list[int] = field(default_factory=lambda: [1, 2])
     stratz: StratzConfig = field(default_factory=lambda: StratzConfig(api_key=""))
     opendota: OpenDotaConfig = field(default_factory=lambda: OpenDotaConfig())
@@ -116,7 +116,7 @@ def load_config(path: str | Path = "config.yaml") -> PipelineConfig:
 
     base = PipelineConfig()
     resolved = PipelineConfig(
-        patch=raw.get("patch", base.patch),
+        cutoff_date=raw.get("cutoff_date", base.cutoff_date),
         tiers=raw.get("tiers", base.tiers),
         stratz=_load_stratz(raw.get("stratz", {}), base),
         opendota=_load_opendota(raw.get("opendota", {}), base),

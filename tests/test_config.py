@@ -9,7 +9,7 @@ from dota2drafter.config import load_config, PipelineConfig
 def test_default_config():
     # PipelineConfig should initialize with sensible defaults
     config = PipelineConfig()
-    assert config.patch == "7.35"
+    assert config.cutoff_date == "2026-06-04"
     assert config.tiers == [1, 2]
     assert config.stratz.base_url == "https://api.stratz.com/v1"
     assert config.opendota.base_url == "https://api.opendota.com/api"
@@ -17,7 +17,7 @@ def test_default_config():
 
 def test_load_config_from_file(tmp_path):
     config_data = {
-        "patch": "7.36",
+        "cutoff_date": "2025-01-01",
         "tiers": [1],
         "stratz": {
             "api_key": "test_key",
@@ -45,7 +45,7 @@ def test_load_config_from_file(tmp_path):
         yaml.dump(config_data, f)
         
     config = load_config(config_file)
-    assert config.patch == "7.36"
+    assert config.cutoff_date == "2025-01-01"
     assert config.tiers == [1]
     assert config.stratz.api_key == "test_key"
     assert config.stratz.base_url == "https://test.stratz.com"

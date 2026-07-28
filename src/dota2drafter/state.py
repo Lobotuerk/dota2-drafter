@@ -33,7 +33,6 @@ class StateDatabase:
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     tier INTEGER NOT NULL,
-                    patch TEXT NOT NULL,
                     ended INTEGER NOT NULL DEFAULT 0
                 )
             """)
@@ -41,6 +40,10 @@ class StateDatabase:
                 conn.execute("ALTER TABLE leagues ADD COLUMN ended INTEGER NOT NULL DEFAULT 0")
             except sqlite3.OperationalError:
                 pass  # Column already exists
+            try:
+                conn.execute("ALTER TABLE leagues DROP COLUMN patch")
+            except sqlite3.OperationalError:
+                pass  # Column did not exist
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS matches (
                     match_id TEXT PRIMARY KEY,
@@ -65,13 +68,13 @@ class StateDatabase:
         finally:
             conn.close()
 
-    def insert_league(self, league_id: str, name: str, tier: int, patch: str, ended: int = 0) -> None:
+    def insert_league(self, league_id: str, name: str, tier: int, ended: int = 0) -> None:
         """Insert or update a league record."""
         with self._connection() as conn:
             conn.execute(
-                """INSERT OR REPLACE INTO leagues (id, name, tier, patch, ended)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (league_id, name, tier, patch, ended),
+                """INSERT OR REPLACE INTO leagues (id, name, tier, ended)
+                   VALUES (?, ?, ?, ?)""",
+                (league_id, name, tier, ended),
             )
 
     def get_ended_league_ids(self) -> set[str]:

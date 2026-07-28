@@ -47,7 +47,7 @@ LIQUIPEDIA_TIER_2_NAMES = [
 
 
 class LeagueMapper:
-    """Discovers and registers tier 1 and 2 leagues for a given patch."""
+    """Discovers and registers tier 1 and 2 leagues with matches on or after cutoff_date."""
 
     def __init__(
         self,
@@ -73,14 +73,14 @@ class LeagueMapper:
         return False
 
     async def discover_leagues(self) -> list[dict[str, Any]]:
-        """Discover all tier 1 and 2 leagues for the configured patch."""
+        """Discover all tier 1 and 2 leagues with matches on or after cutoff_date."""
         logger.info(
-            "Discovering tier %s leagues for patch %s",
+            "Discovering tier %s leagues with cutoff_date %s",
             self._config.tiers,
-            self._config.patch,
+            self._config.cutoff_date,
         )
 
-        leagues = await self._stratz.fetch_leagues(self._config.tiers, self._config.patch)
+        leagues = await self._stratz.fetch_leagues(self._config.tiers, self._config.cutoff_date)
         matched = []
 
         for league in leagues:
@@ -97,12 +97,11 @@ class LeagueMapper:
             )
 
             if is_match:
-                league_ended = league.get("ended", 0)
-                self._state_db.insert_league(league_id, league_name, league_tier, self._config.patch, league_ended)
+                self._state_db.insert_league(league_id, league_name, league_tier)
                 matched.append(league)
                 logger.debug("Found league: %s (ID: %s, tier: %s)", league_name, league_id, league_tier)
 
-        logger.info("Discovered %d tier 1/2 leagues for patch %s", len(matched), self._config.patch)
+        logger.info("Discovered %d tier 1/2 leagues with cutoff_date %s", len(matched), self._config.cutoff_date)
         return matched
 
     async def discover_leagues_concurrent(self) -> list[dict[str, Any]]:

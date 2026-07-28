@@ -107,7 +107,7 @@ async def run_pipeline(config: PipelineConfig) -> None:
     # Step 1: Hero mapping
     console.print("\n[bold yellow]Step 1/5:[/bold yellow] Fetching hero roster...")
     try:
-        heroes = await stratz_client.fetch_heroes(config.patch)
+        heroes = await stratz_client.fetch_heroes()
         if not heroes:
             logger.warning("No heroes fetched from STRATZ, falling back to OpenDota...")
             heroes = await opendota_client.fetch_heroes()
@@ -124,7 +124,7 @@ async def run_pipeline(config: PipelineConfig) -> None:
     console.print(f"  [green]OK[/green] Found {len(leagues)} tier 1/2 leagues")
 
     if not leagues:
-        console.print("\n[bold yellow]No leagues found for this patch. Exiting.[/bold yellow]")
+        console.print("\n[bold yellow]No leagues found for this cutoff_date. Exiting.[/bold yellow]")
         return
 
     # Step 3: Match discovery

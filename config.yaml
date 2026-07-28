@@ -1,5 +1,6 @@
-# Target patch to filter matches (e.g., "7.35", "7.34")
-patch : "7.41d"
+# Cutoff date for league filtering (ISO 8601 date string).
+# Only leagues with matches on or after this date are included.
+cutoff_date: "2026-06-04"
 
 # Tournament tiers to include
 tiers:

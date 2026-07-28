@@ -41,7 +41,8 @@ class DataExtractor:
         self._num_heroes = num_heroes
         self._negative_samples = negative_samples
 
-    def load_batches(self, data_dir: str | Path) -> list[dict[str, Any]]:
+    @staticmethod
+    def load_batches(data_dir: str | Path) -> list[dict[str, Any]]:
         """Load all .pt batch files from the data directory.
 
         Returns a list of dicts with keys 'x', 'y', 'match_ids'.
@@ -252,7 +253,7 @@ class DataExtractor:
                 edge_index=edge_index,
                 edge_type=edge_type,
                 edge_weight=edge_weight,
-                num_nodes=self._num_heroes,
+                num_nodes=self._num_heroes + 1,
             )
 
         edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous()
@@ -261,7 +262,7 @@ class DataExtractor:
 
         logger.info(
             "Built multi-relational hero graph: %d nodes, %d edges (syn=%d, ant=%d, ban=%d)",
-            self._num_heroes,
+            self._num_heroes + 1,
             edge_index.shape[1],
             sum(1 for t in edge_type_list if t == SYNERGY),
             sum(1 for t in edge_type_list if t == ANTAGONIST),
@@ -271,7 +272,7 @@ class DataExtractor:
             edge_index=edge_index,
             edge_type=edge_type,
             edge_weight=edge_weight,
-            num_nodes=self._num_heroes,
+            num_nodes=self._num_heroes + 1,
         )
 
     def _sample_negative(

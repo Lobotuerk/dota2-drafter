@@ -1,5 +1,5 @@
 # Target patch to filter matches (e.g., "7.35", "7.34")
-patch = "7.35"
+patch : "7.41d"
 
 # Tournament tiers to include
 tiers:
@@ -11,18 +11,18 @@ stratz:
   api_key: "${STRATZ_API_KEY}"
   base_url: "https://api.stratz.com/v1"
   max_retries: 5
-  retry_delay: 2.0
+  retry_delay: 10.0
 
 opendota:
   base_url: "https://api.opendota.com/api"
   max_retries: 5
-  retry_delay: 2.0
+  retry_delay: 10.0
 
 # Concurrency settings
 concurrency:
-  max_workers: 10
-  max_connections_per_host: 5
-  rate_limit_per_second: 5
+  max_workers: 5
+  max_connections_per_host: 1
+  rate_limit_per_second: 1
 
 # Output settings
 output:

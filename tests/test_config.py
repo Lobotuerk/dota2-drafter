@@ -72,3 +72,21 @@ def test_resolve_env_vars(tmp_path):
         assert config.stratz.api_key == "env_secret_key"
     finally:
         del os.environ["TEST_STRATZ_API_KEY"]
+
+
+def test_load_config_calls_load_dotenv(tmp_path):
+    from unittest.mock import patch
+    
+    config_data = {
+        "stratz": {
+            "api_key": "some_key"
+        }
+    }
+    config_file = tmp_path / "config.yaml"
+    with open(config_file, "w") as f:
+        yaml.dump(config_data, f)
+        
+    with patch("dota2drafter.config.load_dotenv") as mock_load_dotenv:
+        load_config(config_file)
+        mock_load_dotenv.assert_called_once()
+

@@ -65,6 +65,29 @@ async def _process_match(
         return "processed"
 
     except Exception as e:
+        import aiohttp
+        
+        # Check if the error is temporary (rate limit, timeout, server errors)
+        is_temporary = False
+        
+        # Check for aiohttp.ClientResponseError
+        if isinstance(e, aiohttp.ClientResponseError):
+            if e.status in (429, 500, 502, 503, 504, 520):
+                is_temporary = True
+                
+        # Check for connection or timeout errors
+        elif isinstance(e, (aiohttp.ClientConnectorError, asyncio.TimeoutError)):
+            is_temporary = True
+            
+        if is_temporary:
+            logger.warning(
+                "Temporary error processing match %s (will remain pending): %s",
+                match_id,
+                e,
+            )
+            return "failed"
+            
+        # For actual permanent code/schema or hard errors, mark as failed in DB
         state_db.mark_failed(match_id, str(e))
         return "failed"
 
@@ -107,7 +130,13 @@ async def run_pipeline(config: PipelineConfig) -> None:
     # Step 3: Match discovery
     console.print("\n[bold yellow]Step 3/5:[/bold yellow] Discovering matches...")
     match_finder = MatchFinder(stratz_client, state_db, config, config.concurrency)
-    total_new = await match_finder.find_all_matches(leagues)
+    
+    # Filter out leagues that have already ended and already exist in our local database
+    ended_league_ids = state_db.get_ended_league_ids()
+    active_leagues = [l for l in leagues if l["id"] not in ended_league_ids]
+    console.print(f"  Querying {len(active_leagues)} active leagues (skipped {len(leagues) - len(active_leagues)} already ended leagues)")
+    
+    total_new = await match_finder.find_all_matches(active_leagues)
     console.print(f"  [green]OK[/green] Registered {total_new} new matches")
 
     # Step 4 & 5: Fetch, process, and save
@@ -117,32 +146,33 @@ async def run_pipeline(config: PipelineConfig) -> None:
     total_failed = 0
     batch_size = config.concurrency.max_workers
 
-    while True:
-        pending = state_db.get_pending_matches(limit=batch_size)
-        if not pending:
-            break
+    try:
+        while True:
+            pending = state_db.get_pending_matches(limit=batch_size)
+            if not pending:
+                break
 
-        tasks = [
-            _process_match(
-                match_id, stratz_client, opendota_client,
-                transformer, state_db, dataset_builder,
-            )
-            for match_id, league_id in pending
-        ]
+            tasks = [
+                _process_match(
+                    match_id, stratz_client, opendota_client,
+                    transformer, state_db, dataset_builder,
+                )
+                for match_id, league_id in pending
+            ]
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for result in results:
-            if isinstance(result, Exception):
-                total_failed += 1
-            elif result == "invalid":
-                total_invalid += 1
-            elif result == "processed":
-                total_processed += 1
+            for result in results:
+                if isinstance(result, Exception):
+                    total_failed += 1
+                elif result == "invalid":
+                    total_invalid += 1
+                elif result == "processed":
+                    total_processed += 1
 
-        console.print(f"  Progress: {total_processed} processed, {total_invalid} invalid, {total_failed} failed")
-
-    dataset_builder.flush()
+            console.print(f"  Progress: {total_processed} processed, {total_invalid} invalid, {total_failed} failed")
+    finally:
+        dataset_builder.flush()
 
     # Print summary
     console.print("\n[bold blue]Pipeline Complete![/bold blue]")

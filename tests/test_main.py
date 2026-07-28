@@ -20,7 +20,7 @@ async def test_process_match_success():
         "radiantWin": True,
         "draft": {"picksBans": []}
     }
-    stratz_client.fetch_match_details.return_return = mock_stratz_match
+    stratz_client.fetch_match_details.return_value = mock_stratz_match
     stratz_client.fetch_match_details.return_value = mock_stratz_match
     
     # Setup transformer mock

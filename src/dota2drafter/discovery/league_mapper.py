@@ -97,7 +97,8 @@ class LeagueMapper:
             )
 
             if is_match:
-                self._state_db.insert_league(league_id, league_name, league_tier, self._config.patch)
+                league_ended = league.get("ended", 0)
+                self._state_db.insert_league(league_id, league_name, league_tier, self._config.patch, league_ended)
                 matched.append(league)
                 logger.debug("Found league: %s (ID: %s, tier: %s)", league_name, league_id, league_tier)
 

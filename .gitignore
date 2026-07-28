@@ -220,3 +220,6 @@ __marimo__/
 # Pipeline state and data
 state.db
 data/
+checkpoints/
+checkpoints_test/
+models/

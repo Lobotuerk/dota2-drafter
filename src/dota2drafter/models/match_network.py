@@ -97,6 +97,7 @@ class JointEmbedding(nn.Module):
 
         # Hero embeddings: lookup H_GNN[hero_val], then project
         # hero_indices: (B, 24) -> (B, 24, d_model)
+        # self.h_gnn is a registered buffer, natively aligned with module device
         hero_embeds = self.h_gnn[hero_indices]  # (B, 24, d_model)
         hero_projected = self.project(hero_embeds)  # (B, 24, d_model)
 

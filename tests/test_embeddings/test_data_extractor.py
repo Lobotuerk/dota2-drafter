@@ -66,7 +66,7 @@ def test_data_extractor_hero_graph(tmp_path: Path) -> None:
     batches = extractor.load_batches(data_dir)
     graph = extractor.build_hero_graph(batches)
 
-    assert graph.num_nodes == 124
+    assert graph.num_nodes == 125
     assert graph.edge_index.shape[0] == 2
     # Should have synergy edges between co-picked heroes
     assert graph.edge_index.shape[1] > 0
@@ -207,7 +207,7 @@ def test_data_extractor_empty_graph(tmp_path: Path) -> None:
     batches = [{"x": x, "y": y}]
     graph = extractor.build_hero_graph(batches)
 
-    assert graph.num_nodes == 20
+    assert graph.num_nodes == 21
     assert graph.edge_index.shape[0] == 2
     assert graph.edge_index.shape[1] == 0
     assert graph.edge_type.shape[0] == 0

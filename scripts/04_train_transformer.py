@@ -37,6 +37,7 @@ from rich.console import Console
 
 from dota2drafter.models.match_network import MatchNetwork
 from dota2drafter.training.transformer_trainer import TransformerTrainer, TrainingConfig
+from dota2drafter.processor.hero_indexer import HeroIndexer
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -109,6 +110,20 @@ def parse_args() -> argparse.Namespace:
         help="Path to frozen skip-gram/DGI embeddings (default: models/skip_gram_dgi.pt)",
     )
     return parser.parse_args()
+
+
+def load_hero_indexer(data_dir: str) -> HeroIndexer:
+    """Load HeroIndexer from data/hero_indexer.json if available."""
+    indexer = HeroIndexer()
+    indexer_path = Path(data_dir) / "hero_indexer.json"
+    if indexer_path.exists():
+        import json
+        with open(indexer_path, "r") as f:
+            hero_data = json.load(f)
+        # Reconstruct hero list from mapping
+        heroes = [{"id": api_id, "playable": True} for api_id in hero_data.keys()]
+        indexer.build_mapping(heroes)
+    return indexer
 
 
 def load_data(data_dir: str):
@@ -203,6 +218,11 @@ def main() -> None:
         console.print("[bold blue]Loading comfort map...[/bold blue]")
         player_comfort_map = torch.load(args.comfort_path, weights_only=True)
 
+        console.print("[bold blue]Loading hero indexer...[/bold blue]")
+        hero_indexer = load_hero_indexer(args.data_dir)
+        player_input_dim = hero_indexer.get_contiguous_count() if hero_indexer.get_contiguous_count() > 0 else max_hero_idx
+        console.print(f"[bold green]Player input dim (vocab size): {player_input_dim}[/bold green]")
+
         device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
         model = MatchNetwork(
             d_model=args.d_model,
@@ -211,7 +231,7 @@ def main() -> None:
             dim_feedforward=args.dim_feedforward,
             dropout=args.dropout,
             num_heroes=max_hero_idx,
-            player_input_dim=10,
+            player_input_dim=player_input_dim,
             h_gnn=h_gnn,
         ).to(device)
 
@@ -273,6 +293,11 @@ def main() -> None:
         )
         player_comfort_map = torch.load(args.comfort_path, weights_only=True)
 
+        console.print("[bold blue]Loading hero indexer...[/bold blue]")
+        hero_indexer = load_hero_indexer(args.data_dir)
+        player_input_dim = hero_indexer.get_contiguous_count() if hero_indexer.get_contiguous_count() > 0 else max_hero_idx
+        console.print(f"[bold green]Player input dim (vocab size): {player_input_dim}[/bold green]")
+
         device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
         model = MatchNetwork(
             d_model=args.d_model,
@@ -281,7 +306,7 @@ def main() -> None:
             dim_feedforward=args.dim_feedforward,
             dropout=args.dropout,
             num_heroes=max_hero_idx,
-            player_input_dim=10,
+            player_input_dim=player_input_dim,
             h_gnn=h_gnn,
         ).to(device)
 
@@ -299,7 +324,7 @@ def main() -> None:
                 if account_id in player_comfort_map:
                     comfort_rows.append(player_comfort_map[account_id])
                 else:
-                    comfort_rows.append(torch.zeros(10))
+                    comfort_rows.append(torch.zeros(player_input_dim))
             player_comfort = torch.stack(comfort_rows).unsqueeze(0).to(device)
 
             prob = model.predict_proba(x_draft, player_comfort)

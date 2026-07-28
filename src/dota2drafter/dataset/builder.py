@@ -66,9 +66,13 @@ class DatasetBuilder:
         # Collect player data
         radiant_players = []
         dire_players = []
+        radiant_heroes = []
+        dire_heroes = []
         for m in self._buffer:
             radiant_players.append(m.radiant_players)
             dire_players.append(m.dire_players)
+            radiant_heroes.append(m.radiant_heroes)
+            dire_heroes.append(m.dire_heroes)
 
         dataset: dict[str, Any] = {
             "x": x_batch,
@@ -76,6 +80,8 @@ class DatasetBuilder:
             "match_ids": match_ids,
             "radiant_players": radiant_players,
             "dire_players": dire_players,
+            "radiant_heroes": radiant_heroes,
+            "dire_heroes": dire_heroes,
         }
 
         self._batch_count += 1

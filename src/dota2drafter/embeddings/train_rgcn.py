@@ -24,6 +24,24 @@ from dota2drafter.embeddings.rgcn import HeroRGCN
 logger = logging.getLogger(__name__)
 
 
+class LinkPredictionDecoder(nn.Module):
+    """Bilinear / DistMult link prediction decoder for multi-relational RGCN graph."""
+
+    def __init__(self, d_model: int, num_relations: int):
+        super().__init__()
+        # DistMult relation diagonal matrices parameter
+        self.rel_emb = nn.Parameter(torch.Tensor(num_relations, d_model))
+        nn.init.xavier_uniform_(self.rel_emb)
+
+    def forward(self, h_src: torch.Tensor, h_dst: torch.Tensor, edge_type: torch.Tensor) -> torch.Tensor:
+        # Retrieve relation diagonal matrices
+        r = self.rel_emb[edge_type]  # Shape: [E, d_model]
+        
+        # Bilinear dot product: (h_src * r) . h_dst
+        scores = torch.sum(h_src * r * h_dst, dim=-1)
+        return scores
+
+
 def train_rgcn(
     data_dir: str | Path,
     frozen_embeddings_path: str | Path,
@@ -31,10 +49,11 @@ def train_rgcn(
     d_model: int = 64,
     num_relations: int = 3,
     rgcn_epochs: int = 20,
-    learning_rate: float = 1e-2,
+    learning_rate: float = 1.5e-3,
     device: str | None = None,
     hidden_dim: int | None = None,
     num_layers: int = 2,
+    percentile_keep: float = 0.80,
 ) -> Path:
     """Train the HeroRGCN model on the multi-relational hero graph.
 
@@ -53,6 +72,7 @@ def train_rgcn(
         device: Device to train on (auto-detected if None).
         hidden_dim: Hidden dimension for RGCN layers. Defaults to d_model.
         num_layers: Number of RGCN layers (1-2 recommended).
+        percentile_keep: Percentile threshold to keep only top-N strongest edges (default 0.80).
 
     Returns:
         Path to the saved RGCN model weights.
@@ -67,9 +87,9 @@ def train_rgcn(
 
     num_heroes = extractor._num_heroes
 
-    # Step 2: Build multi-relational graph
-    logger.info("Step 2: Building multi-relational hero graph...")
-    hero_graph = extractor.build_hero_graph(batches)
+    # Step 2: Build and prune multi-relational graph
+    logger.info("Step 2: Building and pruning multi-relational hero graph (percentile_keep=%.2f)...", percentile_keep)
+    hero_graph = extractor.build_pruned_hero_graph(batches, percentile_keep=percentile_keep)
     hero_graph = hero_graph.to(device)
 
     # Step 3: Load frozen DGI embeddings
@@ -99,38 +119,38 @@ def train_rgcn(
     rgcn = rgcn.to(device)
 
     # Step 5: Train RGCN
-    # Use a simplified training objective: maximize mutual information
-    # between node embeddings and graph summary (inspired by DGI)
-    logger.info("Step 5: Training RGCN (epochs=%d, lr=%.2e)", rgcn_epochs, learning_rate)
-    optimizer = torch.optim.Adam(rgcn.parameters(), lr=learning_rate)
-
-    # Readout function for global graph summary
-    readout = nn.Sequential(
-        nn.Linear(d_model, d_model),
-        nn.Tanh(),
-    ).to(device)
+    # Use standard DistMult / Bilinear scoring link prediction decoder
+    logger.info("Step 5: Training RGCN with DistMult Link Prediction Decoder (epochs=%d, lr=%.2e)", rgcn_epochs, learning_rate)
+    decoder = LinkPredictionDecoder(d_model, num_relations).to(device)
+    optimizer = torch.optim.AdamW(
+        list(rgcn.parameters()) + list(decoder.parameters()),
+        lr=learning_rate,
+        weight_decay=1e-4,
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=rgcn_epochs)
 
     for epoch in range(1, rgcn_epochs + 1):
         rgcn.train()
+        decoder.train()
         edge_index = hero_graph.edge_index
         edge_type = hero_graph.edge_type
 
         # Forward pass
         h_gnn = rgcn(edge_index, edge_type)
 
-        # Compute global summary
-        s_global = readout(h_gnn.mean(dim=0))
-
-        # Positive samples: original embeddings
-        pos_scores = torch.sum(h_gnn * s_global, dim=1)
+        # 1. Positive samples: true edges in graph
+        h_src = h_gnn[edge_index[0]]
+        h_dst = h_gnn[edge_index[1]]
+        pos_scores = decoder(h_src, h_dst, edge_type)
         pos_loss = F.binary_cross_entropy_with_logits(
             pos_scores, torch.ones_like(pos_scores)
         )
 
-        # Negative samples: row-wise permutation
+        # 2. Negative samples: row-wise permutation of destination nodes
         perm = torch.randperm(h_gnn.shape[0], device=device)
-        h_neg = h_gnn[perm]
-        neg_scores = torch.sum(h_neg * s_global, dim=1)
+        neg_edge_dst = perm[edge_index[1] % h_gnn.shape[0]]
+        h_neg_dst = h_gnn[neg_edge_dst]
+        neg_scores = decoder(h_src, h_neg_dst, edge_type)
         neg_loss = F.binary_cross_entropy_with_logits(
             neg_scores, torch.zeros_like(neg_scores)
         )
@@ -140,6 +160,7 @@ def train_rgcn(
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        scheduler.step()
 
         if epoch % 5 == 0 or epoch == 1:
             logger.info(

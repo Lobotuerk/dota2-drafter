@@ -34,6 +34,7 @@ from pathlib import Path
 
 import torch
 from rich.console import Console
+from rich.logging import RichHandler
 
 from dota2drafter.models.match_network import MatchNetwork
 from dota2drafter.training.transformer_trainer import TransformerTrainer, TrainingConfig
@@ -94,7 +95,7 @@ def parse_args() -> argparse.Namespace:
         "--num_epochs", type=int, default=50, help="Number of training epochs (default: 50)"
     )
     parser.add_argument(
-        "--learning_rate", type=float, default=1e-3, help="Learning rate (default: 1e-3)"
+        "--learning_rate", type=float, default=1e-4, help="Learning rate (default: 1e-4)"
     )
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size (default: 64)")
     parser.add_argument(
@@ -102,6 +103,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--num_heroes", type=int, default=124, help="Number of heroes (default: 124)"
+    )
+    parser.add_argument(
+        "--percentile_keep", type=float, default=0.80, help="Percentile threshold to keep only top-N strongest edges (default: 0.80)"
+    )
+    parser.add_argument(
+        "--label_smoothing_eps", type=float, default=0.15, help="Label smoothing epsilon value (default: 0.15)"
+    )
+    parser.add_argument(
+        "--mlm_epochs", type=int, default=0, help="Number of MLM pre-training epochs (default: 0, meaning skip)"
     )
     parser.add_argument(
         "--frozen_embeddings_path",
@@ -153,6 +163,7 @@ def load_h_gnn(
         max_hero_idx: int,
         d_model: int,
         data_dir: Path,
+        percentile_keep: float = 0.80,
     ) -> torch.Tensor:
         """Load RGCN embeddings, dynamically extracting them if a state_dict is provided."""
         h_gnn_loaded = torch.load(rgcn_path, weights_only=True)
@@ -170,7 +181,7 @@ def load_h_gnn(
 
             extractor = DataExtractor(num_heroes=max_hero_idx)
             batches = extractor.load_batches(data_dir)
-            hero_graph = extractor.build_hero_graph(batches)
+            hero_graph = extractor.build_pruned_hero_graph(batches, percentile_keep=percentile_keep)
 
             h_gnn = rgcn_model.get_embeddings(hero_graph)
             console.print(f"[bold green]Extracted raw H_GNN embeddings of shape {tuple(h_gnn.shape)} from loaded model state_dict.[/bold green]")
@@ -179,6 +190,11 @@ def load_h_gnn(
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        handlers=[RichHandler(rich_tracebacks=True)],
+    )
     args = parse_args()
 
     if args.mode == "train":
@@ -213,6 +229,7 @@ def main() -> None:
             max_hero_idx,
             args.d_model,
             Path(args.data_dir),
+            percentile_keep=args.percentile_keep,
         )
 
         console.print("[bold blue]Loading comfort map...[/bold blue]")
@@ -241,10 +258,27 @@ def main() -> None:
             batch_size=args.batch_size,
             device=str(device),
             checkpoint_dir=args.checkpoint_dir,
+            label_smoothing_eps=args.label_smoothing_eps,
         )
 
         console.print("[bold blue]Training transformer model...[/bold blue]")
         trainer = TransformerTrainer(model, config)
+
+        # 1. MLM Pre-training stage (if requested)
+        if args.mlm_epochs > 0:
+            console.print(f"[bold yellow]Stage 4a: Running MLM Pre-training for {args.mlm_epochs} epochs...[/bold yellow]")
+            mlm_metrics = trainer.mlm_train(
+                x_drafts=x_drafts,
+                y_labels=y_labels,
+                radiant_players=radiant_players,
+                dire_players=dire_players,
+                player_comfort_map=player_comfort_map,
+                num_epochs=args.mlm_epochs,
+            )
+            console.print("[bold green]MLM Pre-training complete! Transitioning to standard fine-tuning...[/bold green]")
+
+        # 2. Main Win-Probability Fine-tuning stage
+        console.print("[bold yellow]Stage 4b: Running Win-Probability Fine-tuning...[/bold yellow]")
         metrics = trainer.train(
             x_drafts=x_drafts,
             y_labels=y_labels,
@@ -332,4 +366,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        console.print_exception(show_locals=True)
+        logger.exception("Train transformer script failed with an error:")
+        sys.exit(1)

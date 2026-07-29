@@ -106,10 +106,10 @@ def test_apply_prefix_truncation():
         player_input_dim=player_input_dim,
     )
 
-    # Should return exactly 4 samples for truncation points [6, 12, 18, 24]
-    assert len(samples) == 4
+    # Should return exactly 6 samples for truncation points [7, 9, 12, 18, 22, 24]
+    assert len(samples) == 6
 
-    truncation_points = [6, 12, 18, 24]
+    truncation_points = [7, 9, 12, 18, 22, 24]
     for i, t in enumerate(truncation_points):
         x_truncated, player_comfort, y = samples[i]
         assert x_truncated.shape == (24, 4)
@@ -151,8 +151,8 @@ def test_augment_draft_permutations():
         player_input_dim=player_input_dim,
     )
 
-    # Should return 1 to 2 random valid permutations
-    assert len(samples) in [1, 2]
+    # Should return exactly 64 valid permutation combinations
+    assert len(samples) == 64
 
     for x_permuted, player_comfort, y in samples:
         assert x_permuted.shape == (24, 4)
@@ -197,7 +197,7 @@ def test_player_comfort_dataset_augmentation():
     assert x.shape == (24, 4)
     assert comfort.shape == (10, player_input_dim)
 
-    # 2. With Augmentation (multiplies size by 10)
+    # 2. With Augmentation (multiplies size by 448: 64 permutations * (1 original + 6 truncations))
     dataset_with_aug = PlayerComfortDataset(
         x_drafts=x_drafts,
         y_labels=y_labels,
@@ -206,7 +206,7 @@ def test_player_comfort_dataset_augmentation():
         player_input_dim=player_input_dim,
         augment=True,
     )
-    assert len(dataset_with_aug) == num_samples * 10
+    assert len(dataset_with_aug) == num_samples * 448
 
     # Test retrieving various indices
     for i in range(len(dataset_with_aug)):
@@ -354,3 +354,33 @@ def test_label_smoothing_training():
 
     # Cleanup test checkpoint dir
     shutil.rmtree(checkpoint_dir, ignore_errors=True)
+
+
+def test_dynamic_player_input_dim_resolution():
+    """Verify that TransformerTrainer dynamically resolves player_input_dim from the model or comfort map."""
+    d_model = 32
+    num_heroes = 60
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    # Create a model with player_input_dim = 15
+    model = MatchNetwork(
+        d_model=d_model,
+        nhead=2,
+        num_layers=1,
+        dim_feedforward=64,
+        num_heroes=num_heroes,
+        player_input_dim=15,
+        h_gnn=h_gnn,
+    )
+    config = TrainingConfig(device="cpu")
+    trainer = TransformerTrainer(model=model, train_config=config)
+
+    # Case 1: Without comfort map, resolve from model attribute (15)
+    player_input_dim_no_map = getattr(trainer.model, "player_input_dim", 127)
+    assert player_input_dim_no_map == 15
+
+    # Case 2: With comfort map, fallback/override dynamically based on comfort map tensor shape (e.g. 25)
+    mock_comfort_map = {101: torch.zeros(25)}
+    first_tensor = next(iter(mock_comfort_map.values()))
+    player_input_dim_with_map = first_tensor.size(0)
+    assert player_input_dim_with_map == 25

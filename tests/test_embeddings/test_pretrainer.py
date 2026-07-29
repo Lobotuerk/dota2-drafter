@@ -82,7 +82,8 @@ def test_train_embeddings(tmp_path: Path) -> None:
         embed_dim=16,
         skip_gram_epochs=1,
         dgi_epochs=1,
-        learning_rate=0.01,
+        skip_gram_lr=0.01,
+        dgi_lr=0.01,
         batch_size=16,
     )
 
@@ -105,7 +106,8 @@ def test_train_embeddings_load_frozen(tmp_path: Path) -> None:
         embed_dim=16,
         skip_gram_epochs=1,
         dgi_epochs=1,
-        learning_rate=0.01,
+        skip_gram_lr=0.01,
+        dgi_lr=0.01,
         batch_size=16,
     )
 

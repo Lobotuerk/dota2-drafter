@@ -12,14 +12,14 @@ Match Network and Transformer training parameters.
 | `dim_feedforward` | `256` | Feedforward dimension in decoder layers |
 | `dropout` | `0.1` | Dropout rate |
 | `num_heroes` | `120` | Number of heroes K |
-| `player_input_dim` | `10` | Number of input features per player comfort vector |
+| `player_input_dim` | `127` | Number of input features per player comfort vector (defaults to 127 to match total hero count) |
 | `h_gnn` | `None` | Frozen RGCN hero embeddings of shape `(K+1, d_model)` |
 
 ## TrainingConfig
 
 | Parameter | Default | Description |
 |---|---|---|
-| `learning_rate` | `1e-3` | Learning rate for the Adam optimizer |
+| `learning_rate` | `1e-4` | Learning rate for the AdamW optimizer (with CosineAnnealingLR and 1e-2 weight_decay) |
 | `num_epochs` | `50` | Maximum number of training epochs |
 | `batch_size` | `64` | Batch size for training and validation |
 | `val_split` | `0.2` | Fraction of data reserved for validation |
@@ -27,6 +27,7 @@ Match Network and Transformer training parameters.
 | `checkpoint_dir` | `"./checkpoints"` | Directory for saving best model checkpoints |
 | `patience` | `10` | Early stopping patience |
 | `min_delta` | `1e-4` | Minimum change to qualify as an improvement |
+| `label_smoothing_eps` | `0.15` | Label smoothing epsilon value (configurable via CLI as `--label_smoothing_eps`) |
 
 ## TrainingMetrics
 
@@ -52,4 +53,5 @@ PyTorch Dataset that yields `(x_draft, player_matrices, y)` from raw data. Dynam
 | `radiant_players` | *(required)* | List of Radiant player account ID lists (5 IDs each) |
 | `dire_players` | *(required)* | List of Dire player account ID lists (5 IDs each) |
 | `player_comfort_map` | `None` | Optional mapping of `account_id -> comfort tensor (10, C)` |
-| `player_input_dim` | `10` | C, number of features per player comfort vector |
+| `player_input_dim` | `127` | C, number of features per player comfort vector (defaults to 127 to match total hero count) |
+| `augment` | `False` | If True, applies fused permutation (64 combinations) and prefix truncation (6 stages) on top of each other, yielding a 448x dataset expansion for robust generalization |

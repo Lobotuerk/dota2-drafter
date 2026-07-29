@@ -275,6 +275,170 @@ class DataExtractor:
             num_nodes=self._num_heroes + 1,
         )
 
+    def build_pruned_hero_graph(
+        self,
+        batches: list[dict[str, Any]],
+        percentile_keep: float = 0.80,
+    ) -> Data:
+        """Build a multi-relational hero graph and prune it by keeping only top edges.
+
+        Keeps only the strongest edges (percentile_keep and above) per relation type based
+        on co-occurrence, match, and ban frequency counts.
+        """
+        synergy_counts: dict[tuple[int, int], list[int]] = {}
+        antagonist_counts: dict[tuple[int, int], list[int]] = {}
+        ban_counts: dict[tuple[int, int], int] = {}
+
+        for batch in batches:
+            x_tensors: torch.Tensor = batch["x"]
+            y_tensors: torch.Tensor = batch["y"]
+
+            # Ensure x_tensors is 3D
+            if x_tensors.dim() == 2:
+                x_tensors = x_tensors.unsqueeze(0)
+                y_tensors = y_tensors.unsqueeze(0)
+
+            for match_idx in range(x_tensors.shape[0]):
+                draft = x_tensors[match_idx]
+                radiant_win = int(y_tensors[match_idx].item())
+
+                picks = draft[draft[:, 0] == 1.0]
+                if picks.shape[0] < 10:
+                    continue
+
+                radiant_picks = picks[picks[:, 1] == 0.0][:, 2].long()
+                dire_picks = picks[picks[:, 1] == 1.0][:, 2].long()
+
+                radiant_heroes = [int(h) for h in radiant_picks.tolist() if h > 0]
+                dire_heroes = [int(h) for h in dire_picks.tolist() if h > 0]
+
+                # Extract ban steps (is_pick == 0.0)
+                ban_steps = draft[draft[:, 0] == 0.0]
+                radiant_bans = ban_steps[ban_steps[:, 1] == 0.0][:, 2].long().tolist()
+                dire_bans = ban_steps[ban_steps[:, 1] == 1.0][:, 2].long().tolist()
+
+                # --- Synergy edges (type 0, undirected) ---
+                for i_idx, hi in enumerate(radiant_heroes):
+                    for hj in radiant_heroes[i_idx + 1:]:
+                        pair = tuple(sorted((hi, hj)))
+                        if pair not in synergy_counts:
+                            synergy_counts[pair] = [0, 0]
+                        synergy_counts[pair][0] += radiant_win
+                        synergy_counts[pair][1] += 1
+
+                for i_idx, hi in enumerate(dire_heroes):
+                    for hj in dire_heroes[i_idx + 1:]:
+                        pair = tuple(sorted((hi, hj)))
+                        if pair not in synergy_counts:
+                            synergy_counts[pair] = [0, 0]
+                        synergy_counts[pair][0] += (1 - radiant_win)
+                        synergy_counts[pair][1] += 1
+
+                # --- Antagonist edges (type 1, directed) ---
+                for hi in radiant_heroes:
+                    for hj in dire_heroes:
+                        if (hi, hj) not in antagonist_counts:
+                            antagonist_counts[(hi, hj)] = [0, 0]
+                        antagonist_counts[(hi, hj)][0] += radiant_win
+                        antagonist_counts[(hi, hj)][1] += 1
+
+                        if (hj, hi) not in antagonist_counts:
+                            antagonist_counts[(hj, hi)] = [0, 0]
+                        antagonist_counts[(hj, hi)][0] += (1 - radiant_win)
+                        antagonist_counts[(hj, hi)][1] += 1
+
+                # --- Banned-Against edges (type 2, directed) ---
+                for pick_h in radiant_heroes:
+                    for ban_h in dire_bans:
+                        ban_h = int(ban_h)
+                        if ban_h > 0:
+                            ban_counts[(pick_h, ban_h)] = ban_counts.get((pick_h, ban_h), 0) + 1
+
+                for pick_h in dire_heroes:
+                    for ban_h in radiant_bans:
+                        ban_h = int(ban_h)
+                        if ban_h > 0:
+                            ban_counts[(pick_h, ban_h)] = ban_counts.get((pick_h, ban_h), 0) + 1
+
+        # Calculate percentiles based on non-zero weights
+        syn_vals = np.array([total for wins, total in synergy_counts.values() if total > 0])
+        ant_vals = np.array([total for wins, total in antagonist_counts.values() if total > 0])
+        ban_vals = np.array([count for count in ban_counts.values() if count > 0])
+
+        pct_val = percentile_keep * 100
+        syn_cutoff = np.percentile(syn_vals, pct_val) if syn_vals.size > 0 else 0
+        ant_cutoff = np.percentile(ant_vals, pct_val) if ant_vals.size > 0 else 0
+        ban_cutoff = np.percentile(ban_vals, pct_val) if ban_vals.size > 0 else 0
+
+        print(f"Cutoffs -> syn: {syn_cutoff:.2f}, ant: {ant_cutoff:.2f}, ban: {ban_cutoff:.2f}")
+
+        # Build pruned edges lists
+        edge_list: list[list[int]] = []
+        edge_type_list: list[int] = []
+        edge_weight_list: list[float] = []
+
+        # Synergy edges (type 0, undirected)
+        for (hi, hj), (wins, total) in synergy_counts.items():
+            if total < max(5, syn_cutoff):
+                continue
+            win_rate = wins / total
+            edge_list.append([hi, hj])
+            edge_type_list.append(SYNERGY)
+            edge_weight_list.append(win_rate)
+            edge_list.append([hj, hi])
+            edge_type_list.append(SYNERGY)
+            edge_weight_list.append(win_rate)
+
+        # Antagonist edges (type 1, directed)
+        for (u, v), (wins, total) in antagonist_counts.items():
+            if total < max(3, ant_cutoff):
+                continue
+            win_rate = wins / total
+            edge_list.append([u, v])
+            edge_type_list.append(ANTAGONIST)
+            edge_weight_list.append(win_rate)
+
+        # Banned-Against edges (type 2, directed)
+        max_count = max(ban_counts.values()) if ban_counts else 1
+        for (pick_h, ban_h), count in ban_counts.items():
+            if count < ban_cutoff:
+                continue
+            normalized = count / max_count
+            edge_list.append([pick_h, ban_h])
+            edge_type_list.append(BANNED_AGAINST)
+            edge_weight_list.append(normalized)
+
+        if not edge_list:
+            logger.warning("No edges found in pruned hero graph")
+            edge_index = torch.empty((2, 0), dtype=torch.long)
+            edge_type = torch.empty((0,), dtype=torch.long)
+            edge_weight = torch.empty((0, 1), dtype=torch.float32)
+            return Data(
+                edge_index=edge_index,
+                edge_type=edge_type,
+                edge_weight=edge_weight,
+                num_nodes=self._num_heroes + 1,
+            )
+
+        edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous()
+        edge_type = torch.tensor(edge_type_list, dtype=torch.long)
+        edge_weight = torch.tensor(edge_weight_list, dtype=torch.float32).unsqueeze(1)
+
+        logger.info(
+            "Built pruned multi-relational hero graph: %d nodes, %d edges (syn=%d, ant=%d, ban=%d)",
+            self._num_heroes + 1,
+            edge_index.shape[1],
+            sum(1 for t in edge_type_list if t == SYNERGY),
+            sum(1 for t in edge_type_list if t == ANTAGONIST),
+            sum(1 for t in edge_type_list if t == BANNED_AGAINST),
+        )
+        return Data(
+            edge_index=edge_index,
+            edge_type=edge_type,
+            edge_weight=edge_weight,
+            num_nodes=self._num_heroes + 1,
+        )
+
     def _sample_negative(
         self,
         rng: np.random.Generator,

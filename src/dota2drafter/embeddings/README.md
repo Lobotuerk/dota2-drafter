@@ -11,7 +11,8 @@ Embedding pre-training and RGCN training parameters.
 | `embed_dim` | `64` | Dimension of the embedding space |
 | `skip_gram_epochs` | `10` | Number of Skip-Gram training epochs |
 | `dgi_epochs` | `20` | Number of DGI training epochs |
-| `learning_rate` | `1e-2` | Learning rate for both Skip-Gram and DGI optimizers |
+| `skip_gram_lr` | `1e-2` | Learning rate for the Skip-Gram optimizer |
+| `dgi_lr` | `1e-2` | Learning rate for the DGI optimizer |
 | `batch_size` | `256` | Batch size for the Skip-Gram DataLoader |
 | `device` | `None` (auto) | Device to train on (`"cpu"` or `"cuda"`) |
 

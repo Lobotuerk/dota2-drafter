@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 class DGIEncoder(nn.Module):
     """GCN encoder for DGI.
 
-    A two-layer Graph Convolutional Network that maps node features
-    to structural embeddings.
+    A two-layer Graph Convolutional Network with LayerNorm, Residual
+    Skip-Connections, and L2 Unit-Sphere Normalization.
     """
 
     def __init__(self, embed_dim: int, hidden_dim: int | None = None) -> None:
@@ -28,7 +28,10 @@ class DGIEncoder(nn.Module):
         self._input_dim = embed_dim
 
         self.conv1 = GCNConv(embed_dim, self.hidden_dim)
+        self.ln1 = nn.LayerNorm(self.hidden_dim)
+        
         self.conv2 = GCNConv(self.hidden_dim, embed_dim)
+        self.ln2 = nn.LayerNorm(embed_dim)
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         """Forward pass through the GCN encoder.
@@ -40,11 +43,27 @@ class DGIEncoder(nn.Module):
         Returns:
             Encoded node representations, shape (num_nodes, embed_dim)
         """
-        x = self.conv1(x, edge_index)
-        x = F.relu(x)
-        x = F.dropout(x, p=0.1, training=self.training)
-        x = self.conv2(x, edge_index)
-        return x
+        # First GCN Layer with Residual Skip-Connection + LayerNorm + L2 Normalization
+        h1_out = self.conv1(x, edge_index)
+        if h1_out.shape == x.shape:
+            h1 = h1_out + x
+        else:
+            h1 = h1_out
+        h1 = self.ln1(h1)
+        h1 = F.relu(h1)
+        h1 = F.dropout(h1, p=0.1, training=self.training)
+        h1 = F.normalize(h1, p=2, dim=1)
+
+        # Second GCN Layer with Residual Skip-Connection + LayerNorm + L2 Normalization
+        h2_out = self.conv2(h1, edge_index)
+        if h2_out.shape == h1.shape:
+            h2 = h2_out + h1
+        else:
+            h2 = h2_out
+        h2 = self.ln2(h2)
+        h2 = F.normalize(h2, p=2, dim=1)
+        
+        return h2
 
 
 class DGIModel(nn.Module):
@@ -111,28 +130,50 @@ class DGIModel(nn.Module):
         pos_global: torch.Tensor,
         neg_local: torch.Tensor,
         neg_global: torch.Tensor,
+        tau: float = 0.07,
     ) -> torch.Tensor:
-        """Compute DGI binary cross-entropy loss.
+        """Compute DGI Temperature-Scaled Contrastive Loss (InfoNCE).
 
-        Maximizes mutual information between local and global
-        representations for both positive and negative samples.
+        Maximizes mutual information between local positive representations and
+        the global graph summary, while explicitly penalizing crowding and clustering
+        by contrasting against all negative (corrupted) node features in the batch.
 
         Args:
-            pos_local: Local representations for positive samples
-            pos_global: Global summary for positive graphs
-            neg_local: Local representations for negative samples
-            neg_global: Global summary for negative (corrupted) graphs
+            pos_local: Local positive representations, shape (N, D)
+            pos_global: Global positive summary, shape (D,)
+            neg_local: Local corrupted representations, shape (N, D)
+            neg_global: Global negative summary, shape (D,) (unused in InfoNCE)
+            tau: Temperature hyperparameter (default: 0.07)
 
         Returns:
             Scalar loss
         """
-        pos_scores = torch.sum(pos_local * pos_global, dim=1)
-        neg_scores = torch.sum(neg_local * neg_global, dim=1)
+        # Ensure they are L2-normalized (on the unit sphere)
+        pos_local = F.normalize(pos_local, p=2, dim=1)
+        neg_local = F.normalize(neg_local, p=2, dim=1)
+        
+        # If pos_global is 1D summary (D,), expand/normalize it to (1, D)
+        if pos_global.dim() == 1:
+            pos_global_norm = F.normalize(pos_global.unsqueeze(0), p=2, dim=1)  # (1, D)
+        else:
+            pos_global_norm = F.normalize(pos_global, p=2, dim=1)  # (N, D) or (1, D)
 
-        pos_loss = F.binary_cross_entropy_with_logits(pos_scores, torch.ones_like(pos_scores))
-        neg_loss = F.binary_cross_entropy_with_logits(neg_scores, torch.zeros_like(neg_scores))
+        # 1. Positive similarities: cos(h_i, s)
+        # Shape: (N,)
+        cos_pos = torch.sum(pos_local * pos_global_norm, dim=-1)
 
-        return pos_loss.mean() + neg_loss.mean()
+        # 2. Negative similarities: full pairwise similarities cos(h_i, h^-_j)
+        # Shape: (N, N)
+        cos_neg = torch.mm(pos_local, neg_local.T)
+
+        # 3. Apply temperature scaling
+        pos_logits = torch.exp(cos_pos / tau)  # (N,)
+        neg_logits_sum = torch.sum(torch.exp(cos_neg / tau), dim=1)  # (N,)
+
+        # 4. InfoNCE Loss: -log( pos_logits / (pos_logits + neg_logits_sum) )
+        loss = -torch.log(pos_logits / (pos_logits + neg_logits_sum + 1e-8))
+
+        return loss.mean()
 
     def train_epoch(
         self,

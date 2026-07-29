@@ -24,6 +24,7 @@ from pathlib import Path
 
 import torch
 from rich.console import Console
+from rich.logging import RichHandler
 
 from dota2drafter.embeddings.pretrainer import load_frozen_embeddings, train_embeddings
 
@@ -60,7 +61,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dgi_epochs", type=int, default=20, help="DGI training epochs (default: 20)")
     parser.add_argument(
-        "--learning_rate", type=float, default=1e-2, help="Learning rate (default: 1e-2)"
+        "--skip_gram_lr", type=float, default=1e-2, help="Skip-Gram learning rate (default: 1e-2)"
+    )
+    parser.add_argument(
+        "--dgi_lr", type=float, default=1e-2, help="DGI learning rate (default: 1e-2)"
     )
     parser.add_argument("--batch_size", type=int, default=256, help="Batch size (default: 256)")
     parser.add_argument(
@@ -79,6 +83,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        handlers=[RichHandler(rich_tracebacks=True)],
+    )
     args = parse_args()
 
     if args.mode == "train":
@@ -97,7 +106,8 @@ def main() -> None:
             embed_dim=args.embed_dim,
             skip_gram_epochs=args.skip_gram_epochs,
             dgi_epochs=args.dgi_epochs,
-            learning_rate=args.learning_rate,
+            skip_gram_lr=args.skip_gram_lr,
+            dgi_lr=args.dgi_lr,
             batch_size=args.batch_size,
             device=args.device,
         )
@@ -121,4 +131,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        console.print_exception(show_locals=True)
+        logger.exception("Train embeddings script failed with an error:")
+        sys.exit(1)

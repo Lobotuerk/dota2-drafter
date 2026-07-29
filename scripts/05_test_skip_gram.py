@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
         "--model_path",
         type=str,
         default="models/skip_gram_dgi.pt",
-        help="Path to DGI embeddings (default: models/skip_gram_dgi.pt)",
+        help="Path to pre-trained embeddings (default: models/skip_gram_dgi.pt)",
     )
     parser.add_argument(
         "--mapping_file",
@@ -49,10 +49,10 @@ def parse_args() -> argparse.Namespace:
         help="Path to hero mapping file (default: hero_mapping.json)",
     )
     parser.add_argument(
-        "--embed_dim", type=int, default=64, help="Embedding dimension (default: 64)"
+        "--embed_dim", type=int, default=32, help="Embedding dimension (default: 32)"
     )
     parser.add_argument(
-        "--num_heroes", type=int, default=124, help="Number of heroes (default: 124)"
+        "--num_heroes", type=int, default=128, help="Number of heroes (default: 128)"
     )
     return parser.parse_args()
 
@@ -96,7 +96,8 @@ def resolve_hero_id(
 
 def find_closest_heroes(
     embeddings: torch.nn.Embedding,
-    hero_id: int,
+    contiguous_idx: int,
+    sorted_keys: list[str],
     mapping: dict[str, str],
     num_results: int = 5,
 ) -> list[tuple[str, float]]:
@@ -104,14 +105,15 @@ def find_closest_heroes(
 
     Args:
         embeddings: Frozen embedding layer.
-        hero_id: Query hero ID.
+        contiguous_idx: Query contiguous hero index (1-based).
+        sorted_keys: Linear ordered list of hero API ID keys from mapping file.
         mapping: Hero ID -> name mapping.
         num_results: Number of closest heroes to return.
 
     Returns:
         List of (hero_name, similarity_score) tuples sorted descending.
     """
-    target_emb = embeddings.weight[hero_id].unsqueeze(0)
+    target_emb = embeddings.weight[contiguous_idx].unsqueeze(0)
     all_embs = embeddings.weight
 
     similarities = cosine_similarity(target_emb, all_embs, dim=1)
@@ -121,11 +123,16 @@ def find_closest_heroes(
 
     results: list[tuple[str, float]] = []
     for idx in sorted_indices.tolist():
-        if idx == hero_id:
+        if idx == contiguous_idx or idx == 0:  # Skip self and index 0 (unmapped/padding)
             continue
-        name = mapping.get(str(idx), f"Hero-{idx}")
-        score = similarities[idx].item()
-        results.append((name, score))
+
+        # Convert contiguous 1-based index back to API ID key by linear keys position
+        if idx - 1 < len(sorted_keys):
+            api_id = sorted_keys[idx - 1]
+            name = mapping.get(api_id, f"Hero-{api_id}")
+            score = similarities[idx].item()
+            results.append((name, score))
+            
         if len(results) >= num_results:
             break
 
@@ -156,34 +163,46 @@ def print_results(
 def main() -> None:
     args = parse_args()
 
-    # Load hero mapping
+    # Load hero mapping (API ID -> Name)
     mapping = load_hero_mapping(args.mapping_file)
 
-    # Resolve hero name to ID
-    canonical_name, hero_id = resolve_hero_id(args.hero_name, mapping)
+    # Resolve hero name to API ID
+    canonical_name, api_hero_id = resolve_hero_id(args.hero_name, mapping)
+
+    # Reconstruct linear sorted keys list for contiguous 1-based mapping
+    sorted_keys = sorted(mapping.keys(), key=lambda x: int(x))
+
+    # Get contiguous index for our query hero (1-based index)
+    try:
+        contiguous_idx = sorted_keys.index(str(api_hero_id)) + 1
+    except ValueError:
+        console.print(f"[bold red]Error:[/bold red] Hero '{canonical_name}' (API ID {api_hero_id}) is not present in the mapping keys.")
+        sys.exit(1)
 
     # Load embeddings
     model_path = Path(args.model_path)
     if not model_path.exists():
-        console.print(
-            f"[bold red]Error:[/bold red] Embedding file not found: {model_path}"
-        )
-        console.print(
-            "Train embeddings first: python scripts/02_train_embeddings.py --mode train"
-        )
+        console.print(f"[bold red]Error:[/bold red] Embedding file not found: {model_path}")
+        console.print("Train embeddings first: python scripts/02_train_embeddings.py --mode train")
         sys.exit(1)
 
-    console.print(
-        f"[bold blue]Loading embeddings from: {model_path}[/bold blue]"
-    )
+    console.print(f"[bold blue]Loading embeddings from: {model_path}[/bold blue]")
     embeddings = load_frozen_embeddings(
         weights_path=args.model_path,
         embed_dim=args.embed_dim,
         num_heroes=args.num_heroes,
     )
 
-    # Find closest heroes
-    results = find_closest_heroes(embeddings, hero_id, mapping)
+    # Mean-center the raw embeddings
+    mu = embeddings.weight.mean(dim=0, keepdim=True)
+    centered_emb_weight = embeddings.weight - mu
+    centered_emb_weight[0] = 0.0  # Keep padding at 0
+    
+    # Create a new embedding layer with centered weights
+    centered_embeddings = torch.nn.Embedding.from_pretrained(centered_emb_weight)
+
+    # Find closest heroes using centered embeddings
+    results = find_closest_heroes(centered_embeddings, contiguous_idx, sorted_keys, mapping)
 
     # Print results
     print_results(canonical_name, results)

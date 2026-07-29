@@ -19,11 +19,9 @@ import sys
 from pathlib import Path
 
 import torch
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-
 import torch_geometric.data
+from rich.console import Console
+from rich.table import Table
 
 from dota2drafter.embeddings.data_extractor import (
     ANTAGONIST,
@@ -201,7 +199,8 @@ def main() -> None:
     hero_graph = extractor.build_hero_graph(batches)
 
     console.print(
-        f"[bold blue]Graph built: {hero_graph.num_nodes} nodes, {hero_graph.edge_index.shape[1]} edges[/bold blue]"
+        f"[bold blue]Graph built: {hero_graph.num_nodes} nodes, "
+        f"{hero_graph.edge_index.shape[1]} edges[/bold blue]"
     )
 
     # Query each relationship type

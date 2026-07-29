@@ -17,10 +17,9 @@ import sys
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 from rich.console import Console
-from rich.panel import Panel
 from rich.table import Table
+from torch.nn.functional import cosine_similarity
 
 from dota2drafter.embeddings.pretrainer import load_frozen_embeddings
 
@@ -115,7 +114,7 @@ def find_closest_heroes(
     target_emb = embeddings.weight[hero_id].unsqueeze(0)
     all_embs = embeddings.weight
 
-    similarities = F.cosine_similarity(target_emb, all_embs, dim=1)
+    similarities = cosine_similarity(target_emb, all_embs, dim=1)
 
     # Sort descending
     sorted_indices = similarities.argsort(descending=True)

@@ -82,7 +82,7 @@ def train_rgcn(
 
     # Step 1: Load data
     logger.info("Step 1: Loading data from %s", data_dir)
-    extractor = DataExtractor(num_heroes=124)
+    extractor = DataExtractor(num_heroes=127)
     batches = extractor.load_batches(data_dir)
 
     num_heroes = extractor._num_heroes

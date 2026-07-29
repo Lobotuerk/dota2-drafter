@@ -167,4 +167,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        console.print_exception(show_locals=True)
+        logger.exception("Build comfort script failed with an error:")
+        sys.exit(1)

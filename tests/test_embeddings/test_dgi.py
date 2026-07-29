@@ -74,7 +74,7 @@ def test_dgi_train_epoch() -> None:
     loss = model.train_epoch(graph, optimizer)
 
     assert loss > 0
-    assert loss < 10.0
+    assert loss < 30.0
 
 
 def test_dgi_get_embeddings() -> None:

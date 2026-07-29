@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import itertools
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ def apply_prefix_truncation(
     radiant_players: list[int],
     dire_players: list[int],
     player_comfort_map: dict[int, torch.Tensor] | None = None,
-    player_input_dim: int = 10,
+    player_input_dim: int = 127,
 ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Apply multi-prefix sequence crop augmentation.
 
@@ -43,7 +44,7 @@ def apply_prefix_truncation(
     Returns:
         List of (x_draft, player_comfort, y) tuples for each truncation point.
     """
-    truncation_points = [6, 12, 18, 24]
+    truncation_points = [7, 9, 12, 18, 22, 24]
     samples = []
 
     for t in truncation_points:
@@ -80,12 +81,12 @@ def augment_draft_permutations(
     radiant_players: list[int],
     dire_players: list[int],
     player_comfort_map: dict[int, torch.Tensor] | None = None,
-    player_input_dim: int = 10,
+    player_input_dim: int = 127,
 ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Apply intra-phase draft permutation augmentation.
 
-    Generates 1-2 random valid permutations by swapping same-team, same-phase
-    draft actions (order-invariant in Captains Mode).
+    Exhaustively generates all possible (64) permutations of same-team, same-phase
+    draft actions (which are mathematically order-invariant in Captains Mode).
 
     Args:
         x_draft: Draft sequence tensor of shape (24, 4).
@@ -96,46 +97,54 @@ def augment_draft_permutations(
         player_input_dim: Number of features per comfort vector.
 
     Returns:
-        List of (x_draft, player_comfort, y) tuples including original + permutations.
+        List of (x_draft, player_comfort, y) tuples including all permutation combinations.
     """
     samples = []
     comfort_map = player_comfort_map or {}
 
     # Phase groups: same-team, same-phase draft actions that are order-invariant
     phase_groups = [
-        [0, 2, 4],
-        [1, 3, 5],
-        [6, 8, 10, 12, 14, 16],
-        [7, 9, 11, 13, 15, 17],
-        [18, 20],
-        [19, 21, 22, 23],
+        [0, 1],
+        [2, 3],
+        [5, 6],
+        [9, 10],
+        [13, 14],
+        [15, 16]
     ]
 
-    num_permutations = random.randint(1, 2)
-    for _ in range(num_permutations):
+    # Generate all possible permutations for each group
+    group_permutations = []
+    for group in phase_groups:
+        perms = list(itertools.permutations(group))
+        group_permutations.append(perms)
+
+    # Compute Cartesian product across all groups to get 2^6 = 64 combinations
+    all_perm_combinations = list(itertools.product(*group_permutations))
+
+    # Build player comfort row once (identical for all permutations of this match)
+    comfort_rows: list[torch.Tensor] = []
+    for account_id in radiant_players:
+        if account_id == 0:
+            comfort_rows.append(torch.zeros(player_input_dim))
+        elif account_id in comfort_map:
+            comfort_rows.append(comfort_map[account_id])
+        else:
+            comfort_rows.append(torch.zeros(player_input_dim))
+    for account_id in dire_players:
+        if account_id == 0:
+            comfort_rows.append(torch.zeros(player_input_dim))
+        elif account_id in comfort_map:
+            comfort_rows.append(comfort_map[account_id])
+        else:
+            comfort_rows.append(torch.zeros(player_input_dim))
+    player_comfort = torch.stack(comfort_rows)
+
+    for perm_comb in all_perm_combinations:
         x_permuted = x_draft.clone()
-        for group in phase_groups:
-            if len(group) >= 2 and random.random() < 0.5:
-                i, j = group[0], group[1]
-                x_permuted[i], x_permuted[j] = x_permuted[j].clone(), x_permuted[i].clone()
-
-        comfort_rows: list[torch.Tensor] = []
-        for account_id in radiant_players:
-            if account_id == 0:
-                comfort_rows.append(torch.zeros(player_input_dim))
-            elif account_id in comfort_map:
-                comfort_rows.append(comfort_map[account_id])
-            else:
-                comfort_rows.append(torch.zeros(player_input_dim))
-        for account_id in dire_players:
-            if account_id == 0:
-                comfort_rows.append(torch.zeros(player_input_dim))
-            elif account_id in comfort_map:
-                comfort_rows.append(comfort_map[account_id])
-            else:
-                comfort_rows.append(torch.zeros(player_input_dim))
-        player_comfort = torch.stack(comfort_rows)
-
+        for original_group, perm_group in zip(phase_groups, perm_comb):
+            # Safe slice assignment of permuted values
+            temp = x_draft[list(perm_group)].clone()
+            x_permuted[original_group] = temp
         samples.append((x_permuted, player_comfort, y_label))
 
     return samples
@@ -145,7 +154,7 @@ def augment_draft_permutations(
 class TrainingConfig:
     """Configuration for the Transformer training loop."""
 
-    learning_rate: float = 1e-3
+    learning_rate: float = 1e-4
     num_epochs: int = 50
     batch_size: int = 64
     val_split: float = 0.2
@@ -182,7 +191,7 @@ class PlayerComfortDataset(Dataset):
         radiant_players: list[list[int]],
         dire_players: list[list[int]],
         player_comfort_map: dict[int, torch.Tensor] | None = None,
-        player_input_dim: int = 10,
+        player_input_dim: int = 127,
         augment: bool = False,
     ) -> None:
         """Initialize the dataset.
@@ -206,7 +215,7 @@ class PlayerComfortDataset(Dataset):
 
     def __len__(self) -> int:
         if self.augment:
-            return len(self.x_drafts) * 10
+            return len(self.x_drafts) * 448
         return len(self.x_drafts)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -233,36 +242,39 @@ class PlayerComfortDataset(Dataset):
         return x_draft, player_comfort, y
 
     def _get_augmented_sample(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Get an augmented sample using prefix truncation and permutations."""
-        base_idx = idx // 10
-        sub_idx = idx % 10
+        """Get an augmented sample using prefix truncation applied on top of permuted drafts."""
+        base_idx = idx // 448
+        sub_idx = idx % 448
 
         x_draft = self.x_drafts[base_idx]
         y = self.y_labels[base_idx]
         radiant_players = self.radiant_players[base_idx]
         dire_players = self.dire_players[base_idx]
 
-        # sub_idx 0-3: prefix truncation at 6, 12, 18, 24
-        if sub_idx < 4:
-            truncation_points = [6, 12, 18, 24]
-            t = truncation_points[sub_idx]
-            x_truncated = x_draft.clone()
-            if t < 24:
-                x_truncated[t:, :] = 0.0
-            player_comfort = self._build_player_comfort(base_idx)
-            return x_truncated, player_comfort, y
-
-        # sub_idx 4-9: permutation augmentations (2 permutations)
+        # 1. Generate all 64 permuted drafts first (which includes the original draft!)
         perm_samples = augment_draft_permutations(
             x_draft, y, radiant_players, dire_players,
             self.player_comfort_map, self.player_input_dim,
         )
-        perm_idx = sub_idx - 4
-        if perm_idx < len(perm_samples):
-            return perm_samples[perm_idx]
 
-        # Fallback to basic sample
-        return self._get_basic_sample(base_idx)
+        perm_idx = sub_idx // 7
+        trunc_idx = sub_idx % 7
+
+        if perm_idx >= len(perm_samples):
+            return self._get_basic_sample(base_idx)
+
+        x_permuted, player_comfort, y_label = perm_samples[perm_idx]
+
+        # trunc_idx 0: Keep the un-truncated draft (complete 24 steps)
+        # trunc_idx 1-6: Truncate at [6, 8, 11, 17, 21, 23]
+        if trunc_idx > 0:
+            truncation_points = [6, 8, 11, 17, 21, 23]
+            t = truncation_points[trunc_idx - 1]
+            x_truncated = x_permuted.clone()
+            x_truncated[t:, :] = 0.0
+            return x_truncated, player_comfort, y_label
+
+        return x_permuted, player_comfort, y_label
 
     def _build_player_comfort(self, idx: int) -> torch.Tensor:
         """Build the (10, C) player comfort tensor for a sample.
@@ -371,7 +383,14 @@ class TransformerTrainer:
         self.model = self.model.to(self.device)
 
         self.criterion = nn.BCEWithLogitsLoss()
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.config.learning_rate)
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=self.config.learning_rate,
+            weight_decay=1e-2,
+        )
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=self.config.num_epochs
+        )
 
     def train(
         self,
@@ -402,7 +421,8 @@ class TransformerTrainer:
         train_indices = indices[val_size:]
         val_indices = indices[:val_size]
 
-        player_input_dim = 10
+        # Determine player_input_dim: first try model, then fallback to comfort map or default
+        player_input_dim = getattr(self.model, "player_input_dim", 127)
         if player_comfort_map:
             first_tensor = next(iter(player_comfort_map.values()))
             player_input_dim = first_tensor.size(0)
@@ -500,6 +520,8 @@ class TransformerTrainer:
                     logger.info("Early stopping at epoch %d", epoch)
                     break
 
+            self.scheduler.step()
+
         return self.metrics
 
     def mlm_train(
@@ -534,7 +556,8 @@ class TransformerTrainer:
         torch.manual_seed(42)
         indices = torch.randperm(n).tolist()
 
-        player_input_dim = 10
+        # Determine player_input_dim: first try model, then fallback to comfort map or default
+        player_input_dim = getattr(self.model, "player_input_dim", 127)
         if player_comfort_map:
             first_tensor = next(iter(player_comfort_map.values()))
             player_input_dim = first_tensor.size(0)
@@ -553,14 +576,14 @@ class TransformerTrainer:
 
         os.makedirs(self.config.checkpoint_dir, exist_ok=True)
 
-        # Freeze the Transformer body, train only MLM head
-        for name, param in self.model.named_parameters():
-            if "mlm_head" not in name:
-                param.requires_grad = False
+        # Unfreeze all parameters of the Transformer body to pre-train them on draft compositions
+        for param in self.model.parameters():
+            param.requires_grad = True
 
-        mlm_optimizer = torch.optim.Adam(
-            filter(lambda p: p.requires_grad, self.model.parameters()),
+        mlm_optimizer = torch.optim.AdamW(
+            self.model.parameters(),
             lr=self.config.learning_rate,
+            weight_decay=1e-2,
         )
         mlm_criterion = nn.CrossEntropyLoss()
 
@@ -719,7 +742,7 @@ class _MLMDataset(Dataset):
         radiant_players: list[list[int]],
         dire_players: list[list[int]],
         player_comfort_map: dict[int, torch.Tensor] | None = None,
-        player_input_dim: int = 10,
+        player_input_dim: int = 127,
         mlm_probability: float = 0.15,
     ) -> None:
         """Initialize MLM dataset.

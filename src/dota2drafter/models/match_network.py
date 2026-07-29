@@ -278,7 +278,7 @@ class MatchNetwork(nn.Module):
         dim_feedforward: int = 256,
         dropout: float = 0.1,
         num_heroes: int = 120,
-        player_input_dim: int = 10,
+        player_input_dim: int = 127,
         h_gnn: Optional[torch.Tensor] = None,
     ) -> None:
         """Initialize the Match Network.
@@ -290,11 +290,12 @@ class MatchNetwork(nn.Module):
             dim_feedforward: Feedforward dimension in decoder layers.
             dropout: Dropout rate.
             num_heroes: Number of heroes K.
-            player_input_dim: C, number of input features per player comfort vector.
+            player_input_dim: C, number of input features per player comfort vector (default: 127, matching total hero count).
             h_gnn: Frozen RGCN hero embeddings of shape (K+1, d_model).
         """
         super().__init__()
         self.d_model = d_model
+        self.player_input_dim = player_input_dim
 
         # Player Network
         from dota2drafter.models.player_network import PlayerComfortNetwork as _PCN

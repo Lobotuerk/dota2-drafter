@@ -56,7 +56,10 @@ def parse_args() -> argparse.Namespace:
         help="Path to hero mapping file (default: hero_mapping.json)",
     )
     parser.add_argument(
-        "--num_heroes", type=int, default=124, help="Number of heroes (default: 124)"
+        "--num_heroes", type=int, default=128, help="Number of heroes (default: 128)"
+    )
+    parser.add_argument(
+        "--percentile_keep", type=float, default=0.80, help="Percentile threshold to keep only top-N strongest edges (default: 0.80)"
     )
     return parser.parse_args()
 
@@ -100,8 +103,9 @@ def resolve_hero_id(
 
 def query_edges(
     hero_graph: torch_geometric.data.Data,
-    hero_id: int,
+    contiguous_idx: int,
     edge_type: int,
+    sorted_keys: list[str],
     mapping: dict[str, str],
     num_results: int = 5,
 ) -> list[tuple[str, float]]:
@@ -109,8 +113,9 @@ def query_edges(
 
     Args:
         hero_graph: PyG Data object with edge_index, edge_type, edge_weight.
-        hero_id: Source hero ID.
+        contiguous_idx: Source contiguous hero index (1-based).
         edge_type: Edge type to query (SYNERGY, ANTAGONIST, BANNED_AGAINST).
+        sorted_keys: Linear ordered list of hero API ID keys from mapping file.
         mapping: Hero ID -> name mapping.
         num_results: Number of results to return.
 
@@ -121,9 +126,9 @@ def query_edges(
     edge_types = hero_graph.edge_type   # (num_edges,)
     edge_weights = hero_graph.edge_weight.squeeze(-1)  # (num_edges,)
 
-    # Filter edges where source == hero_id and type matches
+    # Filter edges where source == contiguous_idx and type matches
     mask = (
-        (edge_index[0] == hero_id)
+        (edge_index[0] == contiguous_idx)
         & (edge_types == edge_type)
     )
     edge_ids = torch.where(mask)[0]
@@ -138,10 +143,14 @@ def query_edges(
 
     results: list[tuple[str, float]] = []
     for eid in top_ids.tolist():
-        target_id = int(edge_index[1, eid])
-        name = mapping.get(str(target_id), f"Hero-{target_id}")
-        w = edge_weights[eid].item()
-        results.append((name, w))
+        target_idx = int(edge_index[1, eid])
+        
+        # Convert contiguous 1-based index back to API ID key by linear keys position
+        if target_idx - 1 < len(sorted_keys):
+            api_id = sorted_keys[target_idx - 1]
+            name = mapping.get(api_id, f"Hero-{api_id}")
+            w = edge_weights[eid].item()
+            results.append((name, w))
 
     return results
 
@@ -172,41 +181,45 @@ def print_category(
 def main() -> None:
     args = parse_args()
 
-    # Load hero mapping
+    # Load hero mapping (API ID -> Name)
     mapping = load_hero_mapping(args.mapping_file)
 
-    # Resolve hero name to ID
-    canonical_name, hero_id = resolve_hero_id(args.hero_name, mapping)
+    # Resolve hero name to API ID
+    canonical_name, api_hero_id = resolve_hero_id(args.hero_name, mapping)
+
+    # Reconstruct linear sorted keys list for contiguous 1-based mapping
+    sorted_keys = sorted(mapping.keys(), key=lambda x: int(x))
+
+    # Get contiguous index for our query hero (1-based index)
+    try:
+        contiguous_idx = sorted_keys.index(str(api_hero_id)) + 1
+    except ValueError:
+        console.print(f"[bold red]Error:[/bold red] Hero '{canonical_name}' (API ID {api_hero_id}) is not present in the mapping keys.")
+        sys.exit(1)
 
     # Check data directory
     data_dir = Path(args.data_dir)
     if not data_dir.exists():
-        console.print(
-            f"[bold red]Error:[/bold red] Data directory not found: {data_dir}"
-        )
-        console.print(
-            "Gather data first: python scripts/01_gather_data.py"
-        )
+        console.print(f"[bold red]Error:[/bold red] Data directory not found: {data_dir}")
+        console.print("Gather data first: python scripts/01_gather_data.py")
         sys.exit(1)
 
-    console.print(
-        f"[bold blue]Building hero graph from: {data_dir}[/bold blue]"
-    )
+    console.print(f"[bold blue]Building hero graph from: {data_dir}[/bold blue]")
 
-    # Build graph
+    # Build and prune graph
     extractor = DataExtractor(num_heroes=args.num_heroes)
     batches = extractor.load_batches(data_dir)
-    hero_graph = extractor.build_hero_graph(batches)
+    hero_graph = extractor.build_pruned_hero_graph(batches, percentile_keep=args.percentile_keep)
 
     console.print(
         f"[bold blue]Graph built: {hero_graph.num_nodes} nodes, "
         f"{hero_graph.edge_index.shape[1]} edges[/bold blue]"
     )
 
-    # Query each relationship type
-    synergy_results = query_edges(hero_graph, hero_id, SYNERGY, mapping)
-    antagonist_results = query_edges(hero_graph, hero_id, ANTAGONIST, mapping)
-    banned_results = query_edges(hero_graph, hero_id, BANNED_AGAINST, mapping)
+    # Query each relationship type using the linear contiguous indices
+    synergy_results = query_edges(hero_graph, contiguous_idx, SYNERGY, sorted_keys, mapping)
+    antagonist_results = query_edges(hero_graph, contiguous_idx, ANTAGONIST, sorted_keys, mapping)
+    banned_results = query_edges(hero_graph, contiguous_idx, BANNED_AGAINST, sorted_keys, mapping)
 
     # Print results
     print_category(

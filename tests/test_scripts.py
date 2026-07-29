@@ -70,17 +70,19 @@ def test_find_closest_heroes() -> None:
     import importlib
     test_skip_gram = importlib.import_module("scripts.05_test_skip_gram")
     mapping = {"0": "Hero-0", "1": "Hero-1", "2": "Hero-2"}
+    sorted_keys = ["0", "1", "2"]
 
-    # Create mock embeddings: Hero-1 is very close to Hero-0, and Hero-2 is orthogonal
+    # Create mock embeddings: Index 2 (Hero-1) is very close to Index 1 (Hero-0), and Index 3 is orthogonal
     weight = torch.tensor([
-        [1.0, 0.0],  # Hero-0
-        [0.9, 0.1],  # Hero-1 (close to Hero-0)
-        [0.0, 1.0],  # Hero-2 (orthogonal)
+        [0.0, 0.0],  # Index 0
+        [1.0, 0.0],  # Index 1 (Hero-0)
+        [0.9, 0.1],  # Index 2 (Hero-1)
+        [0.0, 1.0],  # Index 3 (Hero-2)
     ])
     embeddings = torch.nn.Embedding.from_pretrained(weight)
 
     results = test_skip_gram.find_closest_heroes(
-        embeddings, hero_id=0, mapping=mapping, num_results=2
+        embeddings, contiguous_idx=1, sorted_keys=sorted_keys, mapping=mapping, num_results=2
     )
     assert len(results) == 2
     assert results[0][0] == "Hero-1"
@@ -95,12 +97,13 @@ def test_query_edges() -> None:
     import torch_geometric.data
     test_rgcn = importlib.import_module("scripts.06_test_rgcn")
     mapping = {"0": "Hero-0", "1": "Hero-1", "2": "Hero-2", "3": "Hero-3"}
+    sorted_keys = ["0", "1", "2", "3"]
 
-    # Build simple graph with 4 nodes:
+    # Build simple graph with 1-based indices (source is index 1, targets are indices 2, 3, 4)
     # edge_index: [source, target]
     edge_index = torch.tensor([
-        [0, 0, 0, 1],
-        [1, 2, 3, 2]
+        [1, 1, 1, 2],
+        [2, 3, 4, 3]
     ], dtype=torch.long)
     edge_type = torch.tensor([0, 0, 1, 0], dtype=torch.long)  # 0: SYNERGY, 1: ANTAGONIST
     edge_weight = torch.tensor([[0.8], [0.9], [0.5], [0.7]], dtype=torch.float)
@@ -109,12 +112,12 @@ def test_query_edges() -> None:
         edge_index=edge_index,
         edge_type=edge_type,
         edge_weight=edge_weight,
-        num_nodes=4
+        num_nodes=5
     )
 
-    # Query synergy (type 0) for hero 0. Should return targets [2, 1] ordered by weight descending.
+    # Query synergy (type 0) for contiguous index 1. Should return targets [3, 2] ordered by weight descending.
     synergy_results = test_rgcn.query_edges(
-        graph, hero_id=0, edge_type=0, mapping=mapping, num_results=5
+        graph, contiguous_idx=1, edge_type=0, sorted_keys=sorted_keys, mapping=mapping, num_results=5
     )
     assert len(synergy_results) == 2
     assert synergy_results[0][0] == "Hero-2"
@@ -122,9 +125,9 @@ def test_query_edges() -> None:
     assert synergy_results[1][0] == "Hero-1"
     assert pytest.approx(synergy_results[1][1]) == 0.8
 
-    # Query antagonist (type 1) for hero 0. Should return target [3].
+    # Query antagonist (type 1) for contiguous index 1. Should return target [3].
     antagonist_results = test_rgcn.query_edges(
-        graph, hero_id=0, edge_type=1, mapping=mapping, num_results=5
+        graph, contiguous_idx=1, edge_type=1, sorted_keys=sorted_keys, mapping=mapping, num_results=5
     )
     assert len(antagonist_results) == 1
     assert antagonist_results[0][0] == "Hero-3"

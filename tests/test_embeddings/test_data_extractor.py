@@ -212,3 +212,32 @@ def test_data_extractor_empty_graph(tmp_path: Path) -> None:
     assert graph.edge_index.shape[1] == 0
     assert graph.edge_type.shape[0] == 0
     assert graph.edge_weight.shape[0] == 0
+
+
+def test_data_extractor_build_pruned_hero_graph() -> None:
+    """Test building a pruned graph with percentile cutoff thresholds."""
+    extractor = DataExtractor(num_heroes=20)
+
+    steps = []
+    # 5 Radiant picks
+    for i in range(5):
+        steps.append([1.0, 0.0, float(i + 1)])
+    # 5 Dire picks
+    for i in range(5):
+        steps.append([1.0, 1.0, float(i + 6)])
+    # 2 Radiant bans (steps 20-21)
+    steps.append([0.0, 0.0, 11.0])
+    steps.append([0.0, 0.0, 12.0])
+    # 2 Dire bans (steps 22-23)
+    steps.append([0.0, 1.0, 2.0])
+    steps.append([0.0, 1.0, 3.0])
+
+    # Multiply counts significantly to satisfy threshold conditions
+    x = torch.stack([torch.tensor(steps)] * 50)
+    y = torch.tensor([1.0] * 50)
+
+    batches = [{"x": x, "y": y}]
+    graph = extractor.build_pruned_hero_graph(batches, percentile_keep=0.50)
+
+    assert graph.num_nodes == 21
+    assert graph.edge_index.shape[0] == 2

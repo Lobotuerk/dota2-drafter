@@ -86,7 +86,12 @@ Trains Skip-Gram + DGI hero embeddings.
 ```bash
 # Train
 python scripts/02_train_embeddings.py --mode train \
-    --data_dir data --output_file models/skip_gram_dgi.pt
+    --data_dir data \
+    --output_file models/skip_gram_dgi.pt \
+    --dgi_epochs 100 \
+    --skip_gram_epochs 10 \
+    --embed_dim 64 \
+    --dgi_lr 5e-4
 
 # Predict (print embedding for a specific hero)
 python scripts/02_train_embeddings.py --mode predict \
@@ -103,10 +108,13 @@ Trains the Relational GNN over the multi-relational hero graph.
 
 ```bash
 # Train
-python scripts/03_train_rgcn.py --mode train \
-    --data_dir data \
-    --frozen_embeddings_path models/skip_gram_dgi.pt \
-    --output_file models/rgcn.pt
+python scripts/03_train_rgcn.py --mode train  \
+    --data_dir data  \
+    --frozen_embeddings_path models/skip_gram_dgi.pt  \
+    --output_file models/rgcn.pt \
+    --d_model 64 \
+    --rgcn_epochs 275 \
+    --learning_rate 1.5e-3
 
 # Predict (extract structural hero embeddings)
 python scripts/03_train_rgcn.py --mode predict \
@@ -125,11 +133,20 @@ Trains the Hierarchical Sequence Transformer for match prediction.
 
 ```bash
 # Train (requires data from stages 1, 1b, and 3)
-python scripts/04_train_transformer.py --mode train \
-    --data_dir data \
+python scripts/04_train_transformer.py --mode train  \
+    --data_dir data  \
     --rgcn_path models/rgcn.pt \
     --comfort_path data/player_comfort.pt \
-    --checkpoint_dir checkpoints
+    --checkpoint_dir checkpoints \
+    --device cuda \
+    --dropout 0.3 \
+    --learning_rate 1e-4 \
+    --label_smoothing_eps 0.6 \
+    --mlm_epochs 10 \
+    --num_heroes 127 \
+    --d_model 64 \
+    --dim_feedforward 128 \
+    --augment True
 
 # Predict (requires a trained checkpoint)
 python scripts/04_train_transformer.py --mode predict \

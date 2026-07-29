@@ -10,6 +10,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from dota2drafter.embeddings.data_extractor import DataExtractor
 from dota2drafter.embeddings.skip_gram import SkipGramDataset, SkipGramModel
@@ -18,13 +19,39 @@ from dota2drafter.embeddings.dgi import DGIModel
 logger = logging.getLogger(__name__)
 
 
+@torch.no_grad()
+def check_embedding_health(model: DGIModel, x: torch.Tensor, edge_index: torch.Tensor) -> float:
+    """Print the similarity distribution metrics to monitor embedding health during training."""
+    model.eval()
+    if x.shape[1] != model.embed_dim:
+        x = model.feature_proj(x.to(edge_index.device))
+        
+    emb = model.encoder(x, edge_index)  # Shape: [num_nodes, embed_dim]
+    emb = F.normalize(emb, p=2, dim=1)  # Ensure L2 normalized
+    
+    # Compute full pairwise cosine similarity
+    sim_matrix = torch.mm(emb, emb.T)
+    
+    # Mask out self-similarity (diagonal)
+    mask = ~torch.eye(sim_matrix.size(0), dtype=torch.bool, device=emb.device)
+    off_diag_sim = sim_matrix[mask]
+    
+    mean_sim = off_diag_sim.mean().item()
+    min_sim  = off_diag_sim.min().item()
+    max_sim  = off_diag_sim.max().item()
+    
+    print(f"Stats -> Mean Sim: {mean_sim:.3f} | Min: {min_sim:.3f} | Max: {max_sim:.3f}")
+    return mean_sim
+
+
 def train_embeddings(
     data_dir: str | Path,
     output_file: str | Path,
     embed_dim: int = 64,
     skip_gram_epochs: int = 10,
     dgi_epochs: int = 20,
-    learning_rate: float = 1e-2,
+    skip_gram_lr: float = 1e-2,
+    dgi_lr: float = 1e-2,
     batch_size: int = 256,
     device: str | None = None,
 ) -> Path:
@@ -39,7 +66,8 @@ def train_embeddings(
         embed_dim: Dimension of the embedding space
         skip_gram_epochs: Number of Skip-Gram training epochs
         dgi_epochs: Number of DGI training epochs
-        learning_rate: Learning rate for both optimizers
+        skip_gram_lr: Learning rate for Skip-Gram optimizer
+        dgi_lr: Learning rate for DGI optimizer
         batch_size: Batch size for Skip-Gram DataLoader
         device: Device to train on (auto-detected if None)
 
@@ -85,7 +113,7 @@ def train_embeddings(
         drop_last=False,
     )
 
-    skip_optimizer = torch.optim.Adam(skip_gram.parameters(), lr=learning_rate)
+    skip_optimizer = torch.optim.Adam(skip_gram.parameters(), lr=skip_gram_lr)
 
     for epoch in range(1, skip_gram_epochs + 1):
         avg_loss = skip_gram.train_epoch(dataloader, skip_optimizer, device)
@@ -100,7 +128,8 @@ def train_embeddings(
     # Step 3: Train DGI
     logger.info("Step 3: Training DGI model (epochs=%d)", dgi_epochs)
     dgi = DGIModel(embed_dim)
-    dgi_optimizer = torch.optim.Adam(dgi.parameters(), lr=learning_rate)
+    dgi_optimizer = torch.optim.Adam(dgi.parameters(), lr=dgi_lr, weight_decay=1e-4)
+    dgi_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(dgi_optimizer, T_max=dgi_epochs)
 
     # Move graph to device
     hero_graph = hero_graph.to(device)
@@ -114,6 +143,9 @@ def train_embeddings(
     for epoch in range(1, dgi_epochs + 1):
         avg_loss = dgi.train_epoch(hero_graph, dgi_optimizer, device)
         logger.info("DGI epoch %d/%d, loss: %.4f", epoch, dgi_epochs, avg_loss)
+        if epoch % 10 == 0:
+            check_embedding_health(dgi, hero_graph.x, hero_graph.edge_index)
+        dgi_scheduler.step()
 
     # Extract final DGI embeddings
     final_embeddings = dgi.get_embeddings(hero_graph, device)

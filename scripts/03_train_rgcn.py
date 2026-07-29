@@ -29,6 +29,7 @@ from pathlib import Path
 
 import torch
 from rich.console import Console
+from rich.logging import RichHandler
 
 from dota2drafter.embeddings.data_extractor import DataExtractor
 from dota2drafter.embeddings.train_rgcn import load_rgcn_embeddings, train_rgcn
@@ -80,10 +81,13 @@ def parse_args() -> argparse.Namespace:
         "--rgcn_epochs", type=int, default=20, help="RGCN training epochs (default: 20)"
     )
     parser.add_argument(
-        "--learning_rate", type=float, default=1e-2, help="Learning rate (default: 1e-2)"
+        "--learning_rate", type=float, default=1.5e-3, help="Learning rate (default: 1.5e-3)"
     )
     parser.add_argument(
         "--num_layers", type=int, default=2, help="Number of RGCN layers (default: 2)"
+    )
+    parser.add_argument(
+        "--percentile_keep", type=float, default=0.80, help="Percentile threshold to keep only top-N strongest edges (default: 0.80)"
     )
     parser.add_argument(
         "--device", type=str, default=None, help='Device: "cpu" or "cuda" (auto-detect if None)'
@@ -95,6 +99,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        handlers=[RichHandler(rich_tracebacks=True)],
+    )
     args = parse_args()
 
     if args.mode == "train":
@@ -124,6 +133,7 @@ def main() -> None:
             learning_rate=args.learning_rate,
             device=args.device,
             num_layers=args.num_layers,
+            percentile_keep=args.percentile_keep,
         )
         console.print(f"[bold green]Saved RGCN model to: {result}[/bold green]")
 
@@ -162,4 +172,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        console.print_exception(show_locals=True)
+        logger.exception("Train RGCN script failed with an error:")
+        sys.exit(1)

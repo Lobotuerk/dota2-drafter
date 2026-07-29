@@ -58,7 +58,6 @@ class HeroRGCN(nn.Module):
 
         # RGCN layers
         layers: list[nn.Module] = []
-        ln_layers: list[nn.Module] = []
         input_dim = d_model
 
         for layer_idx in range(num_layers):
@@ -71,11 +70,9 @@ class HeroRGCN(nn.Module):
                     num_bases=None,
                 )
             )
-            ln_layers.append(nn.LayerNorm(output_dim))
             input_dim = output_dim
 
         self.rgcn_layers = nn.ModuleList(layers)
-        self.ln_layers = nn.ModuleList(ln_layers)
         self.activation = nn.LeakyReLU()
 
     def forward(
@@ -98,20 +95,17 @@ class HeroRGCN(nn.Module):
         for i, rgcn_layer in enumerate(self.rgcn_layers):
             h_in = h
             h_out = rgcn_layer(h, edge_index, edge_type)
-            
+
             # If input and output dimensions match, we can do a residual skip connection
             if h_in.shape == h_out.shape:
                 h = h_out + h_in
             else:
                 h = h_out
-                
-            # Apply LayerNorm
-            h = self.ln_layers[i](h)
-            
+
             # Apply activation
             if i < len(self.rgcn_layers) - 1:
                 h = self.activation(h)
-                
+
             # Apply L2 Unit-Sphere Normalization
             h = F.normalize(h, p=2, dim=1)
 

@@ -131,6 +131,7 @@ class HierarchicalTransformer(nn.Module):
     - Joint embedding layer: maps a_t = (h_t, p_t, c_t, o_t) to z_t
     - Transformer body: stacked decoder layers with self-attention + cross-attention
     - Output head: masked global average pooling + MLP + sigmoid
+    - MLM head: predicts masked hero identities for pre-training
     """
 
     def __init__(
@@ -157,6 +158,7 @@ class HierarchicalTransformer(nn.Module):
         """
         super().__init__()
         self.d_model = d_model
+        self.num_heroes = num_heroes
 
         # Hero embeddings if not provided
         if h_gnn is None:
@@ -184,10 +186,14 @@ class HierarchicalTransformer(nn.Module):
             nn.Linear(dim_feedforward, 1),
         )
 
+        # MLM head for Masked Language Modeling pre-training
+        self.mlm_head = nn.Linear(d_model, num_heroes + 1)
+
     def forward(
         self,
         x_draft: torch.Tensor,
         player_pref_vectors: torch.Tensor,
+        mlm_mode: bool = False,
     ) -> torch.Tensor:
         """Forward pass through the Match Network.
 
@@ -195,9 +201,12 @@ class HierarchicalTransformer(nn.Module):
             x_draft: Draft sequence tensor of shape (B, 24, 4).
             player_pref_vectors: Player preference vectors from PlayerComfortNetwork,
                                  shape (B, 10, d_model).
+            mlm_mode: If True, return MLM logits for masked hero prediction
+                      instead of win probability.
 
         Returns:
-            Win probability scalar per sample, shape (B,).
+            If mlm_mode is False: Win probability scalar per sample, shape (B,).
+            If mlm_mode is True: MLM logits per step, shape (B, 24, num_heroes + 1).
         """
         batch_size = x_draft.size(0)
 
@@ -223,18 +232,20 @@ class HierarchicalTransformer(nn.Module):
             tgt_mask=causal_mask,
         )  # (B, 24, d_model)
 
-        # Masked global average pooling
-        # Create a mask for valid picks (is_pick == 1.0)
+        if mlm_mode:
+            # MLM mode: return per-step hero prediction logits
+            mlm_logits = self.mlm_head(decoder_output)
+            return mlm_logits
+
+        # Win prediction mode: masked global average pooling + output head
         is_pick = x_draft[:, :, 0]  # (B, 24)
         valid_mask = is_pick == 1.0  # (B, 24)
         valid_mask = valid_mask.unsqueeze(-1).float()  # (B, 24, 1)
 
-        # Apply mask and compute mean
         masked_output = decoder_output * valid_mask  # (B, 24, d_model)
         sum_mask = valid_mask.sum(dim=1, keepdim=True).clamp(min=1).squeeze(-1)  # (B, 1)
         pooled = masked_output.sum(dim=1) / sum_mask  # (B, d_model)
 
-        # Output head
         logits = self.output_head(pooled).squeeze(-1)  # (B,)
 
         return logits
@@ -249,7 +260,7 @@ class HierarchicalTransformer(nn.Module):
         Returns:
             Win probability, shape (B,).
         """
-        logits = self.forward(x_draft, player_pref_vectors)
+        logits = self.forward(x_draft, player_pref_vectors, mlm_mode=False)
         return torch.sigmoid(logits)
 
 
@@ -308,21 +319,25 @@ class MatchNetwork(nn.Module):
         self,
         x_draft: torch.Tensor,
         player_comfort: torch.Tensor,
+        mlm_mode: bool = False,
     ) -> torch.Tensor:
         """Forward pass through the full Match Network.
 
         Args:
             x_draft: Draft sequence tensor of shape (B, 24, 4).
             player_comfort: Player comfort tensor of shape (B, 10, C).
+            mlm_mode: If True, return MLM logits for masked hero prediction.
 
         Returns:
-            Win probability logits, shape (B,).
+            If mlm_mode is False: Win probability logits, shape (B,).
+            If mlm_mode is True: MLM logits, shape (B, 24, num_heroes + 1).
         """
-        # Player Network: (B, 10, C) -> (B, 10, d_model)
         player_pref_vectors = self.player_network(player_comfort)
 
-        # Match Network: (B, 24, d_model) -> (B,)
-        logits = self.match_network(x_draft, player_pref_vectors)
+        if mlm_mode:
+            logits = self.match_network(x_draft, player_pref_vectors, mlm_mode=True)
+        else:
+            logits = self.match_network(x_draft, player_pref_vectors, mlm_mode=False)
 
         return logits
 
@@ -340,5 +355,5 @@ class MatchNetwork(nn.Module):
         Returns:
             Win probability, shape (B,).
         """
-        logits = self.forward(x_draft, player_comfort)
+        logits = self.forward(x_draft, player_comfort, mlm_mode=False)
         return torch.sigmoid(logits)

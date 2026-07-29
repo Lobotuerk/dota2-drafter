@@ -232,7 +232,7 @@ class PlayerComfortDataset(Dataset):
                     self.player_comfort_map, self.player_input_dim,
                 )
 
-                for perm_idx in range(448):
+                for perm_idx in range(64):
                     if perm_idx < len(perm_samples):
                         x_permuted, player_comfort, y_label = perm_samples[perm_idx]
                         # perm_idx 0: un-truncated draft
@@ -243,9 +243,10 @@ class PlayerComfortDataset(Dataset):
                             x_truncated[t:, :] = 0.0
                             self.samples.append((x_truncated, player_comfort, y_label))
                     else:
-                        # Pad with basic sample to maintain 448 multiplier
+                        # Pad with basic sample 7 times to maintain 448 multiplier (64 * 7 = 448)
                         basic = self._build_player_comfort_sample(base_idx)
-                        self.samples.append(basic)
+                        for _ in range(7):
+                            self.samples.append(basic)
 
             # Free raw data after pre-computation
             self.x_drafts = []

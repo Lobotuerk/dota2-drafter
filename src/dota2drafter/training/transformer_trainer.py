@@ -213,10 +213,49 @@ class PlayerComfortDataset(Dataset):
         self.player_input_dim = player_input_dim
         self.augment = augment
 
+        # Pre-compute all samples upfront to avoid per-call permutation generation
+        self.samples: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+
+        if not augment:
+            for idx in range(len(x_drafts)):
+                self.samples.append(self._build_player_comfort_sample(idx))
+        else:
+            truncation_points = [6, 8, 11, 17, 21, 23]
+            for base_idx in range(len(x_drafts)):
+                x_draft = x_drafts[base_idx]
+                y = y_labels[base_idx]
+                radiant = radiant_players[base_idx]
+                dire = dire_players[base_idx]
+
+                perm_samples = augment_draft_permutations(
+                    x_draft, y, radiant, dire,
+                    self.player_comfort_map, self.player_input_dim,
+                )
+
+                for perm_idx in range(64):
+                    if perm_idx < len(perm_samples):
+                        x_permuted, player_comfort, y_label = perm_samples[perm_idx]
+                        # perm_idx 0: un-truncated draft
+                        self.samples.append((x_permuted, player_comfort, y_label))
+                        # perm_idx 1-6: truncated at [6, 8, 11, 17, 21, 23]
+                        for t in truncation_points:
+                            x_truncated = x_permuted.clone()
+                            x_truncated[t:, :] = 0.0
+                            self.samples.append((x_truncated, player_comfort, y_label))
+                    else:
+                        # Pad with basic sample 7 times to maintain 448 multiplier (64 * 7 = 448)
+                        basic = self._build_player_comfort_sample(base_idx)
+                        for _ in range(7):
+                            self.samples.append(basic)
+
+            # Free raw data after pre-computation
+            self.x_drafts = []
+            self.y_labels = []
+            self.radiant_players = []
+            self.dire_players = []
+
     def __len__(self) -> int:
-        if self.augment:
-            return len(self.x_drafts) * 448
-        return len(self.x_drafts)
+        return len(self.samples)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Get a single sample.
@@ -230,9 +269,7 @@ class PlayerComfortDataset(Dataset):
             - player_comfort: (10, player_input_dim)
             - y: (1,)
         """
-        if self.augment:
-            return self._get_augmented_sample(idx)
-        return self._get_basic_sample(idx)
+        return self.samples[idx]
 
     def _get_basic_sample(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Get a basic sample without augmentation."""
@@ -241,40 +278,15 @@ class PlayerComfortDataset(Dataset):
         player_comfort = self._build_player_comfort(idx)
         return x_draft, player_comfort, y
 
-    def _get_augmented_sample(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Get an augmented sample using prefix truncation applied on top of permuted drafts."""
-        base_idx = idx // 448
-        sub_idx = idx % 448
-
-        x_draft = self.x_drafts[base_idx]
-        y = self.y_labels[base_idx]
-        radiant_players = self.radiant_players[base_idx]
-        dire_players = self.dire_players[base_idx]
-
-        # 1. Generate all 64 permuted drafts first (which includes the original draft!)
-        perm_samples = augment_draft_permutations(
-            x_draft, y, radiant_players, dire_players,
-            self.player_comfort_map, self.player_input_dim,
-        )
-
-        perm_idx = sub_idx // 7
-        trunc_idx = sub_idx % 7
-
-        if perm_idx >= len(perm_samples):
-            return self._get_basic_sample(base_idx)
-
-        x_permuted, player_comfort, y_label = perm_samples[perm_idx]
-
-        # trunc_idx 0: Keep the un-truncated draft (complete 24 steps)
-        # trunc_idx 1-6: Truncate at [6, 8, 11, 17, 21, 23]
-        if trunc_idx > 0:
-            truncation_points = [6, 8, 11, 17, 21, 23]
-            t = truncation_points[trunc_idx - 1]
-            x_truncated = x_permuted.clone()
-            x_truncated[t:, :] = 0.0
-            return x_truncated, player_comfort, y_label
-
-        return x_permuted, player_comfort, y_label
+    def _build_player_comfort_sample(
+        self,
+        idx: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build a basic sample tuple (x_draft, player_comfort, y) for pre-computation."""
+        x_draft = self.x_drafts[idx]
+        y = self.y_labels[idx]
+        player_comfort = self._build_player_comfort(idx)
+        return x_draft, player_comfort, y
 
     def _build_player_comfort(self, idx: int) -> torch.Tensor:
         """Build the (10, C) player comfort tensor for a sample.

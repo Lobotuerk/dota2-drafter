@@ -2,7 +2,7 @@
 
 import torch
 from pathlib import Path
-from dota2drafter.embeddings.data_extractor import DataExtractor, SkipGramPair, SYNERGY, ANTAGONIST, BANNED_AGAINST
+from dota2drafter.embeddings.data_extractor import DataExtractor, SkipGramPair, SYNERGY, ANTAGONIST, REQUIRED_BANS
 
 
 def _create_mock_batches(tmp_path: Path, num_matches: int = 10) -> Path:
@@ -23,7 +23,7 @@ def _create_mock_batches(tmp_path: Path, num_matches: int = 10) -> Path:
                 team = 0.0
                 hero = (step % 10) + 1
 
-            steps.append([is_pick, team, float(hero)])
+            steps.append([is_pick, team, float(hero), float(step)])
 
         x = torch.tensor(steps, dtype=torch.float32)
         y = torch.tensor([1.0 if batch_idx % 2 == 0 else 0.0])
@@ -40,7 +40,7 @@ def test_data_extractor_load_batches(tmp_path: Path) -> None:
 
     batches = extractor.load_batches(data_dir)
     assert len(batches) == 10
-    assert batches[0]["x"].shape == (24, 3)
+    assert batches[0]["x"].shape == (24, 4)
     assert batches[0]["y"].shape == (1,)
 
 
@@ -119,29 +119,29 @@ def test_data_extractor_hero_graph_correct_math() -> None:
     # Construct 2 matches manually
     # Match 1: Radiant [1, 2, 3, 4, 5], Dire [6, 7, 8, 9, 10]. Radiant wins (y=1).
     steps1 = []
-    # 5 picks for Radiant
+    # 5 picks for Radiant (steps 0-4)
     for i in range(5):
-        steps1.append([1.0, 0.0, float(i + 1)])
-    # 5 picks for Dire
+        steps1.append([1.0, 0.0, float(i + 1), float(i)])
+    # 5 picks for Dire (steps 5-9)
     for i in range(5):
-        steps1.append([1.0, 1.0, float(i + 6)])
-    # pad to 24 steps with bans or placeholders
+        steps1.append([1.0, 1.0, float(i + 6), float(i + 5)])
+    # pad to 24 steps with bans or placeholders (steps 10-23)
     for i in range(14):
-        steps1.append([0.0, 0.0, 1.0])
+        steps1.append([0.0, 0.0, 1.0, float(i + 10)])
 
     # Match 2: Radiant [1, 2, 3, 11, 12], Dire [6, 13, 14, 15, 16]. Dire wins (y=0).
     steps2 = []
-    # Radiant picks
-    for h in [1, 2, 3, 11, 12]:
-        steps2.append([1.0, 0.0, float(h)])
-    # Dire picks
-    for h in [6, 13, 14, 15, 16]:
-        steps2.append([1.0, 1.0, float(h)])
+    # Radiant picks (steps 0-4)
+    for i, h in enumerate([1, 2, 3, 11, 12]):
+        steps2.append([1.0, 0.0, float(h), float(i)])
+    # Dire picks (steps 5-9)
+    for i, h in enumerate([6, 13, 14, 15, 16]):
+        steps2.append([1.0, 1.0, float(h), float(i + 5)])
     for i in range(14):
-        steps2.append([0.0, 0.0, 1.0])
+        steps2.append([0.0, 0.0, 1.0, float(i + 10)])
 
     # Repeat each match 6 times to satisfy the threshold filters (total >= 5 and total >= 3)
-    x = torch.stack([torch.tensor(steps1)] * 6 + [torch.tensor(steps2)] * 6)  # (12, 24, 3)
+    x = torch.stack([torch.tensor(steps1)] * 6 + [torch.tensor(steps2)] * 6)  # (12, 24, 4)
     y = torch.tensor([1.0] * 6 + [0.0] * 6)  # (12,)
 
     batches = [{"x": x, "y": y}]
@@ -169,18 +169,18 @@ def test_data_extractor_multirelational_edge_types(tmp_path: Path) -> None:
 
     # Create matches with picks and bans
     steps = []
-    # 5 Radiant picks
+    # 5 Radiant picks (steps 0-4)
     for i in range(5):
-        steps.append([1.0, 0.0, float(i + 1)])
-    # 5 Dire picks
+        steps.append([1.0, 0.0, float(i + 1), float(i)])
+    # 5 Dire picks (steps 5-9)
     for i in range(5):
-        steps.append([1.0, 1.0, float(i + 6)])
-    # 2 Radiant bans (steps 20-21)
-    steps.append([0.0, 0.0, 11.0])
-    steps.append([0.0, 0.0, 12.0])
-    # 2 Dire bans (steps 22-23)
-    steps.append([0.0, 1.0, 2.0])
-    steps.append([0.0, 1.0, 3.0])
+        steps.append([1.0, 1.0, float(i + 6), float(i + 5)])
+    # 2 Radiant bans (steps 20-21) - after Radiant picks by same team → REQUIRED_BANS
+    steps.append([0.0, 0.0, 11.0, 20.0])
+    steps.append([0.0, 0.0, 12.0, 21.0])
+    # 2 Dire bans (steps 22-23) - after Dire picks by same team → REQUIRED_BANS
+    steps.append([0.0, 1.0, 2.0, 22.0])
+    steps.append([0.0, 1.0, 3.0, 23.0])
 
     x = torch.stack([torch.tensor(steps)] * 20)  # Repeat to satisfy thresholds
     y = torch.tensor([1.0] * 20)
@@ -192,7 +192,7 @@ def test_data_extractor_multirelational_edge_types(tmp_path: Path) -> None:
     unique_types = set(graph.edge_type.tolist())
     assert SYNERGY in unique_types, "Synergy edges (type 0) should be present"
     assert ANTAGONIST in unique_types, "Antagonist edges (type 1) should be present"
-    assert BANNED_AGAINST in unique_types, "Banned-against edges (type 2) should be present"
+    assert REQUIRED_BANS in unique_types, "Required-bans edges (type 2) should be present"
 
 
 def test_data_extractor_empty_graph(tmp_path: Path) -> None:
@@ -200,7 +200,7 @@ def test_data_extractor_empty_graph(tmp_path: Path) -> None:
     extractor = DataExtractor(num_heroes=20)
 
     # Create a batch with no picks
-    steps = [[0.0, 0.0, 1.0]] * 24
+    steps = [[0.0, 0.0, 1.0, float(i)] for i in range(24)]
     x = torch.tensor(steps, dtype=torch.float32).unsqueeze(0)
     y = torch.tensor([1.0])
 
@@ -219,18 +219,18 @@ def test_data_extractor_build_pruned_hero_graph() -> None:
     extractor = DataExtractor(num_heroes=20)
 
     steps = []
-    # 5 Radiant picks
+    # 5 Radiant picks (steps 0-4)
     for i in range(5):
-        steps.append([1.0, 0.0, float(i + 1)])
-    # 5 Dire picks
+        steps.append([1.0, 0.0, float(i + 1), float(i)])
+    # 5 Dire picks (steps 5-9)
     for i in range(5):
-        steps.append([1.0, 1.0, float(i + 6)])
-    # 2 Radiant bans (steps 20-21)
-    steps.append([0.0, 0.0, 11.0])
-    steps.append([0.0, 0.0, 12.0])
-    # 2 Dire bans (steps 22-23)
-    steps.append([0.0, 1.0, 2.0])
-    steps.append([0.0, 1.0, 3.0])
+        steps.append([1.0, 1.0, float(i + 6), float(i + 5)])
+    # 2 Radiant bans (steps 20-21) - after Radiant picks by same team → REQUIRED_BANS
+    steps.append([0.0, 0.0, 11.0, 20.0])
+    steps.append([0.0, 0.0, 12.0, 21.0])
+    # 2 Dire bans (steps 22-23) - after Dire picks by same team → REQUIRED_BANS
+    steps.append([0.0, 1.0, 2.0, 22.0])
+    steps.append([0.0, 1.0, 3.0, 23.0])
 
     # Multiply counts significantly to satisfy threshold conditions
     x = torch.stack([torch.tensor(steps)] * 50)

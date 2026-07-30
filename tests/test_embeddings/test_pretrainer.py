@@ -23,7 +23,7 @@ def _create_mock_data_dir(tmp_path: Path, num_matches: int = 5) -> Path:
                 team = 0.0
                 hero = (step % 10) + 1
 
-            steps.append([is_pick, team, float(hero)])
+            steps.append([is_pick, team, float(hero), float(step)])
 
         x = torch.tensor(steps, dtype=torch.float32)
         y = torch.tensor([1.0 if batch_idx % 2 == 0 else 0.0])

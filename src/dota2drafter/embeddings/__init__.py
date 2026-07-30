@@ -5,7 +5,7 @@ from dota2drafter.embeddings.data_extractor import (
     SkipGramPair,
     SYNERGY,
     ANTAGONIST,
-    BANNED_AGAINST,
+    REQUIRED_BANS,
 )
 from dota2drafter.embeddings.skip_gram import SkipGramModel
 from dota2drafter.embeddings.dgi import DGIModel
@@ -24,7 +24,7 @@ __all__ = [
     "SkipGramPair",
     "SYNERGY",
     "ANTAGONIST",
-    "BANNED_AGAINST",
+    "REQUIRED_BANS",
     "SkipGramModel",
     "DGIModel",
     "HeroRGCN",

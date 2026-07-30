@@ -1,9 +1,11 @@
 """Tests for pretrainer module."""
 
+from pathlib import Path
+
 import torch
 import torch.nn as nn
-from pathlib import Path
-from dota2drafter.embeddings.pretrainer import train_embeddings, load_frozen_embeddings
+
+from dota2drafter.embeddings.pretrainer import load_frozen_embeddings, train_embeddings
 
 
 def _create_mock_data_dir(tmp_path: Path, num_matches: int = 5) -> Path:
@@ -23,7 +25,7 @@ def _create_mock_data_dir(tmp_path: Path, num_matches: int = 5) -> Path:
                 team = 0.0
                 hero = (step % 10) + 1
 
-            steps.append([is_pick, team, float(hero)])
+            steps.append([is_pick, team, float(hero), float(step)])
 
         x = torch.tensor(steps, dtype=torch.float32)
         y = torch.tensor([1.0 if batch_idx % 2 == 0 else 0.0])
@@ -46,7 +48,7 @@ def test_load_frozen_embeddings(tmp_path: Path) -> None:
 
     assert isinstance(embedding, nn.Embedding)
     assert embedding.weight.shape == (num_heroes + 1, embed_dim)
-    assert embedding.weight.requires_grad == False
+    assert not embedding.weight.requires_grad
 
 
 def test_load_frozen_embeddings_shape_mismatch(tmp_path: Path) -> None:
@@ -113,18 +115,18 @@ def test_train_embeddings_load_frozen(tmp_path: Path) -> None:
 
     # Load as frozen module
     embedding = load_frozen_embeddings(output_file, embed_dim=16, num_heroes=127)
-    assert embedding.weight.requires_grad == False
+    assert not embedding.weight.requires_grad
 
 
 def test_package_import(tmp_path: Path) -> None:
     """Test that the embeddings package exports the expected symbols."""
     from dota2drafter.embeddings import (
         DataExtractor,
-        SkipGramPair,
-        SkipGramModel,
         DGIModel,
-        train_embeddings,
+        SkipGramModel,
+        SkipGramPair,
         load_frozen_embeddings,
+        train_embeddings,
     )
 
     assert DataExtractor is not None

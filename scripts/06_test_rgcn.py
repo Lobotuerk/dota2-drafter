@@ -25,7 +25,7 @@ from rich.table import Table
 
 from dota2drafter.embeddings.data_extractor import (
     ANTAGONIST,
-    BANNED_AGAINST,
+REQUIRED_BANS,
     SYNERGY,
     DataExtractor,
 )
@@ -59,7 +59,10 @@ def parse_args() -> argparse.Namespace:
         "--num_heroes", type=int, default=128, help="Number of heroes (default: 128)"
     )
     parser.add_argument(
-        "--percentile_keep", type=float, default=0.80, help="Percentile threshold to keep only top-N strongest edges (default: 0.80)"
+        "--percentile_keep",
+        type=float,
+        default=0.80,
+        help="Percentile threshold to keep only top-N strongest edges (default: 0.80)",
     )
     return parser.parse_args()
 
@@ -114,7 +117,7 @@ def query_edges(
     Args:
         hero_graph: PyG Data object with edge_index, edge_type, edge_weight.
         contiguous_idx: Source contiguous hero index (1-based).
-        edge_type: Edge type to query (SYNERGY, ANTAGONIST, BANNED_AGAINST).
+        edge_type: Edge type to query (SYNERGY, ANTAGONIST, REQUIRED_BANS).
         sorted_keys: Linear ordered list of hero API ID keys from mapping file.
         mapping: Hero ID -> name mapping.
         num_results: Number of results to return.
@@ -144,7 +147,7 @@ def query_edges(
     results: list[tuple[str, float]] = []
     for eid in top_ids.tolist():
         target_idx = int(edge_index[1, eid])
-        
+
         # Convert contiguous 1-based index back to API ID key by linear keys position
         if target_idx - 1 < len(sorted_keys):
             api_id = sorted_keys[target_idx - 1]
@@ -194,7 +197,10 @@ def main() -> None:
     try:
         contiguous_idx = sorted_keys.index(str(api_hero_id)) + 1
     except ValueError:
-        console.print(f"[bold red]Error:[/bold red] Hero '{canonical_name}' (API ID {api_hero_id}) is not present in the mapping keys.")
+        console.print(
+            f"[bold red]Error:[/bold red] Hero '{canonical_name}' (API ID {api_hero_id}) "
+            "is not present in the mapping keys."
+        )
         sys.exit(1)
 
     # Check data directory
@@ -219,7 +225,7 @@ def main() -> None:
     # Query each relationship type using the linear contiguous indices
     synergy_results = query_edges(hero_graph, contiguous_idx, SYNERGY, sorted_keys, mapping)
     antagonist_results = query_edges(hero_graph, contiguous_idx, ANTAGONIST, sorted_keys, mapping)
-    banned_results = query_edges(hero_graph, contiguous_idx, BANNED_AGAINST, sorted_keys, mapping)
+    banned_results = query_edges(hero_graph, contiguous_idx, REQUIRED_BANS, sorted_keys, mapping)
 
     # Print results
     print_category(

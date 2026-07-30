@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # Edge type constants for multi-relational graph
 SYNERGY = 0        # r_syn: Co-Picked-Radiant / Co-Picked-Dire
 ANTAGONIST = 1     # r_ant: Mechanical counter-picks
-BANNED_AGAINST = 2 # r_ban: Banned-Against correlations
+REQUIRED_BANS = 2  # r_req_ban: Directed required-bans edges (win-rate weighted)
 
 
 @dataclass
@@ -31,10 +31,10 @@ class SkipGramPair:
 class DataExtractor:
     """Extracts training data from raw match tensors.
 
-    Parses (24, 3) draft tensors to generate:
+    Parses (24, 4) draft tensors to generate:
     - Skip-Gram (center, context, negative) triples
     - A multi-relational hero interaction graph with synergy,
-      antagonist, and banned-against edges
+      antagonist, and required-bans edges
     """
 
     def __init__(self, num_heroes: int, negative_samples: int = 5) -> None:
@@ -75,17 +75,17 @@ class DataExtractor:
         rng = np.random.default_rng(42)
 
         for batch in batches:
-            x_tensors: torch.Tensor = batch["x"]  # (N, 24, 3) or (24, 3) if single match
+            x_tensors: torch.Tensor = batch["x"]  # (N, 24, 4) or (24, 4) if single match
 
             # Ensure x_tensors is 3D
             if x_tensors.dim() == 2:
                 x_tensors = x_tensors.unsqueeze(0)
 
             for match_idx in range(x_tensors.shape[0]):
-                draft = x_tensors[match_idx]  # (24, 3)
+                draft = x_tensors[match_idx]  # (24, 4)
 
                 # Extract picks only (is_pick == 1.0)
-                picks = draft[draft[:, 0] == 1.0]  # (10, 3)
+                picks = draft[draft[:, 0] == 1.0]  # (10, 4)
 
                 if picks.shape[0] < 10:
                     continue
@@ -128,13 +128,22 @@ class DataExtractor:
         Creates a graph with three edge types compatible with PyG's RGCNConv:
         - Edge type 0 (SYNERGY): Co-picked-Radiant/Dire undirected edges
         - Edge type 1 (ANTAGONIST): Directed mechanical counter-pick edges
-        - Edge type 2 (BANNED_AGAINST): Directed banned-against edges
+       - Edge type 2 (REQUIRED_BANS): Directed required-bans edges
 
         Returns a PyG Data object with edge_index, edge_type, and edge_weight.
         """
+        for batch in batches:
+            x_tensors: torch.Tensor = batch["x"]
+            if x_tensors.dim() == 2:
+                x_tensors = x_tensors.unsqueeze(0)
+            if x_tensors.shape[-1] < 4:
+                raise ValueError(
+                    "REQUIRED_BANS requires step_index as the 4th column in draft tensors."
+                )
+
         synergy_counts: dict[tuple[int, int], list[int]] = {}
         antagonist_counts: dict[tuple[int, int], list[int]] = {}
-        ban_counts: dict[tuple[int, int], int] = {}
+        req_ban_counts: dict[tuple[int, int], list[int]] = {}
 
         for batch in batches:
             x_tensors: torch.Tensor = batch["x"]
@@ -158,11 +167,6 @@ class DataExtractor:
 
                 radiant_heroes = [int(h) for h in radiant_picks.tolist() if h > 0]
                 dire_heroes = [int(h) for h in dire_picks.tolist() if h > 0]
-
-                # Extract ban steps (is_pick == 0.0)
-                ban_steps = draft[draft[:, 0] == 0.0]
-                radiant_bans = ban_steps[ban_steps[:, 1] == 0.0][:, 2].long().tolist()
-                dire_bans = ban_steps[ban_steps[:, 1] == 1.0][:, 2].long().tolist()
 
                 # --- Synergy edges (type 0, undirected) ---
                 # Co-picked pairs on same team
@@ -196,19 +200,32 @@ class DataExtractor:
                         antagonist_counts[(hj, hi)][0] += (1 - radiant_win)
                         antagonist_counts[(hj, hi)][1] += 1
 
-                # --- Banned-Against edges (type 2, directed) ---
-                # hero i picked by Team A, hero j banned by Team B
-                for pick_h in radiant_heroes:
-                    for ban_h in dire_bans:
-                        ban_h = int(ban_h)
-                        if ban_h > 0:
-                            ban_counts[(pick_h, ban_h)] = ban_counts.get((pick_h, ban_h), 0) + 1
+                # --- REQUIRED_BANS edges (type 2, directed) ---
+                # A ban of hero Y is "required" for picked hero X if:
+                # - Y was banned before X was picked (by either team), OR
+                # - Y was banned after X by X's own team
+                for pick_row in draft:
+                    if pick_row[0] != 1.0:
+                        continue
+                    p_team = int(pick_row[1])
+                    p_hero = int(pick_row[2])
+                    p_step = int(pick_row[3])
+                    p_win = radiant_win if p_team == 0 else (1 - radiant_win)
 
-                for pick_h in dire_heroes:
-                    for ban_h in radiant_bans:
-                        ban_h = int(ban_h)
-                        if ban_h > 0:
-                            ban_counts[(pick_h, ban_h)] = ban_counts.get((pick_h, ban_h), 0) + 1
+                    for ban_row in draft:
+                        if ban_row[0] != 0.0:
+                            continue
+                        b_team = int(ban_row[1])
+                        b_hero = int(ban_row[2])
+                        b_step = int(ban_row[3])
+
+                        if b_step < p_step or (b_step > p_step and b_team == p_team):
+                            if b_hero <= 0:
+                                continue
+                            if (p_hero, b_hero) not in req_ban_counts:
+                                req_ban_counts[(p_hero, b_hero)] = [0, 0]
+                            req_ban_counts[(p_hero, b_hero)][0] += p_win
+                            req_ban_counts[(p_hero, b_hero)][1] += 1
 
         # Build edges
         edge_list: list[list[int]] = []
@@ -236,13 +253,14 @@ class DataExtractor:
             edge_type_list.append(ANTAGONIST)
             edge_weight_list.append(win_rate)
 
-        # Banned-Against edges (type 2, directed)
-        max_count = max(ban_counts.values()) if ban_counts else 1
-        for (pick_h, ban_h), count in ban_counts.items():
-            normalized = count / max_count
+        # REQUIRED_BANS edges (type 2, directed)
+        for (pick_h, ban_h), (wins, total) in req_ban_counts.items():
+            if total < 3:
+                continue
+            win_rate = wins / total
             edge_list.append([pick_h, ban_h])
-            edge_type_list.append(BANNED_AGAINST)
-            edge_weight_list.append(normalized)
+            edge_type_list.append(REQUIRED_BANS)
+            edge_weight_list.append(win_rate)
 
         if not edge_list:
             logger.warning("No edges found in multi-relational hero graph")
@@ -261,12 +279,12 @@ class DataExtractor:
         edge_weight = torch.tensor(edge_weight_list, dtype=torch.float32).unsqueeze(1)
 
         logger.info(
-            "Built multi-relational hero graph: %d nodes, %d edges (syn=%d, ant=%d, ban=%d)",
+            "Built multi-relational hero graph: %d nodes, %d edges (syn=%d, ant=%d, req_ban=%d)",
             self._num_heroes + 1,
             edge_index.shape[1],
             sum(1 for t in edge_type_list if t == SYNERGY),
             sum(1 for t in edge_type_list if t == ANTAGONIST),
-            sum(1 for t in edge_type_list if t == BANNED_AGAINST),
+            sum(1 for t in edge_type_list if t == REQUIRED_BANS),
         )
         return Data(
             edge_index=edge_index,
@@ -283,11 +301,21 @@ class DataExtractor:
         """Build a multi-relational hero graph and prune it by keeping only top edges.
 
         Keeps only the strongest edges (percentile_keep and above) per relation type based
-        on co-occurrence, match, and ban frequency counts.
+        on co-occurrence, match, and required-bans counts.
         """
+        # Harden tensor shape validation
+        for batch in batches:
+            x_tensors: torch.Tensor = batch["x"]
+            if x_tensors.dim() == 2:
+                x_tensors = x_tensors.unsqueeze(0)
+            if x_tensors.shape[-1] < 4:
+                raise ValueError(
+                    "REQUIRED_BANS requires step_index as the 4th column in draft tensors."
+                )
+
         synergy_counts: dict[tuple[int, int], list[int]] = {}
         antagonist_counts: dict[tuple[int, int], list[int]] = {}
-        ban_counts: dict[tuple[int, int], int] = {}
+        req_ban_counts: dict[tuple[int, int], list[int]] = {}
 
         for batch in batches:
             x_tensors: torch.Tensor = batch["x"]
@@ -311,11 +339,6 @@ class DataExtractor:
 
                 radiant_heroes = [int(h) for h in radiant_picks.tolist() if h > 0]
                 dire_heroes = [int(h) for h in dire_picks.tolist() if h > 0]
-
-                # Extract ban steps (is_pick == 0.0)
-                ban_steps = draft[draft[:, 0] == 0.0]
-                radiant_bans = ban_steps[ban_steps[:, 1] == 0.0][:, 2].long().tolist()
-                dire_bans = ban_steps[ban_steps[:, 1] == 1.0][:, 2].long().tolist()
 
                 # --- Synergy edges (type 0, undirected) ---
                 for i_idx, hi in enumerate(radiant_heroes):
@@ -347,23 +370,34 @@ class DataExtractor:
                         antagonist_counts[(hj, hi)][0] += (1 - radiant_win)
                         antagonist_counts[(hj, hi)][1] += 1
 
-                # --- Banned-Against edges (type 2, directed) ---
-                for pick_h in radiant_heroes:
-                    for ban_h in dire_bans:
-                        ban_h = int(ban_h)
-                        if ban_h > 0:
-                            ban_counts[(pick_h, ban_h)] = ban_counts.get((pick_h, ban_h), 0) + 1
+                # --- REQUIRED_BANS edges (type 2, directed) ---
+                for pick_row in draft:
+                    if pick_row[0] != 1.0:
+                        continue
+                    p_team = int(pick_row[1])
+                    p_hero = int(pick_row[2])
+                    p_step = int(pick_row[3])
+                    p_win = radiant_win if p_team == 0 else (1 - radiant_win)
 
-                for pick_h in dire_heroes:
-                    for ban_h in radiant_bans:
-                        ban_h = int(ban_h)
-                        if ban_h > 0:
-                            ban_counts[(pick_h, ban_h)] = ban_counts.get((pick_h, ban_h), 0) + 1
+                    for ban_row in draft:
+                        if ban_row[0] != 0.0:
+                            continue
+                        b_team = int(ban_row[1])
+                        b_hero = int(ban_row[2])
+                        b_step = int(ban_row[3])
+
+                        if b_step < p_step or (b_step > p_step and b_team == p_team):
+                            if b_hero <= 0:
+                                continue
+                            if (p_hero, b_hero) not in req_ban_counts:
+                                req_ban_counts[(p_hero, b_hero)] = [0, 0]
+                            req_ban_counts[(p_hero, b_hero)][0] += p_win
+                            req_ban_counts[(p_hero, b_hero)][1] += 1
 
         # Calculate percentiles based on non-zero weights
         syn_vals = np.array([total for wins, total in synergy_counts.values() if total > 0])
         ant_vals = np.array([total for wins, total in antagonist_counts.values() if total > 0])
-        ban_vals = np.array([count for count in ban_counts.values() if count > 0])
+        ban_vals = np.array([total for wins, total in req_ban_counts.values() if total > 0])
 
         pct_val = percentile_keep * 100
         syn_cutoff = np.percentile(syn_vals, pct_val) if syn_vals.size > 0 else 0
@@ -398,15 +432,14 @@ class DataExtractor:
             edge_type_list.append(ANTAGONIST)
             edge_weight_list.append(win_rate)
 
-        # Banned-Against edges (type 2, directed)
-        max_count = max(ban_counts.values()) if ban_counts else 1
-        for (pick_h, ban_h), count in ban_counts.items():
-            if count < ban_cutoff:
+        # REQUIRED_BANS edges (type 2, directed)
+        for (pick_h, ban_h), (wins, total) in req_ban_counts.items():
+            if total < max(3, ban_cutoff):
                 continue
-            normalized = count / max_count
+            win_rate = wins / total
             edge_list.append([pick_h, ban_h])
-            edge_type_list.append(BANNED_AGAINST)
-            edge_weight_list.append(normalized)
+            edge_type_list.append(REQUIRED_BANS)
+            edge_weight_list.append(win_rate)
 
         if not edge_list:
             logger.warning("No edges found in pruned hero graph")
@@ -425,12 +458,13 @@ class DataExtractor:
         edge_weight = torch.tensor(edge_weight_list, dtype=torch.float32).unsqueeze(1)
 
         logger.info(
-            "Built pruned multi-relational hero graph: %d nodes, %d edges (syn=%d, ant=%d, ban=%d)",
+            "Built pruned multi-relational hero graph: %d nodes, %d edges "
+            "(syn=%d, ant=%d, req_ban=%d)",
             self._num_heroes + 1,
             edge_index.shape[1],
             sum(1 for t in edge_type_list if t == SYNERGY),
             sum(1 for t in edge_type_list if t == ANTAGONIST),
-            sum(1 for t in edge_type_list if t == BANNED_AGAINST),
+            sum(1 for t in edge_type_list if t == REQUIRED_BANS),
         )
         return Data(
             edge_index=edge_index,

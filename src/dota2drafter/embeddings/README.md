@@ -41,4 +41,4 @@ The function trains the HeroRGCN by maximizing mutual information between node e
 |---|---|---|
 | `SYNERGY` | `0` | Co-picked-Radiant / Co-picked-Dire (undirected) |
 | `ANTAGONIST` | `1` | Mechanical counter-picks (directed) |
-| `BANNED_AGAINST` | `2` | Banned-Against correlations (directed) |
+| `REQUIRED_BANS` | `2` | Required-bans correlations (directed, win-rate weighted) |

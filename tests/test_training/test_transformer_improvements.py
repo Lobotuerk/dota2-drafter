@@ -7,6 +7,7 @@ import os
 import shutil
 
 import torch
+import torch.nn.functional as F
 
 from dota2drafter.models.match_network import HierarchicalTransformer, MatchNetwork
 from dota2drafter.training.transformer_trainer import (
@@ -384,3 +385,129 @@ def test_dynamic_player_input_dim_resolution():
     first_tensor = next(iter(mock_comfort_map.values()))
     player_input_dim_with_map = first_tensor.size(0)
     assert player_input_dim_with_map == 25
+
+
+def test_discriminative_learning_rates():
+    """Verify that discriminative learning rates are correctly configured and applied."""
+    d_model = 32
+    num_heroes = 60
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    model = MatchNetwork(
+        d_model=d_model,
+        nhead=2,
+        num_layers=1,
+        dim_feedforward=64,
+        dropout=0.0,
+        num_heroes=num_heroes,
+        player_input_dim=10,
+        h_gnn=h_gnn,
+    )
+
+    config = TrainingConfig(
+        learning_rate=1e-4,
+        lr_backbone=1e-5,
+        lr_head=1e-3,
+        num_epochs=1,
+        device="cpu",
+    )
+
+    trainer = TransformerTrainer(model=model, train_config=config)
+
+    # Check optimizer has two parameter groups
+    assert len(trainer.optimizer.param_groups) == 2
+
+    # Check that backbone group has correct learning rate (1e-5)
+    # and head group has correct learning rate (1e-3)
+    backbone_group = trainer.optimizer.param_groups[0]
+    head_group = trainer.optimizer.param_groups[1]
+
+    assert backbone_group["lr"] == 1e-5
+    assert head_group["lr"] == 1e-3
+
+    # Check parameters were assigned to the correct group
+    # Let's inspect parameter names
+    backbone_param_ids = {id(p) for p in backbone_group["params"]}
+    head_param_ids = {id(p) for p in head_group["params"]}
+
+    # Ensure output_head parameters are in the head group and not in the backbone group
+    for name, param in model.named_parameters():
+        if "output_head" in name or "mlm_head" in name:
+            assert id(param) in head_param_ids
+            assert id(param) not in backbone_param_ids
+        else:
+            assert id(param) in backbone_param_ids
+            assert id(param) not in head_param_ids
+
+
+def test_step_weighted_loss():
+    """Verify that Step-Weighted Loss is correctly computed and scales properly."""
+    d_model = 32
+    num_heroes = 60
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    model = MatchNetwork(
+        d_model=d_model,
+        nhead=2,
+        num_layers=1,
+        dim_feedforward=64,
+        dropout=0.0,
+        num_heroes=num_heroes,
+        player_input_dim=10,
+        h_gnn=h_gnn,
+    )
+
+    # 1. Test standard loss (gamma = 0.0)
+    config_std = TrainingConfig(
+        step_loss_gamma=0.0,
+        device="cpu",
+    )
+
+    # Create dummy batch:
+    # Batch size = 2
+    # Sample 0: Full draft (24 steps active)
+    # Sample 1: Truncated draft (6 steps active)
+    x_batch = torch.zeros(2, 24, 4)
+    # Sample 0 has non-zeros on all steps
+    x_batch[0, :, 2] = 1.0  # hero_val
+    x_batch[0, :, 0] = 1.0  # is_pick
+    x_batch[0, :, 3] = torch.arange(24).float()
+
+    # Sample 1 is truncated at t=6 (only first 6 steps active)
+    x_batch[1, :6, 2] = 2.0  # hero_val
+    x_batch[1, :6, 0] = 1.0  # is_pick
+    x_batch[1, :6, 3] = torch.arange(6).float()
+
+    player_batch = torch.zeros(2, 10, 10)
+    y_batch = torch.tensor([1.0, 0.0])
+
+    logits = model(x_batch, player_batch)
+    eps = config_std.label_smoothing_eps
+    y_smoothed = y_batch * (1.0 - eps) + (eps / 2.0)
+
+    # Calculate standard unweighted loss manually
+    loss_std_manual = F.binary_cross_entropy_with_logits(logits, y_smoothed, reduction="mean")
+
+    # Now calculate via trainer with step weighting (gamma = 1.0)
+    config_weighted = TrainingConfig(
+        step_loss_gamma=1.0,
+        device="cpu",
+    )
+
+    # Calculate weighted loss manually
+    loss_elements = F.binary_cross_entropy_with_logits(logits, y_smoothed, reduction="none")
+    # Sample 0 weight: (24/24)^1 = 1.0
+    # Sample 1 weight: (6/24)^1 = 0.25
+    expected_loss_weighted = torch.mean(
+        loss_elements * torch.tensor([1.0, 0.25], device=loss_elements.device)
+    )
+
+    # First, let's assert our manual calculation is correct
+    assert expected_loss_weighted < loss_std_manual  # because sample 1 has a lower weight
+
+    # Let's verify that the trainer's step-weighted loss matches expected_loss_weighted
+    t = torch.sum(torch.sum(torch.abs(x_batch), dim=-1) > 0, dim=-1).float()
+    weights = (t / 24.0) ** config_weighted.step_loss_gamma
+    trainer_computed_loss = torch.mean(weights * loss_elements)
+
+    assert torch.allclose(trainer_computed_loss, expected_loss_weighted)

@@ -97,6 +97,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--learning_rate", type=float, default=1e-4, help="Learning rate (default: 1e-4)"
     )
+    parser.add_argument(
+        "--lr_backbone",
+        type=float,
+        default=1e-5,
+        help="Learning rate for pre-trained Transformer backbone (default: 1e-5)",
+    )
+    parser.add_argument(
+        "--lr_head",
+        type=float,
+        default=1e-3,
+        help="Learning rate for linear head (default: 1e-3)",
+    )
     parser.add_argument("--batch_size", type=int, default=256, help="Batch size (default: 256)")
     parser.add_argument(
         "--device", type=str, default=None, help='Device: "cpu" or "cuda" (auto-detect if None)'
@@ -109,6 +121,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--label_smoothing_eps", type=float, default=0.15, help="Label smoothing epsilon value (default: 0.15)"
+    )
+    parser.add_argument(
+        "--step_loss_gamma",
+        type=float,
+        default=0.0,
+        help="Gamma for step-weighted loss (default: 0.0 to disable)",
     )
     parser.add_argument(
         "--mlm_epochs", type=int, default=0, help="Number of MLM pre-training epochs (default: 0, meaning skip)"
@@ -254,6 +272,9 @@ def main() -> None:
 
         config = TrainingConfig(
             learning_rate=args.learning_rate,
+            lr_backbone=args.lr_backbone,
+            lr_head=args.lr_head,
+            step_loss_gamma=args.step_loss_gamma,
             num_epochs=args.num_epochs,
             batch_size=args.batch_size,
             device=str(device),

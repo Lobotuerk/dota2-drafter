@@ -12,6 +12,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
@@ -155,6 +156,9 @@ class TrainingConfig:
     """Configuration for the Transformer training loop."""
 
     learning_rate: float = 1e-4
+    lr_backbone: float | None = None
+    lr_head: float | None = None
+    step_loss_gamma: float = 0.0
     num_epochs: int = 50
     batch_size: int = 64
     val_split: float = 0.2
@@ -389,11 +393,57 @@ class TransformerTrainer:
         self.model = self.model.to(self.device)
 
         self.criterion = nn.BCEWithLogitsLoss()
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=self.config.learning_rate,
-            weight_decay=1e-2,
-        )
+
+        lr_backbone = self.config.lr_backbone
+        lr_head = self.config.lr_head
+
+        if lr_backbone is not None or lr_head is not None:
+            actual_lr_backbone = (
+                lr_backbone if lr_backbone is not None else self.config.learning_rate
+            )
+            actual_lr_head = (
+                lr_head if lr_head is not None else self.config.learning_rate
+            )
+
+            logger.info(
+                "Using discriminative learning rates: backbone_lr=%.2e, head_lr=%.2e",
+                actual_lr_backbone,
+                actual_lr_head,
+            )
+
+            backbone_params = []
+            head_params = []
+            for name, param in self.model.named_parameters():
+                if "output_head" in name or "mlm_head" in name:
+                    head_params.append(param)
+                else:
+                    backbone_params.append(param)
+
+            param_groups = [
+                {
+                    "params": backbone_params,
+                    "lr": actual_lr_backbone,
+                    "initial_lr": actual_lr_backbone,
+                },
+                {
+                    "params": head_params,
+                    "lr": actual_lr_head,
+                    "initial_lr": actual_lr_head,
+                },
+            ]
+            self.optimizer = torch.optim.AdamW(
+                param_groups,
+                lr=self.config.learning_rate,
+                weight_decay=1e-2,
+            )
+        else:
+            logger.info("Using single learning rate: lr=%.2e", self.config.learning_rate)
+            self.optimizer = torch.optim.AdamW(
+                self.model.parameters(),
+                lr=self.config.learning_rate,
+                weight_decay=1e-2,
+            )
+
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer, T_max=self.config.num_epochs
         )
@@ -477,7 +527,17 @@ class TransformerTrainer:
 
                 # Label smoothing
                 y_smoothed = y_batch * (1.0 - eps) + (eps / 2.0)
-                loss = self.criterion(logits, y_smoothed)
+
+                if self.config.step_loss_gamma > 0.0:
+                    loss_elements = F.binary_cross_entropy_with_logits(
+                        logits, y_smoothed, reduction="none"
+                    )
+                    # t is the active draft length for each sample in the batch
+                    t = torch.sum(torch.sum(torch.abs(x_batch), dim=-1) > 0, dim=-1).float()
+                    weights = (t / 24.0) ** self.config.step_loss_gamma
+                    loss = torch.mean(weights * loss_elements)
+                else:
+                    loss = self.criterion(logits, y_smoothed)
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -673,7 +733,17 @@ class TransformerTrainer:
                 y_batch = y_batch.to(self.device).squeeze(-1)
 
                 logits = self.model(x_batch, player_batch)
-                loss = self.criterion(logits, y_batch)
+
+                if self.config.step_loss_gamma > 0.0:
+                    loss_elements = F.binary_cross_entropy_with_logits(
+                        logits, y_batch, reduction="none"
+                    )
+                    # t is the active draft length for each sample in the batch
+                    t = torch.sum(torch.sum(torch.abs(x_batch), dim=-1) > 0, dim=-1).float()
+                    weights = (t / 24.0) ** self.config.step_loss_gamma
+                    loss = torch.mean(weights * loss_elements)
+                else:
+                    loss = self.criterion(logits, y_batch)
 
                 val_loss += loss.item()
                 all_preds.append(logits.cpu())

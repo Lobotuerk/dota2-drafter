@@ -141,6 +141,9 @@ python scripts/04_train_transformer.py --mode train  \
     --device cuda \
     --dropout 0.3 \
     --learning_rate 1e-4 \
+    --lr_backbone 1e-5 \
+    --lr_head 1e-3 \
+    --step_loss_gamma 1.0 \
     --label_smoothing_eps 0.6 \
     --mlm_epochs 10 \
     --num_heroes 127 \

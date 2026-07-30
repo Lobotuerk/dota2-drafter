@@ -20,6 +20,9 @@ Match Network and Transformer training parameters.
 | Parameter | Default | Description |
 |---|---|---|
 | `learning_rate` | `1e-4` | Learning rate for the AdamW optimizer (with CosineAnnealingLR and 1e-2 weight_decay) |
+| `lr_backbone` | `None` | Optional lower learning rate applied to the pre-trained Transformer backbone (e.g. `1e-5`) |
+| `lr_head` | `None` | Optional standard learning rate applied to the linear head (e.g. `1e-3`) |
+| `step_loss_gamma` | `0.0` | Gamma power parameter for scaling classification loss based on draft completeness (t/24)^gamma |
 | `num_epochs` | `50` | Maximum number of training epochs |
 | `batch_size` | `64` | Batch size for training and validation |
 | `val_split` | `0.2` | Fraction of data reserved for validation |

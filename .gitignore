@@ -222,4 +222,4 @@ state.db
 data/
 checkpoints/
 checkpoints_test/
-models/
+/models/

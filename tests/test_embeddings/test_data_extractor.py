@@ -35,7 +35,7 @@ def _create_mock_batches(tmp_path: Path, num_matches: int = 10) -> Path:
 
 
 def test_data_extractor_load_batches(tmp_path: Path) -> None:
-    extractor = DataExtractor(num_heroes=124)
+    extractor = DataExtractor(num_heroes=127)
     data_dir = _create_mock_batches(tmp_path)
 
     batches = extractor.load_batches(data_dir)
@@ -45,7 +45,7 @@ def test_data_extractor_load_batches(tmp_path: Path) -> None:
 
 
 def test_data_extractor_skip_gram_pairs(tmp_path: Path) -> None:
-    extractor = DataExtractor(num_heroes=124)
+    extractor = DataExtractor(num_heroes=127)
     data_dir = _create_mock_batches(tmp_path, num_matches=5)
 
     batches = extractor.load_batches(data_dir)
@@ -60,13 +60,13 @@ def test_data_extractor_skip_gram_pairs(tmp_path: Path) -> None:
 
 
 def test_data_extractor_hero_graph(tmp_path: Path) -> None:
-    extractor = DataExtractor(num_heroes=124)
+    extractor = DataExtractor(num_heroes=127)
     data_dir = _create_mock_batches(tmp_path, num_matches=10)
 
     batches = extractor.load_batches(data_dir)
     graph = extractor.build_hero_graph(batches)
 
-    assert graph.num_nodes == 125
+    assert graph.num_nodes == 128
     assert graph.edge_index.shape[0] == 2
     # Should have synergy edges between co-picked heroes
     assert graph.edge_index.shape[1] > 0
@@ -92,7 +92,7 @@ def test_data_extractor_negative_sampling(tmp_path: Path) -> None:
 
 
 def test_data_extractor_empty_dir(tmp_path: Path) -> None:
-    extractor = DataExtractor(num_heroes=124)
+    extractor = DataExtractor(num_heroes=127)
     empty_dir = tmp_path / "empty"
     empty_dir.mkdir()
 

@@ -80,7 +80,7 @@ def test_build_comfort_functional(tmp_path: Path) -> None:
             "--output",
             str(output_file),
             "--vocab_size",
-            "124",
+            "127",
         ],
         capture_output=True,
         text=True,
@@ -95,7 +95,7 @@ def test_build_comfort_functional(tmp_path: Path) -> None:
     # Player 102: only hero 12, radiant win (+1). Normalized vector should have 1.0 at index 12.
     assert 102 in comfort_map
     vec_102 = comfort_map[102]
-    assert vec_102.shape == (124,)
+    assert vec_102.shape == (127,)
     assert torch.isclose(vec_102[12], torch.tensor(1.0))
     # All other values for player 102 should be 0.0
     vec_102_other = vec_102.clone()
@@ -105,7 +105,7 @@ def test_build_comfort_functional(tmp_path: Path) -> None:
     # Player 202: in match 1 hero -1 (ignored). In match 2 hero 15, dire win (+1).
     assert 202 in comfort_map
     vec_202 = comfort_map[202]
-    assert vec_202.shape == (124,)
+    assert vec_202.shape == (127,)
     assert torch.isclose(vec_202[15], torch.tensor(1.0))
     vec_202_other = vec_202.clone()
     vec_202_other[15] = 0.0

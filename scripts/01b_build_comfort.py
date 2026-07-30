@@ -9,7 +9,7 @@ single ``.pt`` file.
 Usage::
 
     python scripts/01b_build_comfort.py --data_dir data --output data/player_comfort.pt
-    python scripts/01b_build_comfort.py --data_dir data --output data/player_comfort.pt --vocab_size 124
+    python scripts/01b_build_comfort.py --data_dir data --output data/player_comfort.pt --vocab_size 127
 """
 
 from __future__ import annotations
@@ -47,8 +47,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--vocab_size",
         type=int,
-        default=124,
-        help="Number of heroes (vocab size, default: 124)",
+        default=127,
+        help="Number of heroes (vocab size, default: 127)",
     )
     parser.add_argument(
         "--hero_indexer",

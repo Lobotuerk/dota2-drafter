@@ -7,12 +7,12 @@ from dota2drafter.embeddings.data_extractor import SkipGramPair
 
 
 def test_skip_gram_model_init() -> None:
-    model = SkipGramModel(num_heroes=124, embed_dim=64)
+    model = SkipGramModel(num_heroes=127, embed_dim=64)
 
-    assert model.num_heroes == 124
+    assert model.num_heroes == 127
     assert model.embed_dim == 64
-    assert model.target_embedding.num_embeddings == 125
-    assert model.context_embedding.num_embeddings == 125
+    assert model.target_embedding.num_embeddings == 128
+    assert model.context_embedding.num_embeddings == 128
 
 
 def test_skip_gram_forward_no_negatives() -> None:
@@ -95,7 +95,7 @@ def test_skip_gram_save_load(tmp_path: Path) -> None:  # type: ignore[name-defin
 
 
 def test_skip_gram_embeddings_shape() -> None:
-    model = SkipGramModel(num_heroes=124, embed_dim=64)
+    model = SkipGramModel(num_heroes=127, embed_dim=64)
     embeddings = model.get_embeddings()
 
-    assert embeddings.shape == (125, 64)
+    assert embeddings.shape == (128, 64)

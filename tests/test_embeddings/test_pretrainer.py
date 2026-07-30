@@ -112,7 +112,7 @@ def test_train_embeddings_load_frozen(tmp_path: Path) -> None:
     )
 
     # Load as frozen module
-    embedding = load_frozen_embeddings(output_file, embed_dim=16, num_heroes=124)
+    embedding = load_frozen_embeddings(output_file, embed_dim=16, num_heroes=127)
     assert embedding.weight.requires_grad == False
 
 

@@ -89,7 +89,7 @@ def train_embeddings(
         else:
             max_hero_idx = max(max_hero_idx, int(x_tensors[:, 2].max().item()))
 
-    max_hero_idx = max(max_hero_idx, 124)
+    max_hero_idx = max(max_hero_idx, 127)
     logger.info("Detected actual maximum hero index in dataset: %d", max_hero_idx)
     extractor = DataExtractor(num_heroes=max_hero_idx)
 

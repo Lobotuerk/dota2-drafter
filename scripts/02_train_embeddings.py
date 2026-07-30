@@ -77,7 +77,7 @@ def parse_args() -> argparse.Namespace:
         help="Hero ID to print embedding for (predict mode, default: 1)",
     )
     parser.add_argument(
-        "--num_heroes", type=int, default=124, help="Number of heroes (default: 124)"
+        "--num_heroes", type=int, default=127, help="Number of heroes (default: 127)"
     )
     return parser.parse_args()
 

@@ -93,7 +93,7 @@ def parse_args() -> argparse.Namespace:
         "--device", type=str, default=None, help='Device: "cpu" or "cuda" (auto-detect if None)'
     )
     parser.add_argument(
-        "--num_heroes", type=int, default=124, help="Number of heroes (default: 124)"
+        "--num_heroes", type=int, default=127, help="Number of heroes (default: 127)"
     )
     return parser.parse_args()
 

@@ -1,8 +1,16 @@
 """Tests for data_extractor module."""
 
-import torch
 from pathlib import Path
-from dota2drafter.embeddings.data_extractor import DataExtractor, SkipGramPair, SYNERGY, ANTAGONIST, REQUIRED_BANS
+
+import torch
+
+from dota2drafter.embeddings.data_extractor import (
+    ANTAGONIST,
+    REQUIRED_BANS,
+    SYNERGY,
+    DataExtractor,
+    SkipGramPair,
+)
 
 
 def _create_mock_batches(tmp_path: Path, num_matches: int = 10) -> Path:

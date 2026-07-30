@@ -59,7 +59,10 @@ def parse_args() -> argparse.Namespace:
         "--num_heroes", type=int, default=128, help="Number of heroes (default: 128)"
     )
     parser.add_argument(
-        "--percentile_keep", type=float, default=0.80, help="Percentile threshold to keep only top-N strongest edges (default: 0.80)"
+        "--percentile_keep",
+        type=float,
+        default=0.80,
+        help="Percentile threshold to keep only top-N strongest edges (default: 0.80)",
     )
     return parser.parse_args()
 
@@ -144,7 +147,7 @@ def query_edges(
     results: list[tuple[str, float]] = []
     for eid in top_ids.tolist():
         target_idx = int(edge_index[1, eid])
-        
+
         # Convert contiguous 1-based index back to API ID key by linear keys position
         if target_idx - 1 < len(sorted_keys):
             api_id = sorted_keys[target_idx - 1]
@@ -194,7 +197,10 @@ def main() -> None:
     try:
         contiguous_idx = sorted_keys.index(str(api_hero_id)) + 1
     except ValueError:
-        console.print(f"[bold red]Error:[/bold red] Hero '{canonical_name}' (API ID {api_hero_id}) is not present in the mapping keys.")
+        console.print(
+            f"[bold red]Error:[/bold red] Hero '{canonical_name}' (API ID {api_hero_id}) "
+            "is not present in the mapping keys."
+        )
         sys.exit(1)
 
     # Check data directory

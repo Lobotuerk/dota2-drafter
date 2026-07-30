@@ -132,19 +132,18 @@ class DataExtractor:
 
         Returns a PyG Data object with edge_index, edge_type, and edge_weight.
         """
-        synergy_counts: dict[tuple[int, int], list[int]] = {}
-        antagonist_counts: dict[tuple[int, int], list[int]] = {}
-        req_ban_counts: dict[tuple[int, int], list[int]] = {}
-
         for batch in batches:
             x_tensors: torch.Tensor = batch["x"]
             if x_tensors.dim() == 2:
                 x_tensors = x_tensors.unsqueeze(0)
             if x_tensors.shape[-1] < 4:
-                raise ValueError("REQUIRED_BANS requires step_index as the 4th column in draft tensors.")
+                raise ValueError(
+                    "REQUIRED_BANS requires step_index as the 4th column in draft tensors."
+                )
+
         synergy_counts: dict[tuple[int, int], list[int]] = {}
         antagonist_counts: dict[tuple[int, int], list[int]] = {}
-        ban_counts: dict[tuple[int, int], int] = {}
+        req_ban_counts: dict[tuple[int, int], list[int]] = {}
 
         for batch in batches:
             x_tensors: torch.Tensor = batch["x"]
@@ -168,11 +167,6 @@ class DataExtractor:
 
                 radiant_heroes = [int(h) for h in radiant_picks.tolist() if h > 0]
                 dire_heroes = [int(h) for h in dire_picks.tolist() if h > 0]
-
-                # Extract ban steps (is_pick == 0.0)
-                ban_steps = draft[draft[:, 0] == 0.0]
-                radiant_bans = ban_steps[ban_steps[:, 1] == 0.0][:, 2].long().tolist()
-                dire_bans = ban_steps[ban_steps[:, 1] == 1.0][:, 2].long().tolist()
 
                 # --- Synergy edges (type 0, undirected) ---
                 # Co-picked pairs on same team
@@ -315,7 +309,9 @@ class DataExtractor:
             if x_tensors.dim() == 2:
                 x_tensors = x_tensors.unsqueeze(0)
             if x_tensors.shape[-1] < 4:
-                raise ValueError("REQUIRED_BANS requires step_index as the 4th column in draft tensors.")
+                raise ValueError(
+                    "REQUIRED_BANS requires step_index as the 4th column in draft tensors."
+                )
 
         synergy_counts: dict[tuple[int, int], list[int]] = {}
         antagonist_counts: dict[tuple[int, int], list[int]] = {}
@@ -343,11 +339,6 @@ class DataExtractor:
 
                 radiant_heroes = [int(h) for h in radiant_picks.tolist() if h > 0]
                 dire_heroes = [int(h) for h in dire_picks.tolist() if h > 0]
-
-                # Extract ban steps (is_pick == 0.0)
-                ban_steps = draft[draft[:, 0] == 0.0]
-                radiant_bans = ban_steps[ban_steps[:, 1] == 0.0][:, 2].long().tolist()
-                dire_bans = ban_steps[ban_steps[:, 1] == 1.0][:, 2].long().tolist()
 
                 # --- Synergy edges (type 0, undirected) ---
                 for i_idx, hi in enumerate(radiant_heroes):
@@ -467,7 +458,8 @@ class DataExtractor:
         edge_weight = torch.tensor(edge_weight_list, dtype=torch.float32).unsqueeze(1)
 
         logger.info(
-            "Built pruned multi-relational hero graph: %d nodes, %d edges (syn=%d, ant=%d, req_ban=%d)",
+            "Built pruned multi-relational hero graph: %d nodes, %d edges "
+            "(syn=%d, ant=%d, req_ban=%d)",
             self._num_heroes + 1,
             edge_index.shape[1],
             sum(1 for t in edge_type_list if t == SYNERGY),

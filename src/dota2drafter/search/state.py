@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 
-import numpy as np
 import pymcts
 import torch
 
@@ -355,9 +354,9 @@ class DraftState(pymcts.MCTS_state):
         """Compute comfort-scaled prior probabilities for all valid actions.
 
         For each valid action a, constructs the extended draft sequence,
-        evaluates P(Win | S + a) via MatchNetwork in a single GPU batch,
-        then scales by the player comfort matrix:
-            P'(a|S) = Softmax(Logits(P) * W_comfort)
+        evaluates raw logits via MatchNetwork.forward() in a single GPU batch,
+        then scales the logits by the player comfort matrix:
+            P'(a|S) = Softmax(Logits(P(a|S)) * W_comfort)
 
         Returns:
             List of prior probabilities (one per valid action), sorted
@@ -380,62 +379,53 @@ class DraftState(pymcts.MCTS_state):
 
         self.model.eval()
         with torch.no_grad():
-            win_probs = self.model.predict_proba(batch, comfort)  # (N,)
+            # Use forward() to get raw logits (no sigmoid)
+            logits = self.model.forward(batch, comfort)  # (N,)
 
-        # Convert to radiant win probabilities
-        radiant_probs = win_probs.cpu().numpy()
+        # Adjust logits for active team
+        if self.active_team == 1:
+            # For Dire, flip the logits (Win for Dire = 1 - Win for Radiant)
+            logits = -logits
 
-        # Adjust for active team
-        if self.active_team == 0:
-            team_probs = radiant_probs
-        else:
-            team_probs = 1.0 - radiant_probs
-
-        # Comfort scaling: scale logits by comfort matrix
-        comfort_scaled = self._apply_comfort_scaling(team_probs, valid_moves)
+        # Apply comfort scaling to logits
+        comfort_scaled = self._apply_comfort_scaling_to_logits(logits, valid_moves)
 
         # Softmax to get prior probabilities
-        log_probs = torch.tensor(comfort_scaled, dtype=torch.float32)
-        log_probs = log_probs - log_probs.max()  # numerical stability
+        log_probs = comfort_scaled - comfort_scaled.max()  # numerical stability
         priors = torch.exp(log_probs)
         priors = priors / priors.sum()
 
         return priors.tolist()
 
-    def _apply_comfort_scaling(
-        self, probs: np.ndarray, moves: list[DraftMove]
-    ) -> list[float]:
-        """Apply comfort matrix scaling to action probabilities.
+    def _apply_comfort_scaling_to_logits(
+        self, logits: torch.Tensor, moves: list[DraftMove]
+    ) -> torch.Tensor:
+        """Apply comfort matrix scaling to action logits.
 
-        Scales P(Win | S + a) by the comfort matrix W_comfort for the
-        team making the pick/ban.
+        Implements P'(a|S) = Softmax(Logits(P(a|S)) * W_comfort).
+        For picks, scales logits by the comfort weight of the picking player.
+        For bans, leaves logits unchanged.
 
         Args:
-            probs: Raw win probabilities per action.
+            logits: Raw logits from MatchNetwork.forward().
             moves: Corresponding draft moves.
 
         Returns:
-            Scaled log-probabilities.
+            Scaled logits ready for softmax.
         """
-        scaled: list[float] = []
+        scaled = logits.clone()
 
         for i, move in enumerate(moves):
             if not move.is_pick:
-                # For bans, use a uniform scaling (no comfort penalty)
-                scaled.append(float(probs[i]))
+                # For bans, no comfort scaling
                 continue
 
             # For picks, scale by the comfort of the picking player
-            # The player index within the team depends on the step
             player_idx = self._get_player_index_for_step(move.step_index, move.team)
             if player_idx is not None and player_idx < self.comfort_matrix.shape[0]:
                 comfort_weight = self.comfort_matrix[player_idx].mean().item()
-                raw_prob = float(probs[i])
-                # Blend: weighted combination of raw prob and comfort
-                scaled_val = raw_prob * (0.5 + 0.5 * comfort_weight)
-                scaled.append(scaled_val)
-            else:
-                scaled.append(float(probs[i]))
+                # Scale logits by comfort weight
+                scaled[i] = logits[i] * comfort_weight
 
         return scaled
 

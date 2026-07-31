@@ -96,57 +96,77 @@ class Dota2DraftAgent:
         """Run MCTS search and return recommendations.
 
         Executes the full MCTS search cycle via the C++ engine and
-        extracts the top-N recommended actions sorted by visit count.
+        extracts the top-N recommended actions from the tree root's
+        children, sorted by visit count.
 
         Returns:
             List of Recommendation objects.
         """
+        # Run genmove to trigger the MCTS search
+        self.agent.genmove()
+
+        # Extract recommendations from the C++ tree
+        recommendations = self._extract_recommendations()
+
         # Get priors for each recommendation
         priors = self.state.get_action_probabilities()
         prior_map = {move.hero_id: p for move, p in zip(self.state.actions_to_try(), priors)}
 
-        # Run genmove to trigger the MCTS search and get the best move
-        best_move = self.agent.genmove()
-
-        # Update Python state with the move from C++ agent
-        if best_move is not None:
-            py_move = self._extract_python_move(best_move)
-            if py_move is not None:
-                self.state = self.state.next_state(py_move)
-
-        # Build recommendations from the best move and priors
         result: list[Recommendation] = []
-        if best_move is not None:
-            py_move = self._extract_python_move(best_move)
-            if py_move is not None:
-                prior = prior_map.get(py_move.hero_id, 0.0)
-                result.append(
-                    Recommendation(
-                        move=py_move,
-                        visit_count=1,  # C++ engine doesn't expose visit counts directly
-                        win_probability=0.5,  # Will be populated from rollout
-                        prior_probability=prior,
-                    )
+        for move, visit_count, win_prob in recommendations:
+            prior = prior_map.get(move.hero_id, 0.0)
+            result.append(
+                Recommendation(
+                    move=move,
+                    visit_count=visit_count,
+                    win_probability=win_prob,
+                    prior_probability=prior,
                 )
+            )
 
         return result
 
-    def _get_recommendations(self) -> list[tuple[DraftMove, int, float]]:
-        """Extract recommendations from the C++ MCTS tree.
+    def _extract_recommendations(self) -> list[tuple[DraftMove, int, float]]:
+        """Extract recommendations from the C++ MCTS tree root.
+
+        Reads the root node's children and extracts visit counts and
+        scores to produce real MCTS recommendations.
 
         Returns:
-            List of (move, visit_count, avg_reward) tuples.
+            List of (move, visit_count, avg_reward) tuples, sorted by visit count.
         """
-        current_state = self.agent.get_current_state()
-        if current_state is None:
+        tree = self.agent.tree
+        if tree is None:
             return []
 
-        # The C++ engine stores the tree in the agent. We need to
-        # extract root children info. Since pymcts doesn't expose
-        # the tree directly, we use the agent's feedback method
-        # and rely on the state's actions_to_try.
-        # For now, return empty - the search has been run.
-        return []
+        root = tree.root
+        if root is None:
+            return []
+
+        children = root.get_children()
+        if not children:
+            return []
+
+        # Build list of (move, visit_count, avg_reward) from children
+        recs: list[tuple[DraftMove, int, float]] = []
+        for child in children:
+            cpp_move = child.get_move()
+            if cpp_move is None:
+                continue
+
+            py_move = self._extract_python_move(cpp_move)
+            if py_move is None:
+                continue
+
+            visit_count = child.visit_count
+            avg_reward = child.score / max(visit_count, 1)
+
+            recs.append((py_move, visit_count, avg_reward))
+
+        # Sort by visit count descending, then by avg reward
+        recs.sort(key=lambda x: (x[1], x[2]), reverse=True)
+
+        return recs
 
     def get_principal_variation(self) -> list[DraftMove]:
         """Get the principal variation (expected draft plan).
@@ -157,9 +177,36 @@ class Dota2DraftAgent:
         Returns:
             List of DraftMove objects representing the principal variation.
         """
-        # The principal variation is available through the agent's
-        # current state after search. We return the actions taken so far.
-        return list(self.state.actions)
+        tree = self.agent.tree
+        if tree is None:
+            return []
+
+        root = tree.root
+        if root is None:
+            return []
+
+        variation: list[DraftMove] = []
+        node = root
+
+        while not node.is_terminal():
+            children = node.get_children()
+            if not children:
+                break
+
+            # Select child with highest visit count
+            best_child = max(children, key=lambda c: c.visit_count)
+            cpp_move = best_child.get_move()
+            if cpp_move is None:
+                break
+
+            py_move = self._extract_python_move(cpp_move)
+            if py_move is None:
+                break
+
+            variation.append(py_move)
+            node = best_child
+
+        return variation
 
     def genmove(self) -> DraftMove | None:
         """Generate the best move for the current draft step.
@@ -174,7 +221,7 @@ class Dota2DraftAgent:
         if move is None:
             return None
 
-        # Convert C++ move to Python DraftMove
+        # Extract Python move from C++ move
         py_move = self._extract_python_move(move)
         if py_move is not None:
             self.state = self.state.next_state(py_move)
@@ -189,10 +236,6 @@ class Dota2DraftAgent:
         Returns:
             DraftMove or None.
         """
-        # The C++ move is wrapped by a PythonMoveWrapper. We can
-        # access the Python move via the SerializedPythonState's
-        # cached moves. For simplicity, we create a new DraftMove
-        # from the C++ move's sprint string.
         move_str = cpp_move.sprint() if hasattr(cpp_move, "sprint") else str(cpp_move)
 
         # Parse the sprint string to reconstruct the move
@@ -227,6 +270,6 @@ class Dota2DraftAgent:
         # Create a new agent with the updated state
         self.agent = pymcts.MCTS_agent(
             wrapped_state,
-            max_iter=self.agent.max_iter if hasattr(self.agent, "max_iter") else 1000,
-            max_seconds=self.agent.max_seconds if hasattr(self.agent, "max_seconds") else 30,
+            max_iter=self.agent.max_iter,
+            max_seconds=self.agent.max_seconds,
         )

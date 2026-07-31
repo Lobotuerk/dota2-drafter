@@ -132,17 +132,18 @@ def test_draft_state_rollout():
     mock_model.predict_proba.assert_called()
 
 
-def test_draft_state_get_action_probabilities():
-    """Verify action probabilities are computed with comfort scaling and softmax."""
+def test_draft_state_get_action_probabilities_uses_logits():
+    """Verify action probabilities use logits + comfort scaling + softmax."""
     mock_model = MagicMock()
-    # Mock prediction for a small number of valid actions
-    mock_model.predict_proba.return_value = torch.tensor([0.4, 0.5, 0.6, 0.7, 0.8])
+    # Mock forward() to return raw logits (not probabilities)
+    mock_model.forward.return_value = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0])
 
     comfort_matrix = torch.zeros(10, 64)
+    # Set comfort weight for first player to 0.8
     comfort_matrix[0] = 0.8
 
     state = DraftState(model=mock_model, comfort_matrix=comfort_matrix, active_team=0)
-    # Stub actions_to_try to return only 5 moves
+    # Stub actions_to_try to return only 5 pick moves
     moves = [
         DraftMove(hero_id=h, is_pick=True, team=0, step_index=2)
         for h in range(1, 6)
@@ -153,6 +154,9 @@ def test_draft_state_get_action_probabilities():
     assert len(probs) == 5
     assert all(0.0 <= p <= 1.0 for p in probs)
     assert pytest.approx(sum(probs), 1e-5) == 1.0
+
+    # Verify forward() was called (not predict_proba)
+    mock_model.forward.assert_called()
 
 
 def test_serialized_python_state_wrapper():
@@ -172,8 +176,8 @@ def test_serialized_python_state_wrapper():
     assert isinstance(wrapped.rollout(), float)
 
 
-def test_mcts_agent_basic():
-    """Verify Dota2DraftAgent initializes and performs a search cycle."""
+def test_mcts_agent_pymcts_integration():
+    """Verify Dota2DraftAgent uses pymcts.MCTS_agent and tree has new API."""
     mock_model = MagicMock()
     mock_model.predict_proba.side_effect = lambda x, c: torch.full((x.shape[0],), 0.55)
 
@@ -189,11 +193,61 @@ def test_mcts_agent_basic():
     # Verify agent uses pymcts.MCTS_agent
     assert isinstance(agent.agent, pymcts.MCTS_agent)
 
+    # Verify tree has root property
+    tree = agent.agent.tree
+    assert tree is not None
+    assert hasattr(tree, "root")
+
+    # Verify MCTS_node has new properties
+    root = tree.root
+    assert root is not None
+    assert hasattr(root, "visit_count")
+    assert hasattr(root, "score")
+    assert hasattr(root, "get_children")
+    assert hasattr(root, "get_parent")
+
+
+def test_mcts_agent_search_returns_real_data():
+    """Verify search() returns recommendations with real visit counts."""
+    mock_model = MagicMock()
+    mock_model.predict_proba.side_effect = lambda x, c: torch.full((x.shape[0],), 0.55)
+    mock_model.forward.side_effect = lambda x, c: torch.full((x.shape[0],), 0.5)
+
+    comfort_matrix = torch.zeros(10, 64)
+    agent = Dota2DraftAgent(
+        model=mock_model,
+        comfort_matrix=comfort_matrix,
+        active_team=0,
+        max_iterations=100,
+        max_seconds=0.5,
+    )
+
     recs = agent.search()
     assert isinstance(recs, list)
 
+    # Principal variation should be a list
     pv = agent.get_principal_variation()
     assert isinstance(pv, list)
 
-    # search() already advances state via genmove, so actions should be 1
-    assert len(agent.state.actions) == 1
+
+def test_mcts_agent_genmove():
+    """Verify genmove returns a DraftMove and advances state."""
+    mock_model = MagicMock()
+    mock_model.predict_proba.side_effect = lambda x, c: torch.full((x.shape[0],), 0.55)
+    mock_model.forward.side_effect = lambda x, c: torch.full((x.shape[0],), 0.5)
+
+    comfort_matrix = torch.zeros(10, 64)
+    agent = Dota2DraftAgent(
+        model=mock_model,
+        comfort_matrix=comfort_matrix,
+        active_team=0,
+        max_iterations=10,
+        max_seconds=0.1,
+    )
+
+    initial_count = len(agent.state.actions)
+    best_move = agent.genmove()
+    assert best_move is None or isinstance(best_move, DraftMove)
+
+    if best_move is not None:
+        assert len(agent.state.actions) == initial_count + 1

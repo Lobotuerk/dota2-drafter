@@ -5,6 +5,7 @@ A Python-based data ingestion pipeline that fetches, validates, and transforms D
 ## Table of Contents
 
 - [Setup](#setup)
+- [MCTS Library Installation](#mcts-library-installation)
 - [Pipeline Overview](#pipeline-overview)
 - [Stage 1: Data Gathering](#stage-1-data-gathering)
 - [Stage 1b: Build Comfort Data](#stage-1b-build-comfort-data)
@@ -37,6 +38,52 @@ cp .env.example .env
 ```
 
 Obtain a STRATZ API key from [https://www.stratz.com/account/api](https://www.stratz.com/account/api).
+
+---
+
+## MCTS Library Installation
+
+This project uses the `pymcts` C++ library (via pybind11) for high-performance Monte Carlo Tree Search. The library must be installed from source before running the interactive draft tool.
+
+### Prerequisites
+
+- CMake 3.15+
+- A C++11-compatible compiler (g++ 7+, clang 6+, or MSVC 2017+)
+- Python 3.11+ with `pybind11`
+
+### Install from source
+
+```bash
+# Clone the MCTS library (if not already cloned)
+git clone https://github.com/Lobotuerk/MonteCarloTreeSearch.git
+cd MonteCarloTreeSearch
+
+# Install pymcts in development mode (editable)
+pip install --no-build-isolation -e .
+```
+
+### Verify installation
+
+```python
+import pymcts
+print(pymcts.__version__)  # Should print 0.1.0
+```
+
+### Using with dota2-drafter
+
+Once `pymcts` is installed, install the dota2-drafter package:
+
+```bash
+cd dota2-drafter
+pip install -e .
+```
+
+The `pymcts` module will be available for import in all search-related modules:
+
+```python
+import pymcts
+from dota2drafter.search import DraftState, DraftMove, Dota2DraftAgent
+```
 
 ---
 

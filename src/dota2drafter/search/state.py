@@ -1,18 +1,20 @@
 """Draft state and move for MCTS-based draft decision support.
 
-Provides DraftMove and DraftState classes that represent individual
-draft actions and the evolving partial-draft tree state. The DraftState
-implements the MCTS interface: it generates valid actions, supports
-state expansion, evaluates rollouts via MatchNetwork, and computes
-comfort-scaled prior probabilities for PUCT selection.
+Provides DraftMove and DraftState classes that inherit from pymcts
+C++ bindings (MCTS_move and MCTS_state) to enable high-performance
+adversarial minimax lookahead via the MonteCarloTreeSearch library.
+
+The DraftState implements the MCTS interface: it generates valid actions,
+supports state expansion, evaluates rollouts via MatchNetwork, and
+computes comfort-scaled prior probabilities for PUCT selection.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 
 import numpy as np
+import pymcts
 import torch
 
 from dota2drafter.processor.hero_indexer import HeroIndexer
@@ -53,9 +55,10 @@ DRAFT_SCHEDULE: list[tuple[str, int]] = [
 _ZERO_STEP = torch.tensor([0.0, 0.0, 0.0, 0.0], dtype=torch.float32)
 
 
-@dataclass
-class DraftMove:
+class DraftMove(pymcts.MCTS_move):
     """A single draft action (pick or ban) in the MCTS tree.
+
+    Inherits from pymcts.MCTS_move to integrate with the C++ MCTS engine.
 
     Attributes:
         hero_id: Hero index (1-based, from HeroIndexer). 0 for dummy/padding.
@@ -64,10 +67,26 @@ class DraftMove:
         step_index: Position in the 24-step draft schedule (0-23).
     """
 
-    hero_id: int
-    is_pick: bool
-    team: int
-    step_index: int
+    def __init__(
+        self,
+        hero_id: int,
+        is_pick: bool,
+        team: int,
+        step_index: int,
+    ) -> None:
+        """Initialize a draft move.
+
+        Args:
+            hero_id: Hero index (1-based).
+            is_pick: True for pick, False for ban.
+            team: Team making the move (0 or 1).
+            step_index: Position in the draft schedule (0-23).
+        """
+        super().__init__()
+        self.hero_id = hero_id
+        self.is_pick = is_pick
+        self.team = team
+        self.step_index = step_index
 
     def __eq__(self, other: object) -> bool:
         """Check equality by hero_id, action type, and team at same step."""
@@ -80,15 +99,45 @@ class DraftMove:
             and self.step_index == other.step_index
         )
 
+    def sprint(self) -> str:
+        """Human-readable string representation for C++ MCTS.
+
+        Returns:
+            Formatted string describing this move.
+        """
+        action = "pick" if self.is_pick else "ban"
+        team_str = "Radiant" if self.team == 0 else "Dire"
+        return f"{team_str} {action} hero {self.hero_id} at step {self.step_index}"
+
     def __hash__(self) -> int:
         """Hash by hero_id, is_pick, team, and step_index."""
         return hash((self.hero_id, self.is_pick, self.team, self.step_index))
 
-    def __str__(self) -> str:
-        """Human-readable representation."""
-        action = "pick" if self.is_pick else "ban"
-        team_str = "Radiant" if self.team == 0 else "Dire"
-        return f"{team_str} {action} hero {self.hero_id} at step {self.step_index}"
+    def to_numpy(self) -> list[float]:
+        """Convert move to numpy-compatible array.
+
+        Returns:
+            List of floats: [hero_id, is_pick, team, step_index].
+        """
+        return [
+            float(self.hero_id),
+            1.0 if self.is_pick else 0.0,
+            float(self.team),
+            float(self.step_index),
+        ]
+
+    def to_env_action(self) -> list[int]:
+        """Convert move to environment action format.
+
+        Returns:
+            List of ints: [hero_id, is_pick, team, step_index].
+        """
+        return [
+            self.hero_id,
+            1 if self.is_pick else 0,
+            self.team,
+            self.step_index,
+        ]
 
 
 def _build_tensor_from_moves(actions: list[DraftMove], num_heroes: int) -> torch.Tensor:
@@ -115,9 +164,10 @@ def _build_tensor_from_moves(actions: list[DraftMove], num_heroes: int) -> torch
     return torch.stack(steps)
 
 
-class DraftState:
+class DraftState(pymcts.MCTS_state):
     """MCTS state representing a partial draft tree node.
 
+    Inherits from pymcts.MCTS_state to integrate with the C++ MCTS engine.
     Wraps a sequence of draft moves and provides the MCTS interface:
     generating valid child actions, expanding the state, evaluating
     rollouts via MatchNetwork, and computing comfort-scaled priors.
@@ -147,6 +197,7 @@ class DraftState:
             hero_indexer: HeroIndexer for hero ID management.
             initial_actions: Pre-applied moves (for continuing from partial state).
         """
+        super().__init__()
         self.model = model
         self.comfort_matrix = comfort_matrix
         self.active_team = active_team
@@ -159,7 +210,7 @@ class DraftState:
     # ------------------------------------------------------------------
 
     def actions_to_try(self) -> list[DraftMove]:
-        """Yield all valid DraftMove candidates for the current step.
+        """Return all valid DraftMove candidates for the current step.
 
         Filters out heroes that have already been picked or banned.
         Only returns moves matching the current schedule entry.
@@ -231,6 +282,20 @@ class DraftState:
             initial_actions=new_actions,
         )
 
+    def clone(self) -> DraftState:
+        """Create a deep copy of this state for MCTS tree expansion.
+
+        Returns:
+            A new DraftState with identical attributes.
+        """
+        return DraftState(
+            model=self.model,
+            comfort_matrix=self.comfort_matrix,
+            active_team=self.active_team,
+            hero_indexer=self.hero_indexer,
+            initial_actions=list(self.actions),
+        )
+
     def is_terminal(self) -> bool:
         """Check if the draft is complete (24 steps)."""
         return len(self.actions) >= 24
@@ -246,6 +311,10 @@ class DraftState:
             return False
         _, team = DRAFT_SCHEDULE[step_idx]
         return team == self.active_team
+
+    def print(self) -> None:
+        """Print the current draft state for debugging."""
+        print(f"DraftState: {len(self.actions)}/24 steps, active_team={self.active_team}")
 
     def rollout(self) -> float:
         """Evaluate the current partial draft via rollout.
@@ -282,7 +351,7 @@ class DraftState:
         else:
             return 1.0 - radiant_win_prob
 
-    def get_action_probabilities(self) -> dict[int, float]:
+    def get_action_probabilities(self) -> list[float]:
         """Compute comfort-scaled prior probabilities for all valid actions.
 
         For each valid action a, constructs the extended draft sequence,
@@ -291,20 +360,19 @@ class DraftState:
             P'(a|S) = Softmax(Logits(P) * W_comfort)
 
         Returns:
-            Dict mapping hero_id to scaled prior probability.
+            List of prior probabilities (one per valid action), sorted
+            in the same order as actions_to_try().
         """
         valid_moves = self.actions_to_try()
         if not valid_moves:
-            return {}
+            return []
 
         # Build extended sequences for all valid actions
         sequences: list[torch.Tensor] = []
-        hero_ids: list[int] = []
         for move in valid_moves:
             extended = self.actions + [move]
             tensor = _build_tensor_from_moves(extended, self._num_heroes)
             sequences.append(tensor)
-            hero_ids.append(move.hero_id)
 
         # Stack into batch
         batch = torch.stack(sequences)  # (N, 24, 4)
@@ -332,11 +400,7 @@ class DraftState:
         priors = torch.exp(log_probs)
         priors = priors / priors.sum()
 
-        result: dict[int, float] = {}
-        for hero_id, prior in zip(hero_ids, priors.tolist()):
-            result[hero_id] = prior
-
-        return result
+        return priors.tolist()
 
     def _apply_comfort_scaling(
         self, probs: np.ndarray, moves: list[DraftMove]
@@ -353,7 +417,6 @@ class DraftState:
         Returns:
             Scaled log-probabilities.
         """
-
         scaled: list[float] = []
 
         for i, move in enumerate(moves):

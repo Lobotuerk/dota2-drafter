@@ -4,13 +4,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import numpy as np
 import pytest
 import torch
 
-from dota2drafter.processor.hero_indexer import HeroIndexer
 from dota2drafter.search.mcts_agent import Dota2DraftAgent
-from dota2drafter.search.mcts_engine import MCTSNode, MCTSEngine
 from dota2drafter.search.state import DRAFT_SCHEDULE, DraftMove, DraftState
 
 

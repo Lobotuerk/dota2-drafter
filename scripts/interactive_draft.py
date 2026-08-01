@@ -389,7 +389,9 @@ def main() -> None:
 
     # Load checkpoint into model
     checkpoint = torch.load(best_checkpoint, weights_only=True, map_location=device)
-    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+    if isinstance(checkpoint, dict) and "model_state" in checkpoint:
+        model.load_state_dict(checkpoint["model_state"])
+    elif isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
         model.load_state_dict(checkpoint["model_state_dict"])
     else:
         model.load_state_dict(checkpoint)

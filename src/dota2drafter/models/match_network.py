@@ -224,12 +224,20 @@ class HierarchicalTransformer(nn.Module):
         causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=z.device), diagonal=1)
         causal_mask = causal_mask.bool()
 
+        # Create a pad mask where True indicates padded/ignored tokens.
+        # A token is padded if its step_index is 0.0, except for step 0.
+        pad_mask = (x_draft[:, :, 3] == 0.0)
+        if pad_mask.size(1) > 0:
+            pad_mask[:, 0] = False
+        pad_mask = pad_mask.to(tgt.device)
+
         # Run through transformer decoder
         # tgt_mask: (seq_len, seq_len) for self-attention within target
         decoder_output = self.transformer_decoder(
             tgt=tgt,
             memory=memory,
-            tgt_mask=causal_mask,
+            tgt_mask=None, #TODO
+            tgt_key_padding_mask=pad_mask,
         )  # (B, 24, d_model)
 
         if mlm_mode:

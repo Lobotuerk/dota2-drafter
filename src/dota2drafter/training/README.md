@@ -43,7 +43,7 @@ Tracks training and validation metrics across epochs:
 | `val_accuracies` | `list[float]` | Per-epoch validation accuracy |
 | `val_auc_scores` | `list[float]` | Per-epoch validation ROC-AUC |
 | `best_epoch` | `int` | Epoch with best validation loss |
-| `best_val_loss` | `float` | Best validation loss value |
+| `best_roc_auc` | `float` | Best validation loss value |
 
 ## PlayerComfortDataset
 

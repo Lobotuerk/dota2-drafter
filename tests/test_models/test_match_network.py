@@ -241,3 +241,74 @@ def test_match_network_default_h_gnn():
 
     logits = model(x_draft, player_comfort)
     assert logits.shape == (batch_size,)
+
+
+def test_hierarchical_transformer_tgt_key_padding_mask():
+    """Test that HierarchicalTransformer correctly constructs and passes tgt_key_padding_mask."""
+    d_model = 64
+    nhead = 4
+    num_layers = 2
+    num_heroes = 120
+    batch_size = 2
+
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    model = HierarchicalTransformer(
+        d_model=d_model,
+        nhead=nhead,
+        num_layers=num_layers,
+        dim_feedforward=128,
+        dropout=0.0,
+        num_heroes=num_heroes,
+        h_gnn=h_gnn,
+    )
+
+    # 1. Non-truncated draft: all steps have valid step indices 0..23
+    x_draft = torch.zeros(batch_size, 24, 4)
+    for t in range(24):
+        x_draft[:, t, 2] = (t % num_heroes) + 1
+        x_draft[:, t, 0] = 1.0
+        x_draft[:, t, 1] = t % 2
+        x_draft[:, t, 3] = float(t)
+
+    # 2. Truncate sample 0 at step 12
+    # In sample 0, steps 12..23 are set to 0.0
+    x_draft[0, 12:, :] = 0.0
+
+    player_pref_vectors = torch.randn(batch_size, 10, d_model)
+
+    # Mock the decoder call to inspect the arguments using a custom PyTorch Module
+    class MockDecoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.called = False
+            self.call_kwargs = {}
+
+        def forward(self, tgt, memory, tgt_mask=None, tgt_key_padding_mask=None):
+            self.called = True
+            self.call_kwargs = {
+                "tgt_key_padding_mask": tgt_key_padding_mask,
+            }
+            return torch.zeros_like(tgt)
+
+    mock_decoder = MockDecoder()
+    model.transformer_decoder = mock_decoder
+
+    _ = model(x_draft, player_pref_vectors)
+
+    # Inspect the call arguments of the mock
+    assert mock_decoder.called
+    kwargs = mock_decoder.call_kwargs
+    assert "tgt_key_padding_mask" in kwargs
+
+    pad_mask = kwargs["tgt_key_padding_mask"]
+    assert pad_mask.shape == (batch_size, 24)
+    assert pad_mask.dtype == torch.bool
+
+    # Sample 0 should have steps 12..23 masked (True) and 0..11 unmasked (False)
+    assert torch.all(pad_mask[0, :12] == False)
+    assert torch.all(pad_mask[0, 12:] == True)
+
+    # Sample 1 (non-truncated) should have all steps unmasked (False)
+    assert torch.all(pad_mask[1, :] == False)
+

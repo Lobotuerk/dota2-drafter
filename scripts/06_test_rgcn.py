@@ -4,7 +4,7 @@
 Accepts a hero name and prints:
   - 5 best synergy partners (highest co-pick win rate)
   - 5 heroes best against (highest counter-pick win rate)
-  - 5 heroes to ban (highest ban frequency)
+  - 5 heroes required to ban (highest win rate with heroes banned)
 
 Usage::
 
@@ -239,7 +239,7 @@ def main() -> None:
         unit="Win Rate",
     )
     print_category(
-        f"[bold]Top 5 Heroes to [red]Ban[/red] Against [green]{canonical_name}[/green][/bold]",
+        f"[bold]Top 5 Heroes that require [red]Ban[/red] with [green]{canonical_name}[/green][/bold]",
         banned_results,
         unit="Ban Score",
     )

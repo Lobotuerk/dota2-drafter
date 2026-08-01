@@ -133,3 +133,30 @@ def test_query_edges() -> None:
     assert antagonist_results[0][0] == "Hero-3"
     assert pytest.approx(antagonist_results[0][1]) == 0.5
 
+
+def test_train_transformer_augment_arg_parsing():
+    """Verify that 04_train_transformer parses --augment correctly for different values."""
+    import importlib
+    import sys
+    from unittest.mock import patch
+
+    train_transformer = importlib.import_module("scripts.04_train_transformer")
+
+    # 1. Test '--augment true'
+    test_args = ["04_train_transformer.py", "--augment", "true"]
+    with patch.object(sys, "argv", test_args):
+        args = train_transformer.parse_args()
+        assert args.augment == "true"
+
+    # 2. Test '--augment false'
+    test_args = ["04_train_transformer.py", "--augment", "false"]
+    with patch.object(sys, "argv", test_args):
+        args = train_transformer.parse_args()
+        assert args.augment == "false"
+
+    # 3. Test '--augment 15'
+    test_args = ["04_train_transformer.py", "--augment", "15"]
+    with patch.object(sys, "argv", test_args):
+        args = train_transformer.parse_args()
+        assert args.augment == "15"
+

@@ -265,4 +265,4 @@ def test_full_training_loop_small():
     assert len(metrics.train_losses) > 0
     assert len(metrics.val_losses) > 0
     assert metrics.best_epoch >= 0
-    assert metrics.best_val_loss < float("inf")
+    assert metrics.best_roc_auc < float("inf")

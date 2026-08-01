@@ -164,9 +164,10 @@ class TrainingConfig:
     val_split: float = 0.2
     device: str = "cpu"
     checkpoint_dir: str = "./checkpoints"
-    patience: int = 10
+    patience: int = 30
     min_delta: float = 1e-4
     label_smoothing_eps: float = 0.15
+    augment: int | bool = True
 
 
 @dataclass
@@ -178,7 +179,7 @@ class TrainingMetrics:
     val_accuracies: list[float] = field(default_factory=list)
     val_auc_scores: list[float] = field(default_factory=list)
     best_epoch: int = 0
-    best_val_loss: float = float("inf")
+    best_roc_auc: float = float("-inf")
 
 
 class PlayerComfortDataset(Dataset):
@@ -196,7 +197,7 @@ class PlayerComfortDataset(Dataset):
         dire_players: list[list[int]],
         player_comfort_map: dict[int, torch.Tensor] | None = None,
         player_input_dim: int = 127,
-        augment: bool = False,
+        augment: int | bool = 0,
     ) -> None:
         """Initialize the dataset.
 
@@ -207,7 +208,8 @@ class PlayerComfortDataset(Dataset):
             dire_players: List of Dire player account ID lists (5 IDs each).
             player_comfort_map: Optional mapping of account_id -> comfort tensor (10, C).
             player_input_dim: C, number of features per comfort vector.
-            augment: If True, apply prefix truncation and permutation augmentation.
+            augment: If True, apply all variations (448). If an integer, precomputes all
+                     variations but limits the exposed items to `augment` per match.
         """
         self.x_drafts = x_drafts
         self.y_labels = y_labels
@@ -215,12 +217,32 @@ class PlayerComfortDataset(Dataset):
         self.dire_players = dire_players
         self.player_comfort_map = player_comfort_map or {}
         self.player_input_dim = player_input_dim
-        self.augment = augment
+
+        # Parse augment type and determine limit per original match
+        if isinstance(augment, bool):
+            if augment:
+                self.augment_limit = 448  # Default to exposing all 448 augmentations if True
+                self.augment = True
+            else:
+                self.augment_limit = 0
+                self.augment = False
+        elif isinstance(augment, int):
+            if augment > 0:
+                self.augment_limit = augment
+                self.augment = True
+            else:
+                self.augment_limit = 0
+                self.augment = False
+        else:
+            self.augment_limit = 0
+            self.augment = False
 
         # Pre-compute all samples upfront to avoid per-call permutation generation
         self.samples: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        self.all_augmented_samples: list[list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = []
+        self.selected_indices: list[list[int]] = []
 
-        if not augment:
+        if not self.augment:
             for idx in range(len(x_drafts)):
                 self.samples.append(self._build_player_comfort_sample(idx))
         else:
@@ -236,15 +258,20 @@ class PlayerComfortDataset(Dataset):
                     self.player_comfort_map, self.player_input_dim,
                 )
 
+                match_augmentations = []
                 for perm_idx in range(len(perm_samples)):
                     x_permuted, player_comfort, y_label = perm_samples[perm_idx]
 
-                    self.samples.append((x_permuted, player_comfort, y_label))
+                    match_augmentations.append((x_permuted, player_comfort, y_label))
 
                     for t in truncation_points:
                         x_truncated = x_permuted.clone()
                         x_truncated[t:, :] = 0.0
-                        self.samples.append((x_truncated, player_comfort, y_label))
+                        match_augmentations.append((x_truncated, player_comfort, y_label))
+                
+                self.all_augmented_samples.append(match_augmentations)
+
+            self.reshuffle_augmentations()
 
             # Free raw data after pre-computation
             self.x_drafts = []
@@ -252,7 +279,21 @@ class PlayerComfortDataset(Dataset):
             self.radiant_players = []
             self.dire_players = []
 
+    def reshuffle_augmentations(self) -> None:
+        """Reselect which augmented samples are visible, ensuring a fresh set of variations."""
+        if self.augment_limit > 0:
+            self.selected_indices = []
+            for base_idx in range(len(self.all_augmented_samples)):
+                num_avail = len(self.all_augmented_samples[base_idx])
+                if self.augment_limit <= num_avail:
+                    indices = random.sample(range(num_avail), self.augment_limit)
+                else:
+                    indices = random.choices(range(num_avail), k=self.augment_limit)
+                self.selected_indices.append(indices)
+
     def __len__(self) -> int:
+        if self.augment_limit > 0:
+            return len(self.all_augmented_samples) * self.augment_limit
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -267,6 +308,11 @@ class PlayerComfortDataset(Dataset):
             - player_comfort: (10, player_input_dim)
             - y: (1,)
         """
+        if self.augment_limit > 0:
+            base_idx = idx // self.augment_limit
+            sub_idx = idx % self.augment_limit
+            selected_aug_idx = self.selected_indices[base_idx][sub_idx]
+            return self.all_augmented_samples[base_idx][selected_aug_idx]
         return self.samples[idx]
 
     def _get_basic_sample(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -434,7 +480,7 @@ class TransformerTrainer:
             self.optimizer = torch.optim.AdamW(
                 param_groups,
                 lr=self.config.learning_rate,
-                weight_decay=1e-2,
+                weight_decay=0.1,
             )
         else:
             logger.info("Using single learning rate: lr=%.2e", self.config.learning_rate)
@@ -490,7 +536,7 @@ class TransformerTrainer:
             dire_players=[dire_players[i] for i in train_indices],
             player_comfort_map=player_comfort_map,
             player_input_dim=player_input_dim,
-            augment=True,
+            augment=self.config.augment,
         )
 
         val_dataset = PlayerComfortDataset(
@@ -512,6 +558,9 @@ class TransformerTrainer:
         best_state = None
 
         for epoch in range(1, self.config.num_epochs + 1):
+            if hasattr(train_dataset, "reshuffle_augmentations"):
+                train_dataset.reshuffle_augmentations()
+
             self.model.train()
             train_loss = 0.0
             train_batches = 0
@@ -565,8 +614,8 @@ class TransformerTrainer:
                 val_metrics["roc_auc"],
             )
 
-            if val_loss < self.metrics.best_val_loss - self.config.min_delta:
-                self.metrics.best_val_loss = val_loss
+            if val_metrics["roc_auc"] > self.metrics.best_roc_auc - self.config.min_delta:
+                self.metrics.best_roc_auc = val_metrics["roc_auc"]
                 self.metrics.best_epoch = epoch
                 patience_counter = 0
 
@@ -574,12 +623,12 @@ class TransformerTrainer:
                     "model_state": self.model.state_dict(),
                     "optimizer_state": self.optimizer.state_dict(),
                     "epoch": epoch,
-                    "val_loss": val_loss,
+                    "roc_auc": val_metrics["roc_auc"],
                 }
 
                 checkpoint_path = os.path.join(self.config.checkpoint_dir, "best_model.pt")
                 torch.save(best_state, checkpoint_path)
-                logger.info("  [checkpoint] Saved best model at epoch %d (val_loss=%.4f)", epoch, val_loss)
+                logger.info("  [checkpoint] Saved best model at epoch %d (Val AUC=%.4f)", epoch, val_metrics["roc_auc"])
             else:
                 patience_counter += 1
                 if patience_counter >= self.config.patience:
@@ -776,7 +825,7 @@ class TransformerTrainer:
                 "val_accuracies": self.metrics.val_accuracies,
                 "val_auc_scores": self.metrics.val_auc_scores,
                 "best_epoch": self.metrics.best_epoch,
-                "best_val_loss": self.metrics.best_val_loss,
+                "best_roc_auc": self.metrics.best_roc_auc,
             },
         }
         torch.save(checkpoint, path)
@@ -802,7 +851,7 @@ class TransformerTrainer:
             self.metrics.val_accuracies = m.get("val_accuracies", [])
             self.metrics.val_auc_scores = m.get("val_auc_scores", [])
             self.metrics.best_epoch = m.get("best_epoch", 0)
-            self.metrics.best_val_loss = m.get("best_val_loss", float("inf"))
+            self.metrics.best_roc_auc = m.get("best_roc_auc", float("inf"))
 
         logger.info("Loaded checkpoint from %s", path)
         return checkpoint

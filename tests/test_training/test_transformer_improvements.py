@@ -216,6 +216,35 @@ def test_player_comfort_dataset_augmentation():
         assert comfort_item.shape == (10, player_input_dim)
         assert y_item.dim() == 1
 
+    # 3. With Integer-limited Augmentation (exposes exactly `augment` number of elements per match)
+    limit = 5
+    dataset_limited_aug = PlayerComfortDataset(
+        x_drafts=x_drafts,
+        y_labels=y_labels,
+        radiant_players=radiant_players,
+        dire_players=dire_players,
+        player_input_dim=player_input_dim,
+        augment=limit,
+    )
+    assert len(dataset_limited_aug) == num_samples * limit
+
+    # Check that all items retrieved are valid
+    for i in range(len(dataset_limited_aug)):
+        x_item, comfort_item, y_item = dataset_limited_aug[i]
+        assert x_item.shape == (24, 4)
+        assert comfort_item.shape == (10, player_input_dim)
+        assert y_item.dim() == 1
+
+    # Capture selected indices and test reshuffling
+    indices_before = [list(idx_list) for idx_list in dataset_limited_aug.selected_indices]
+    dataset_limited_aug.reshuffle_augmentations()
+    indices_after = [list(idx_list) for idx_list in dataset_limited_aug.selected_indices]
+    
+    assert len(indices_before) == num_samples
+    assert len(indices_after) == num_samples
+    # With 448 possible values, reshuffled selection should generally differ (probability of identical choice is tiny)
+    assert any(indices_before[b] != indices_after[b] for b in range(num_samples))
+
 
 def test_mlm_pre_training_loop():
     """Test MLM pre-training loop executes successfully."""

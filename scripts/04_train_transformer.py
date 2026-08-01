@@ -109,7 +109,7 @@ def parse_args() -> argparse.Namespace:
         default=1e-3,
         help="Learning rate for linear head (default: 1e-3)",
     )
-    parser.add_argument("--batch_size", type=int, default=256, help="Batch size (default: 256)")
+    parser.add_argument("--batch_size", type=int, default=16, help="Batch size (default: 256)")
     parser.add_argument(
         "--device", type=str, default=None, help='Device: "cpu" or "cuda" (auto-detect if None)'
     )
@@ -127,6 +127,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Gamma for step-weighted loss (default: 0.0 to disable)",
+    )
+    parser.add_argument(
+        "--augment",
+        type=str,
+        default="true",
+        help="Augmentation setting: 'true' (all 448), 'false' (none), or an integer representing the maximum number of variations allowed per original match (e.g. 5, 10, 20). (default: 'true')",
     )
     parser.add_argument(
         "--mlm_epochs", type=int, default=0, help="Number of MLM pre-training epochs (default: 0, meaning skip)"
@@ -270,6 +276,17 @@ def main() -> None:
             h_gnn=h_gnn,
         ).to(device)
 
+        # Parse augment argument
+        if args.augment.lower() == "true":
+            augment_val = True
+        elif args.augment.lower() == "false":
+            augment_val = False
+        else:
+            try:
+                augment_val = int(args.augment)
+            except ValueError:
+                augment_val = True  # Default to True on invalid string
+
         config = TrainingConfig(
             learning_rate=args.learning_rate,
             lr_backbone=args.lr_backbone,
@@ -280,6 +297,7 @@ def main() -> None:
             device=str(device),
             checkpoint_dir=args.checkpoint_dir,
             label_smoothing_eps=args.label_smoothing_eps,
+            augment=augment_val,
         )
 
         console.print("[bold blue]Training transformer model...[/bold blue]")
@@ -309,7 +327,7 @@ def main() -> None:
         )
 
         console.print(f"[bold green]Training complete. Best epoch: {metrics.best_epoch}, "
-                      f"Best val loss: {metrics.best_val_loss:.4f}[/bold green]")
+                      f"Best AUC: {metrics.best_roc_auc:.4f}[/bold green]")
 
     elif args.mode == "predict":
         checkpoint_dir = Path(args.checkpoint_dir)

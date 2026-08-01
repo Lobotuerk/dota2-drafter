@@ -15,6 +15,7 @@ import torch
     [
         "01_gather_data.py",
         "01b_build_comfort.py",
+        "01c_add_custom_player.py",
         "02_train_embeddings.py",
         "03_train_rgcn.py",
         "04_train_transformer.py",
@@ -159,4 +160,136 @@ def test_train_transformer_augment_arg_parsing():
     with patch.object(sys, "argv", test_args):
         args = train_transformer.parse_args()
         assert args.augment == "15"
+
+
+def test_add_custom_player_functional(tmp_path: Path) -> None:
+    """Verify that 01c_add_custom_player.py correctly adds and overwrites custom player vectors."""
+    import importlib
+    import json
+    import sys
+    add_custom_player = importlib.import_module("scripts.01c_add_custom_player")
+
+    # 1. Create a mock hero mapping
+    hero_mapping_file = tmp_path / "hero_mapping.json"
+    hero_mapping_data = {
+        "1": "Anti-Mage",
+        "2": "Axe",
+        "3": "Bane",
+        "4": "Bloodseeker",
+    }
+    with open(hero_mapping_file, "w") as f:
+        json.dump(hero_mapping_data, f)
+
+    # 2. Create a mock hero indexer file
+    hero_indexer_file = tmp_path / "hero_indexer.json"
+    hero_indexer_data = {
+        "1": {},
+        "2": {},
+        "3": {},
+        "4": {},
+    }
+    with open(hero_indexer_file, "w") as f:
+        json.dump(hero_indexer_data, f)
+
+    # 3. Create a mock comfort file
+    comfort_file = tmp_path / "player_comfort.pt"
+    # Empty comfort map initially
+    torch.save({}, comfort_file)
+
+    # 4. Test resolve_hero_indices
+    indexer = add_custom_player.build_hero_indexer(str(hero_indexer_file))
+    name_to_api_id = add_custom_player.load_hero_name_to_api_id(str(hero_mapping_file))
+
+    # Test valid name resolution
+    # Sorted by API ID inside build_mapping, so Anti-Mage (id 1) -> 1, Axe (id 2) -> 2
+    indices = add_custom_player.resolve_hero_indices("Anti-Mage, Axe", name_to_api_id, indexer)
+    assert indices == [1, 2]
+
+    # Test whitespace stripping
+    indices_ws = add_custom_player.resolve_hero_indices(
+        " Anti-Mage ,   Axe  ", name_to_api_id, indexer
+    )
+    assert indices_ws == [1, 2]
+
+    # Test error on invalid hero name
+    with pytest.raises(ValueError, match="Hero not found in mapping"):
+        add_custom_player.resolve_hero_indices("Anti-Mage, Pudge", name_to_api_id, indexer)
+
+    # 5. Run main() via subprocess to check command line interface
+    script_path = Path("scripts") / "01c_add_custom_player.py"
+
+    # Initially comfort file has NO entries, so vocab_size fallback
+    # defaults to indexer.get_contiguous_count() = 4
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script_path),
+            "--id", "12345",
+            "--heroes", "Anti-Mage,Axe",
+            "--comfort", str(comfort_file),
+            "--hero_mapping", str(hero_mapping_file),
+            "--hero_indexer", str(hero_indexer_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"Script failed: {result.stderr}"
+
+    # Verify vector was created correctly
+    comfort_map = torch.load(comfort_file, weights_only=True)
+    assert 12345 in comfort_map
+    vec = comfort_map[12345]
+    assert vec.shape == (4,)
+    # Indicies 1 and 2 should be set to 1.0, normalized
+    # L2 norm of [0, 1, 1, 0] is sqrt(2) = 1.4142. Normalized is [0, 1/sqrt(2), 1/sqrt(2), 0]
+    expected_val = 1.0 / (2.0 ** 0.5)
+    assert pytest.approx(vec[1].item()) == expected_val
+    assert pytest.approx(vec[2].item()) == expected_val
+    assert vec[0].item() == 0.0
+    assert vec[3].item() == 0.0
+
+    # 6. Run again without --force on existing ID -> should fail
+    result_fail = subprocess.run(
+        [
+            sys.executable,
+            str(script_path),
+            "--id", "12345",
+            "--heroes", "Bane",
+            "--comfort", str(comfort_file),
+            "--hero_mapping", str(hero_mapping_file),
+            "--hero_indexer", str(hero_indexer_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result_fail.returncode != 0
+    assert "already exists" in result_fail.stderr or "already exists" in result_fail.stdout
+
+    # 7. Run with --force -> should succeed and overwrite
+    result_force = subprocess.run(
+        [
+            sys.executable,
+            str(script_path),
+            "--id", "12345",
+            "--heroes", "Bane",
+            "--comfort", str(comfort_file),
+            "--hero_mapping", str(hero_mapping_file),
+            "--hero_indexer", str(hero_indexer_file),
+            "--force",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result_force.returncode == 0
+
+    # Verify vector was updated: Bane (api id 3) -> contiguous index 3
+    comfort_map_updated = torch.load(comfort_file, weights_only=True)
+    vec_updated = comfort_map_updated[12345]
+    assert vec_updated.shape == (4,)
+    # Bane at index 3. L2 norm of [0, 0, 1, 0] is 1.0. So index 3 is 1.0, others 0.0.
+    assert pytest.approx(vec_updated[3].item()) == 1.0
+    assert vec_updated[0].item() == 0.0
+    assert vec_updated[1].item() == 0.0
+    assert vec_updated[2].item() == 0.0
+
 

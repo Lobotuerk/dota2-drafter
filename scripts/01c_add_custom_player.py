@@ -73,10 +73,9 @@ def load_hero_name_to_api_id(path: str) -> dict[str, str]:
     """Load hero_mapping.json and invert it: hero_name -> api_id string."""
     mapping_path = Path(path)
     if not mapping_path.exists():
-        console.print(f"[bold red]Error:[/bold red] Hero mapping not found: {mapping_path}")
-        sys.exit(1)
+        raise FileNotFoundError(f"Hero mapping not found: {mapping_path}")
 
-    with open(mapping_path, "r") as f:
+    with open(mapping_path) as f:
         raw = json.load(f)
 
     name_to_api_id: dict[str, str] = {}
@@ -97,10 +96,9 @@ def build_hero_indexer(path: str):
 
     indexer_path = Path(path)
     if not indexer_path.exists():
-        console.print(f"[bold red]Error:[/bold red] Hero indexer not found: {indexer_path}")
-        sys.exit(1)
+        raise FileNotFoundError(f"Hero indexer not found: {indexer_path}")
 
-    with open(indexer_path, "r") as f:
+    with open(indexer_path) as f:
         hero_data = json.load(f)
 
     # hero_indexer.json is typically a flat dict: {api_id_str: {...}}
@@ -123,25 +121,18 @@ def resolve_hero_indices(
     """
     raw_names = [n.strip() for n in hero_names_str.split(",") if n.strip()]
     if not raw_names:
-        console.print("[bold red]Error:[/bold red] No hero names provided.")
-        sys.exit(1)
+        raise ValueError("No hero names provided.")
 
     indices: list[int] = []
     for name in raw_names:
         api_id_str = name_to_api_id.get(name)
         if api_id_str is None:
-            console.print(
-                f"[bold red]Error:[/bold red] Hero not found in mapping: '{name}'"
-            )
-            sys.exit(1)
+            raise ValueError(f"Hero not found in mapping: '{name}'")
 
         api_id = int(api_id_str)
         idx = indexer.map_hero_id(api_id)
         if idx is None:
-            console.print(
-                f"[bold red]Error:[/bold red] Hero '{name}' (API id {api_id}) not in indexer."
-            )
-            sys.exit(1)
+            raise ValueError(f"Hero '{name}' (API id {api_id}) not in indexer.")
 
         indices.append(idx)
 
@@ -166,19 +157,16 @@ def main() -> None:
     # 4. Load comfort map
     comfort_path = Path(args.comfort)
     if not comfort_path.exists():
-        console.print(f"[bold red]Error:[/bold red] Comfort file not found: {comfort_path}")
-        sys.exit(1)
+        raise FileNotFoundError(f"Comfort file not found: {comfort_path}")
 
     console.print("[bold blue]Loading comfort map...[/bold blue]")
     comfort_map: dict[int, torch.Tensor] = torch.load(comfort_path, weights_only=True)
 
     # Check for existing ID
     if args.id in comfort_map and not args.force:
-        console.print(
-            f"[bold red]Error:[/bold red] Player ID {args.id} already exists in comfort map. "
-            f"Use --force to overwrite."
+        raise ValueError(
+            f"Player ID {args.id} already exists in comfort map. Use --force to overwrite."
         )
-        sys.exit(1)
 
     # 5. Determine tensor dimension (vocab_size)
     if comfort_map:
@@ -189,11 +177,10 @@ def main() -> None:
     # Validate that all indices fit within vocab_size
     max_idx = max(indices)
     if max_idx >= vocab_size:
-        console.print(
-            f"[bold red]Error:[/bold red] Hero index {max_idx} exceeds vocab_size {vocab_size}. "
+        raise ValueError(
+            f"Hero index {max_idx} exceeds vocab_size {vocab_size}. "
             f"The comfort file may be outdated or the indexer mismatched."
         )
-        sys.exit(1)
 
     # 6. Construct the vector
     raw_vector = torch.zeros(vocab_size, dtype=torch.float32)
@@ -218,7 +205,7 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except Exception as e:
+    except Exception:
         console.print_exception(show_locals=True)
         logger.exception("Add custom player script failed with an error:")
         sys.exit(1)

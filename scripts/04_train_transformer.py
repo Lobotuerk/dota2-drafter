@@ -5,8 +5,9 @@ Wraps ``TransformerTrainer`` for training and provides a ``predict``
 mode that loads the best checkpoint and runs a single match through
 the model.
 
-Prerequisites: run ``scripts/01_gather_data.py`` and
-``scripts/01b_build_comfort.py`` first to prepare the data.
+Prerequisites: run ``scripts/01a_gather_leagues.py`` and
+``scripts/01b_gather_matches.py`` first to prepare the data, then
+``scripts/01c_build_comfort.py``.
 
 Usage::
 

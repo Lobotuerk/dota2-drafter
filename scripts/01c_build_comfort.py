@@ -8,8 +8,8 @@ single ``.pt`` file.
 
 Usage::
 
-    python scripts/01b_build_comfort.py --data_dir data --output data/player_comfort.pt
-    python scripts/01b_build_comfort.py --data_dir data --output data/player_comfort.pt --vocab_size 127
+    python scripts/01c_build_comfort.py --data_dir data --output data/player_comfort.pt
+    python scripts/01c_build_comfort.py --data_dir data --output data/player_comfort.pt --vocab_size 127
 """
 
 from __future__ import annotations

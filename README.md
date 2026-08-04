@@ -105,8 +105,16 @@ Each stage has a standalone script under `scripts/`. Run them in order.
 Runs the ingestion pipeline to fetch matches and produce PyTorch batch files.
 
 ```bash
-python scripts/01_gather_data.py
-python scripts/01_gather_data.py custom_config.yaml
+python scripts/01a_gather_leagues.py
+python scripts/01b_gather_matches.py
+```
+
+Review `data/leagues.json` after `01a` and set the `review` flag to `true` only for
+leagues you want included. `01b` gathers matches only for approved leagues.
+
+```bash
+python scripts/01a_gather_leagues.py custom_config.yaml
+python scripts/01b_gather_matches.py custom_config.yaml
 ```
 
 Reads configuration from `config.yaml`. Output is saved to `./data/` as `drafts_batch_*.pt` files.
@@ -115,13 +123,13 @@ Reads configuration from `config.yaml`. Output is saved to `./data/` as `drafts_
 
 ---
 
-## Stage 1b: Build Comfort Data
+## Stage 1c: Build Comfort Data
 
 Builds historical player comfort data (required before transformer training).
 
 ```bash
-python scripts/01b_build_comfort.py --data_dir data --output data/player_comfort.pt
-python scripts/01b_build_comfort.py --data_dir data --output data/player_comfort.pt --dim 10 --random
+python scripts/01c_build_comfort.py --data_dir data --output data/player_comfort.pt
+python scripts/01c_build_comfort.py --data_dir data --output data/player_comfort.pt --dim 10 --random
 ```
 
 ---

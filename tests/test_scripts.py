@@ -12,10 +12,12 @@ import torch
 
 @pytest.mark.parametrize(
     "script_name",
-    [
-        "01_gather_data.py",
-        "01b_build_comfort.py",
-        "01c_add_custom_player.py",
+[
+        "01a_gather_leagues.py",
+        "01b_gather_matches.py",
+        "01c_build_comfort.py",
+        "01d_add_custom_player.py",
+        "01e_cleanup_unapproved.py",
         "02_train_embeddings.py",
         "03_train_rgcn.py",
         "04_train_transformer.py",
@@ -29,8 +31,8 @@ def test_script_syntax_and_help(script_name: str) -> None:
     script_path = Path("scripts") / script_name
     assert script_path.exists(), f"{script_name} does not exist on disk"
 
-    if script_name == "01_gather_data.py":
-        # 01_gather_data.py doesn't have an argparse --help, so test running with a missing config
+    if script_name in ("01a_gather_leagues.py", "01b_gather_matches.py", "01e_cleanup_unapproved.py"):
+        # These scripts take a positional config path, not argparse --help.
         result = subprocess.run(
             [sys.executable, str(script_path), "non_existent_config.yaml"],
             capture_output=True,
@@ -164,11 +166,11 @@ def test_train_transformer_augment_arg_parsing():
 
 
 def test_add_custom_player_functional(tmp_path: Path) -> None:
-    """Verify that 01c_add_custom_player.py correctly adds and overwrites custom player vectors."""
+    """Verify that 01d_add_custom_player.py correctly adds and overwrites custom player vectors."""
     import importlib
     import json
     import sys
-    add_custom_player = importlib.import_module("scripts.01c_add_custom_player")
+    add_custom_player = importlib.import_module("scripts.01d_add_custom_player")
 
     # 1. Create a mock hero mapping
     hero_mapping_file = tmp_path / "hero_mapping.json"
@@ -217,7 +219,7 @@ def test_add_custom_player_functional(tmp_path: Path) -> None:
         add_custom_player.resolve_hero_indices("Anti-Mage, Pudge", name_to_api_id, indexer)
 
     # 5. Run main() via subprocess to check command line interface
-    script_path = Path("scripts") / "01c_add_custom_player.py"
+    script_path = Path("scripts") / "01d_add_custom_player.py"
 
     # Initially comfort file has NO entries, so vocab_size fallback
     # defaults to indexer.get_contiguous_count() = 4
@@ -343,5 +345,77 @@ def test_interactive_draft_checkpoint_loading_formats() -> None:
         
         mock_model.load_state_dict.assert_called_once_with({"layer.weight": 789})
         mock_model.reset_mock()
+
+
+def test_cleanup_unapproved_rechunks(tmp_path: Path) -> None:
+    """Verify that 01e_cleanup_unapproved.py removes unapproved matches and re-chunks."""
+    import importlib
+    import json
+    from unittest.mock import patch
+
+    from dota2drafter.state import StateDatabase
+
+    cleanup = importlib.import_module("scripts.01e_cleanup_unapproved")
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    # Manifest: league 1 approved, league 2 unapproved
+    manifest = data_dir / "leagues.json"
+    manifest.write_text(
+        json.dumps([
+            {"id": 1, "name": "Tier1", "tier": 1, "review": True},
+            {"id": 2, "name": "Fun Cup", "tier": 3, "review": False},
+        ])
+    )
+
+    # State DB with completed matches from both leagues
+    state_db = StateDatabase(tmp_path / "state.db")
+    state_db.insert_league("1", "Tier1", 1)
+    state_db.insert_league("2", "Fun Cup", 3)
+    state_db.upsert_matches([
+        ("10001", "pending", "1"),
+        ("20001", "pending", "2"),
+    ])
+    state_db.mark_completed("10001", True)
+    state_db.mark_completed("20001", True)
+
+    # One batch with 3 samples: two from approved league, one from unapproved
+    x = torch.randn(3, 24, 4)
+    y = torch.tensor([1.0, 0.0, 1.0])
+    batch = {
+        "x": x,
+        "y": y,
+        "match_ids": ["10001", "20001", "10002"],
+        "radiant_players": [[1] * 5, [2] * 5, [3] * 5],
+        "dire_players": [[4] * 5, [5] * 5, [6] * 5],
+        "radiant_heroes": [[1] * 5, [2] * 5, [3] * 5],
+        "dire_heroes": [[4] * 5, [5] * 5, [6] * 5],
+    }
+    torch.save(batch, data_dir / "drafts_batch_00001.pt")
+
+    # Config pointing at temp dirs
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "cutoff_date: '2026-06-04'\n"
+        "output:\n"
+        "  directory: " + repr(str(data_dir)) + "\n"
+        "state:\n"
+        "  database_path: " + repr(str(tmp_path / "state.db")) + "\n"
+    )
+
+    mock_config = cleanup.load_config(str(config))
+    with patch.object(cleanup, "load_config", return_value=mock_config):
+        cleanup.main()
+
+    # DB: only approved league match remains completed
+    remaining = state_db.get_completed_matches_by_league()
+    assert [m for m, _ in remaining] == ["10001"]
+
+    # Batches: only surviving samples are re-chunked
+    rebuilt = [f for f in data_dir.glob("drafts_batch_*.pt")]
+    assert len(rebuilt) == 1
+    data = torch.load(rebuilt[0], weights_only=True)
+    assert data["match_ids"] == ["10001", "10002"]
 
 

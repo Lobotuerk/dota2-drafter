@@ -207,7 +207,7 @@ def main() -> None:
     data_dir = Path(args.data_dir)
     if not data_dir.exists():
         console.print(f"[bold red]Error:[/bold red] Data directory not found: {data_dir}")
-        console.print("Gather data first: python scripts/01_gather_data.py")
+        console.print("Gather data first: python scripts/01b_gather_matches.py")
         sys.exit(1)
 
     console.print(f"[bold blue]Building hero graph from: {data_dir}[/bold blue]")

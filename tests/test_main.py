@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -6,7 +7,7 @@ import pytest
 from dota2drafter.config import PipelineConfig
 from dota2drafter.discovery.league_mapper import LeagueMapper
 from dota2drafter.discovery.match_finder import MatchFinder
-from dota2drafter.main import _process_match, run_pipeline
+from dota2drafter.main import _process_match, run_discovery_pipeline, run_match_gather_pipeline
 
 
 @pytest.mark.asyncio
@@ -123,16 +124,15 @@ async def test_process_match_validation_fail():
 @patch("dota2drafter.main.StratzClient")
 @patch("dota2drafter.main.OpenDotaClient")
 @patch("dota2drafter.main.StateDatabase")
-@patch("dota2drafter.main.LeagueMapper")
 @patch("dota2drafter.main.MatchFinder")
 @patch("dota2drafter.main.DatasetBuilder")
-async def test_run_pipeline_hero_fallback(
+async def test_run_match_gather_pipeline_hero_fallback(
     mock_dataset_builder_cls,
     mock_match_finder_cls,
-    mock_league_mapper_cls,
     mock_state_db_cls,
     mock_opendota_client_cls,
     mock_stratz_client_cls,
+    tmp_path,
 ):
     # Setup mocks
     mock_stratz_client = mock_stratz_client_cls.return_value
@@ -150,20 +150,22 @@ async def test_run_pipeline_hero_fallback(
     mock_state_db.get_pending_matches.return_value = []
     mock_state_db.get_stats.return_value = {}
 
-    mock_league_mapper = mock_league_mapper_cls.return_value
-    mock_league_mapper.discover_leagues = AsyncMock(return_value=[
-        {"id": "18477", "name": "League 1", "tier": 1}
-    ])
-
     mock_match_finder = mock_match_finder_cls.return_value
     mock_match_finder.find_all_matches = AsyncMock(return_value=0)
 
     mock_dataset_builder = mock_dataset_builder_cls.return_value
     mock_dataset_builder.get_stats.return_value = {"batches_saved": 0, "output_dir": "./data"}
 
+    # Manifest with one approved league so match gathering proceeds
+    manifest = tmp_path / "leagues.json"
+    manifest.write_text(
+        '[{"id": 19944, "name": "EPL Masters", "tier": 2, "review": true}]'
+    )
+
     # Execute
     config = PipelineConfig()
-    await run_pipeline(config)
+    config.output.directory = str(tmp_path)
+    await run_match_gather_pipeline(config)
 
     # Verifications
     mock_opendota_client.fetch_heroes.assert_called_once()
@@ -172,11 +174,57 @@ async def test_run_pipeline_hero_fallback(
 
 
 @pytest.mark.asyncio
+@patch("dota2drafter.main.StratzClient")
+@patch("dota2drafter.main.OpenDotaClient")
+@patch("dota2drafter.main.LeagueMapper")
+async def test_run_discovery_pipeline_merges_new_leagues(
+    mock_league_mapper_cls,
+    mock_opendota_client_cls,
+    mock_stratz_client_cls,
+    tmp_path,
+):
+    mock_stratz_client = mock_stratz_client_cls.return_value
+    mock_stratz_client.fetch_heroes = AsyncMock(return_value=[
+        {"id": 1, "name": "npc_dota_hero_antimage", "playable": True},
+    ])
+    mock_stratz_client.close = AsyncMock()
+
+    mock_opendota_client = mock_opendota_client_cls.return_value
+    mock_opendota_client.fetch_heroes = AsyncMock(return_value=[
+        {"id": 1, "name": "npc_dota_hero_antimage", "playable": True},
+    ])
+
+    mock_league_mapper = mock_league_mapper_cls.return_value
+    mock_league_mapper.discover_leagues = AsyncMock(return_value=[
+        {"id": 19944, "name": "EPL Masters", "tier": 2,
+         "start_date": "2026-05-10", "end_date": "2026-06-01"},
+        {"id": 55555, "name": "Fun Cup", "tier": 3,
+         "start_date": "2026-05-12", "end_date": "2026-05-30"},
+    ])
+
+    # Pre-existing manifest with a league already known
+    manifest = tmp_path / "leagues.json"
+    manifest.write_text(
+        '[{"id": 19944, "name": "EPL Masters", "tier": 2, "review": true, '
+        '"start_date": "2026-05-10", "end_date": "2026-06-01"}]'
+    )
+
+    config = PipelineConfig()
+    config.output.directory = str(tmp_path)
+    await run_discovery_pipeline(config)
+
+    entries = json.loads(manifest.read_text())
+    assert {entry["id"] for entry in entries} == {19944, 55555}
+    new_entry = next(entry for entry in entries if entry["id"] == 55555)
+    assert new_entry["review"] is False
+    # Existing entry is untouched (not re-added with review reset)
+    existing_entry = next(entry for entry in entries if entry["id"] == 19944)
+    assert existing_entry["review"] is True
+
+
+@pytest.mark.asyncio
 async def test_league_mapper_opendota_discovery():
     # Setup mocks
-    stratz_client = AsyncMock()
-    stratz_client.fetch_leagues.return_value = [] # STRATZ returns empty
-
     opendota_client = AsyncMock()
     opendota_client.fetch_leagues.return_value = [
         {"leagueid": 19944, "tier": "professional", "name": "EPL Masters 2026"}
@@ -187,7 +235,7 @@ async def test_league_mapper_opendota_discovery():
     from dota2drafter.config import ConcurrencyConfig
     concurrency = ConcurrencyConfig()
 
-    mapper = LeagueMapper(stratz_client, opendota_client, state_db, config, concurrency)
+    mapper = LeagueMapper(opendota_client, config, concurrency)
 
     # Run
     call_count = 0
@@ -214,7 +262,8 @@ async def test_league_mapper_opendota_discovery():
     assert leagues[0]["id"] == 19944
     assert leagues[0]["name"] == "EPL Masters 2026"
     assert leagues[0]["tier"] == 2
-    state_db.insert_league.assert_called_once_with("19944", "EPL Masters 2026", 2)
+    assert leagues[0]["start_date"] is not None
+    assert leagues[0]["end_date"] is not None
 
 
 @pytest.mark.asyncio

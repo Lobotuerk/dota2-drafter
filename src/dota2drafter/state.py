@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Generator
 from contextlib import contextmanager
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
-from typing import Generator
-
-from dota2drafter.config import PipelineConfig
 
 
-class MatchStatus(str, Enum):
+class MatchStatus(StrEnum):
     PENDING = "pending"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -84,6 +82,26 @@ class StateDatabase:
             cursor = conn.execute("SELECT id FROM leagues WHERE ended = 1")
             return {row["id"] for row in cursor.fetchall()}
 
+    def get_completed_matches_by_league(self) -> list[tuple[str, str | None]]:
+        """Return (match_id, league_id) for every completed match."""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "SELECT match_id, league_id FROM matches WHERE status = 'completed'"
+            )
+            return [(row["match_id"], row["league_id"]) for row in cursor.fetchall()]
+
+    def delete_matches(self, match_ids: list[str]) -> int:
+        """Delete the given matches, returning how many rows were removed."""
+        if not match_ids:
+            return 0
+        placeholders = ",".join("?" for _ in match_ids)
+        with self._connection() as conn:
+            cursor = conn.execute(
+                f"DELETE FROM matches WHERE match_id IN ({placeholders})",
+                match_ids,
+            )
+            return cursor.rowcount
+
     def upsert_matches(self, matches: list[tuple[str, str, str | None]]) -> None:
         """Insert multiple match records if they do not already exist.
 
@@ -130,7 +148,8 @@ class StateDatabase:
             for match_id, radiant_win in matches:
                 win_val = 1 if radiant_win else 0
                 conn.execute(
-                    "UPDATE matches SET status = 'completed', radiant_win = ?, updated_at = CURRENT_TIMESTAMP WHERE match_id = ?",
+                    "UPDATE matches SET status = 'completed', radiant_win = ?, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE match_id = ?",
                     (win_val, match_id),
                 )
 

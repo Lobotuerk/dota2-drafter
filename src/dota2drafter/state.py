@@ -84,6 +84,26 @@ class StateDatabase:
             cursor = conn.execute("SELECT id FROM leagues WHERE ended = 1")
             return {row["id"] for row in cursor.fetchall()}
 
+    def get_completed_matches_by_league(self) -> list[tuple[str, str | None]]:
+        """Return (match_id, league_id) for every completed match."""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "SELECT match_id, league_id FROM matches WHERE status = 'completed'"
+            )
+            return [(row["match_id"], row["league_id"]) for row in cursor.fetchall()]
+
+    def delete_matches(self, match_ids: list[str]) -> int:
+        """Delete the given matches, returning how many rows were removed."""
+        if not match_ids:
+            return 0
+        placeholders = ",".join("?" for _ in match_ids)
+        with self._connection() as conn:
+            cursor = conn.execute(
+                f"DELETE FROM matches WHERE match_id IN ({placeholders})",
+                match_ids,
+            )
+            return cursor.rowcount
+
     def upsert_matches(self, matches: list[tuple[str, str, str | None]]) -> None:
         """Insert multiple match records if they do not already exist.
 

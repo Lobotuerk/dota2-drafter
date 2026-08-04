@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
-"""Run the Dota 2 draft ingestion pipeline.
+"""Gather matches for approved leagues and build dataset batches.
 
-Wraps the ingestion pipeline from config.yaml, replacing the old
-``dota2-drafter`` CLI entry point.
+Wraps the match gather pipeline, which reads ``data/leagues.json`` and only
+processes leagues whose ``review`` flag is ``true``. Run this after
+``01a_gather_leagues.py`` and after reviewing/cleaning the manifest.
 
 Usage::
 
-    python scripts/01_gather_data.py
-    python scripts/01_gather_data.py custom_config.yaml
+    python scripts/01b_gather_matches.py
+    python scripts/01b_gather_matches.py custom_config.yaml
 """
 
 from __future__ import annotations
 
+import asyncio
 import sys
-from pathlib import Path
 
 from rich.console import Console
 
 from dota2drafter.config import load_config
-from dota2drafter.main import run_pipeline
+from dota2drafter.main import run_match_gather_pipeline
 
 console = Console()
 
@@ -35,9 +36,7 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        import asyncio
-
-        asyncio.run(run_pipeline(config))
+        asyncio.run(run_match_gather_pipeline(config))
     except KeyboardInterrupt:
         console.print("\n[bold yellow]Interrupted by user.[/bold yellow]")
         sys.exit(130)

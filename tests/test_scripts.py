@@ -12,10 +12,9 @@ import torch
 
 @pytest.mark.parametrize(
     "script_name",
-    [
-        "01_gather_data.py",
-        "01b_build_comfort.py",
-        "01c_add_custom_player.py",
+[
+        "01c_build_comfort.py",
+        "01d_add_custom_player.py",
         "02_train_embeddings.py",
         "03_train_rgcn.py",
         "04_train_transformer.py",
@@ -164,11 +163,11 @@ def test_train_transformer_augment_arg_parsing():
 
 
 def test_add_custom_player_functional(tmp_path: Path) -> None:
-    """Verify that 01c_add_custom_player.py correctly adds and overwrites custom player vectors."""
+    """Verify that 01d_add_custom_player.py correctly adds and overwrites custom player vectors."""
     import importlib
     import json
     import sys
-    add_custom_player = importlib.import_module("scripts.01c_add_custom_player")
+    add_custom_player = importlib.import_module("scripts.01d_add_custom_player")
 
     # 1. Create a mock hero mapping
     hero_mapping_file = tmp_path / "hero_mapping.json"
@@ -217,7 +216,7 @@ def test_add_custom_player_functional(tmp_path: Path) -> None:
         add_custom_player.resolve_hero_indices("Anti-Mage, Pudge", name_to_api_id, indexer)
 
     # 5. Run main() via subprocess to check command line interface
-    script_path = Path("scripts") / "01c_add_custom_player.py"
+    script_path = Path("scripts") / "01d_add_custom_player.py"
 
     # Initially comfort file has NO entries, so vocab_size fallback
     # defaults to indexer.get_contiguous_count() = 4

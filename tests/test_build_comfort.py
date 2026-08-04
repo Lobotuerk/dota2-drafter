@@ -1,4 +1,4 @@
-"""Tests for the 01b_build_comfort.py script."""
+"""Tests for the 01c_build_comfort.py script."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import torch
 
 
 def test_build_comfort_functional(tmp_path: Path) -> None:
-    """Verify that 01b_build_comfort.py correctly builds and L2-normalizes the comfort matrix."""
+    """Verify that 01c_build_comfort.py correctly builds and L2-normalizes the comfort matrix."""
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     output_file = tmp_path / "player_comfort.pt"
@@ -70,7 +70,7 @@ def test_build_comfort_functional(tmp_path: Path) -> None:
     torch.save(mock_batch, data_dir / "drafts_batch_00001.pt")
 
     # Run the script
-    script_path = Path("scripts") / "01b_build_comfort.py"
+    script_path = Path("scripts") / "01c_build_comfort.py"
     result = subprocess.run(
         [
             sys.executable,

@@ -6,7 +6,7 @@ mode that loads the best checkpoint and runs a single match through
 the model.
 
 Prerequisites: run ``scripts/01_gather_data.py`` and
-``scripts/01b_build_comfort.py`` first to prepare the data.
+``scripts/01c_build_comfort.py`` first to prepare the data.
 
 Usage::
 

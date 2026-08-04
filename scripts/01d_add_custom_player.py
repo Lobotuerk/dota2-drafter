@@ -8,8 +8,8 @@ indexer, builds a mask-style comfort vector (1.0 at comfort hero slots,
 
 Usage::
 
-    python scripts/01c_add_custom_player.py --id 12345 --heroes Pudge,Anti-Mage
-    python scripts/01c_add_custom_player.py --id 12345 --heroes Pudge --force
+    python scripts/01d_add_custom_player.py --id 12345 --heroes Pudge,Anti-Mage
+    python scripts/01d_add_custom_player.py --id 12345 --heroes Pudge --force
 """
 
 from __future__ import annotations
@@ -187,7 +187,7 @@ def main() -> None:
     for idx in indices:
         raw_vector[idx] = 1.0
 
-    # L2 normalization: divide by max(1.0, L2_norm) -- matches 01b_build_comfort.py
+    # L2 normalization: divide by max(1.0, L2_norm) -- matches 01c_build_comfort.py
     l2_norm = raw_vector.norm().item()
     normalized_vector = raw_vector / max(1.0, l2_norm)
 

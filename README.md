@@ -115,13 +115,13 @@ Reads configuration from `config.yaml`. Output is saved to `./data/` as `drafts_
 
 ---
 
-## Stage 1b: Build Comfort Data
+## Stage 1c: Build Comfort Data
 
 Builds historical player comfort data (required before transformer training).
 
 ```bash
-python scripts/01b_build_comfort.py --data_dir data --output data/player_comfort.pt
-python scripts/01b_build_comfort.py --data_dir data --output data/player_comfort.pt --dim 10 --random
+python scripts/01c_build_comfort.py --data_dir data --output data/player_comfort.pt
+python scripts/01c_build_comfort.py --data_dir data --output data/player_comfort.pt --dim 10 --random
 ```
 
 ---

@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Generator
 from contextlib import contextmanager
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
-from typing import Generator
-
-from dota2drafter.config import PipelineConfig
 
 
-class MatchStatus(str, Enum):
+class MatchStatus(StrEnum):
     PENDING = "pending"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -150,7 +148,8 @@ class StateDatabase:
             for match_id, radiant_win in matches:
                 win_val = 1 if radiant_win else 0
                 conn.execute(
-                    "UPDATE matches SET status = 'completed', radiant_win = ?, updated_at = CURRENT_TIMESTAMP WHERE match_id = ?",
+                    "UPDATE matches SET status = 'completed', radiant_win = ?, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE match_id = ?",
                     (win_val, match_id),
                 )
 

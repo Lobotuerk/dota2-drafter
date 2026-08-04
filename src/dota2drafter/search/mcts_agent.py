@@ -102,8 +102,8 @@ class Dota2DraftAgent:
         Returns:
             List of Recommendation objects.
         """
-        # Run genmove to trigger the MCTS search
-        self.agent.genmove()
+        # Grow the tree from the current root (without advancing it!)
+        self.agent.tree.grow_tree(self.agent.max_iter, self.agent.max_seconds)
 
         # Extract recommendations from the C++ tree
         recommendations = self._extract_recommendations()

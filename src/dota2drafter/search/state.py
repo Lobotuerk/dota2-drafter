@@ -25,28 +25,28 @@ logger = logging.getLogger(__name__)
 # and team is 0 (Radiant) or 1 (Dire).
 DRAFT_SCHEDULE: list[tuple[str, int]] = [
     ("ban", 1),   # 0
-    ("ban", 0),   # 1
-    ("pick", 0),  # 2
-    ("pick", 1),  # 3
+    ("ban", 1),   # 1
+    ("ban", 0),  # 2
+    ("ban", 0),  # 3
     ("ban", 1),   # 4
     ("ban", 0),   # 5
-    ("pick", 1),  # 6
-    ("pick", 0),  # 7
-    ("ban", 0),   # 8
+    ("ban", 0),  # 6
+    ("pick", 1),  # 7
+    ("pick", 0),   # 8
     ("ban", 1),   # 9
-    ("pick", 1),  # 10
-    ("pick", 0),  # 11
-    ("ban", 1),   # 12
-    ("ban", 0),   # 13
-    ("pick", 0),  # 14
-    ("pick", 1),  # 15
-    ("ban", 0),   # 16
-    ("ban", 1),   # 17
-    ("pick", 0),  # 18
-    ("pick", 1),  # 19
-    ("pick", 1),  # 20
-    ("pick", 1),  # 21
-    ("pick", 0),  # 22
+    ("ban", 1),  # 10
+    ("ban", 0),  # 11
+    ("pick", 0),   # 12
+    ("pick", 1),   # 13
+    ("pick", 1),  # 14
+    ("pick", 0),  # 15
+    ("pick", 0),   # 16
+    ("pick", 1),   # 17
+    ("ban", 1),  # 18
+    ("ban", 0),  # 19
+    ("ban", 1),  # 20
+    ("ban", 0),  # 21
+    ("pick", 1),  # 22
     ("pick", 0),  # 23
 ]
 
@@ -338,6 +338,17 @@ class DraftState(pymcts.MCTS_state):
         # Expand comfort matrix to batch of 1
         comfort = self.comfort_matrix.unsqueeze(0)  # (1, 10, C)
 
+        device = torch.device("cpu")
+        if hasattr(self.model, "parameters") and "Mock" not in type(self.model).__name__:
+            try:
+                model_device = next(self.model.parameters()).device
+                if isinstance(model_device, (torch.device, str)) and "Mock" not in type(model_device).__name__:
+                    device = model_device
+            except (StopIteration, AttributeError):
+                pass
+        tensor = tensor.to(device)
+        comfort = comfort.to(device)
+
         self.model.eval()
         with torch.no_grad():
             win_prob = self.model.predict_proba(tensor, comfort)
@@ -375,7 +386,19 @@ class DraftState(pymcts.MCTS_state):
 
         # Stack into batch
         batch = torch.stack(sequences)  # (N, 24, 4)
-        comfort = self.comfort_matrix.unsqueeze(0)  # (1, 10, C)
+        N = batch.size(0)
+        comfort = self.comfort_matrix.unsqueeze(0).expand(N, -1, -1)  # (N, 10, C)
+
+        device = torch.device("cpu")
+        if hasattr(self.model, "parameters") and "Mock" not in type(self.model).__name__:
+            try:
+                model_device = next(self.model.parameters()).device
+                if isinstance(model_device, (torch.device, str)) and "Mock" not in type(model_device).__name__:
+                    device = model_device
+            except (StopIteration, AttributeError):
+                pass
+        batch = batch.to(device)
+        comfort = comfort.to(device)
 
         self.model.eval()
         with torch.no_grad():

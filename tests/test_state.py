@@ -56,3 +56,36 @@ def test_match_status_transitions(tmp_path):
     assert stats["completed"] == 1
     assert stats["failed"] == 1
     assert stats["invalid"] == 1
+
+
+def test_temp_failed_transitions(tmp_path):
+    db_path = tmp_path / "test_state.db"
+    state_db = StateDatabase(db_path)
+    
+    state_db.insert_league("123", "DreamLeague", 1)
+    
+    matches = [
+        ("10001", "pending", "123"),
+        ("10002", "pending", "123"),
+    ]
+    state_db.upsert_matches(matches)
+    
+    assert state_db.get_pending_count() == 2
+    
+    # Mark 10001 as temp failed
+    state_db.mark_temp_failed("10001")
+    
+    # It should not count as pending anymore
+    assert state_db.get_pending_count() == 1
+    stats = state_db.get_stats()
+    assert stats["temp_failed"] == 1
+    assert stats["pending"] == 1
+    
+    # Reset temp failures
+    state_db.reset_temp_failures()
+    
+    # It should be pending again
+    assert state_db.get_pending_count() == 2
+    stats = state_db.get_stats()
+    assert stats.get("temp_failed", 0) == 0
+    assert stats["pending"] == 2

@@ -1,28 +1,29 @@
-"""Tests for StateDatabase INSERT OR REPLACE behavior."""
+"""Tests for StateDatabase INSERT OR IGNORE behavior."""
 
 import pytest
 from pathlib import Path
 from dota2drafter.state import StateDatabase
 
 
-def test_upsert_matches_replaces_existing(tmp_path):
-    """Verify that upsert_matches uses INSERT OR REPLACE to update existing matches."""
+def test_upsert_matches_ignores_existing(tmp_path):
+    """Verify that upsert_matches uses INSERT OR IGNORE and does not overwrite existing matches."""
     db_path = tmp_path / "test_state.db"
     state_db = StateDatabase(db_path)
 
     state_db.insert_league("123", "DreamLeague", 1)
 
-    # Insert a match
+    # Insert a match with status pending
     state_db.upsert_matches([("10001", "pending", "123")])
     assert state_db.get_pending_count() == 1
 
-    # Update the same match with a different status
+    # Attempt to upsert the same match with a different status (completed)
     state_db.upsert_matches([("10001", "completed", "123")])
 
-    # The match should now be completed, not still pending
-    assert state_db.get_pending_count() == 0
+    # The match should still be pending because the update was ignored
+    assert state_db.get_pending_count() == 1
     stats = state_db.get_stats()
-    assert stats["completed"] == 1
+    assert stats.get("completed", 0) == 0
+    assert stats.get("pending", 0) == 1
 
 
 def test_upsert_matches_inserts_new(tmp_path):
@@ -39,8 +40,8 @@ def test_upsert_matches_inserts_new(tmp_path):
     assert pending[0] == ("10001", "123")
 
 
-def test_upsert_matches_batch_replaces(tmp_path):
-    """Verify that batch upsert_matches replaces existing matches."""
+def test_upsert_matches_batch_ignores(tmp_path):
+    """Verify that batch upsert_matches ignores existing matches and keeps their status."""
     db_path = tmp_path / "test_state.db"
     state_db = StateDatabase(db_path)
 
@@ -53,10 +54,10 @@ def test_upsert_matches_batch_replaces(tmp_path):
     ])
     assert state_db.get_pending_count() == 2
 
-    # Update one of them
+    # Attempt to update one of them to failed
     state_db.upsert_matches([("10001", "failed", "123")])
 
-    # Should have 1 pending, 1 failed
+    # Should still have 2 pending, 0 failed
     stats = state_db.get_stats()
-    assert stats["pending"] == 1
-    assert stats["failed"] == 1
+    assert stats.get("pending", 0) == 2
+    assert stats.get("failed", 0) == 0

@@ -122,19 +122,20 @@ def load_hero_indexer(data_dir: str) -> HeroIndexer:
         import json
         with open(indexer_path) as f:
             hero_data = json.load(f)
-        heroes = [{"id": api_id, "playable": True} for api_id in hero_data.keys()]
+        heroes = [{"id": int(api_id), "playable": True} for api_id in hero_data.keys()]
         indexer.build_mapping(heroes)
     return indexer
 
 
-def load_hero_names(path: str) -> dict[int, str]:
-    """Load hero name mapping from JSON file.
+def load_hero_names(path: str, indexer: HeroIndexer) -> dict[int, str]:
+    """Load hero name mapping from JSON file and map to contiguous hero indices.
 
     Args:
         path: Path to hero_mapping.json.
+        indexer: The HeroIndexer mapping API ID to contiguous index.
 
     Returns:
-        Dict mapping hero index to hero name.
+        Dict mapping contiguous hero index to hero name.
     """
     import json
 
@@ -146,8 +147,11 @@ def load_hero_names(path: str) -> dict[int, str]:
         raw = json.load(f)
 
     hero_names: dict[int, str] = {}
-    for api_id, name in raw.items():
-        hero_names[int(api_id)] = name
+    for api_id_str, name in raw.items():
+        api_id = int(api_id_str)
+        idx = indexer.map_hero_id(api_id)
+        if idx is not None:
+            hero_names[idx] = name
 
     return hero_names
 
@@ -205,7 +209,7 @@ def build_comfort_tensor(
         if account_id in comfort_map:
             rows.append(comfort_map[account_id])
         else:
-            rows.append(torch.zeros(player_input_dim, device=device))
+            rows.append(torch.zeros(player_input_dim))
     return torch.stack(rows).to(device)
 
 
@@ -229,7 +233,7 @@ def display_recommendations(
 
     console.print()
     console.print(Panel(
-        f"[bold]Step {step}: {team_name} {action_word}[/bold]",
+        f"[bold]Step {step + 1}: {team_name} {action_word}[/bold]",
         title="[bold blue]MCTS Recommendations[/bold blue]",
         border_style="blue",
     ))
@@ -242,7 +246,11 @@ def display_recommendations(
     table.add_column("Prior", style="yellow", width=10)
     table.add_column("Visits", style="cyan", width=8)
 
-    for rank, (move, visit_count, win_prob) in enumerate(recommendations[:top_n], 1):
+    for rank, rec in enumerate(recommendations[:top_n], 1):
+        move = rec.move
+        visit_count = rec.visit_count
+        win_prob = rec.win_probability
+        prior_prob = rec.prior_probability
         hero_name = hero_names.get(move.hero_id, f"Hero {move.hero_id}")
         action_word = "Pick" if move.is_pick else "Ban"
         table.add_row(
@@ -250,7 +258,7 @@ def display_recommendations(
             hero_name,
             action_word,
             f"{win_prob:.3f}",
-            "N/A",
+            f"{prior_prob:.3f}",
             str(visit_count),
         )
 
@@ -285,7 +293,7 @@ def display_principal_variation(variation: list[DraftMove], hero_names: dict[int
         action_word = "Pick" if move.is_pick else "Ban"
         hero_name = hero_names.get(move.hero_id, f"Hero {move.hero_id}")
         table.add_row(
-            str(move.step_index),
+            str(move.step_index + 1),
             team_name,
             action_word,
             hero_name,
@@ -295,11 +303,11 @@ def display_principal_variation(variation: list[DraftMove], hero_names: dict[int
 
 
 def get_user_move(step: int, hero_names: dict[int, str]) -> DraftMove | None:
-    """Prompt the user to input their draft action.
+    """Prompt the user to input their draft action by entering a hero name.
 
     Args:
         step: Current draft step.
-        hero_names: Mapping from hero index to name.
+        hero_names: Mapping from contiguous hero index to name.
 
     Returns:
         DraftMove for the user's choice, or None to skip.
@@ -308,27 +316,54 @@ def get_user_move(step: int, hero_names: dict[int, str]) -> DraftMove | None:
     team_name = "Radiant" if schedule_team == 0 else "Dire"
     action_word = "pick" if schedule_action == "pick" else "ban"
 
-    console.print()
-    hero_input = console.input(
-        f"[bold]Step {step} - {team_name} {action_word}[/bold] "
-        f"Enter hero index ({action_word}): "
-    ).strip()
+    # Invert hero_names for case-insensitive lookup
+    name_to_idx = {name.lower().strip(): idx for idx, name in hero_names.items()}
 
-    if not hero_input or hero_input.lower() in ("skip", "q", "quit", "exit"):
-        return None
+    while True:
+        console.print()
+        hero_input = console.input(
+            f"[bold]Step {step + 1} - {team_name} {action_word}[/bold] "
+            f"Enter hero name: "
+        ).strip()
 
-    try:
-        hero_id = int(hero_input)
-    except ValueError:
-        console.print(f"[bold red]Invalid hero index: {hero_input}[/bold red]")
-        return None
+        if hero_input.lower() in ("q", "quit", "exit"):
+            console.print("[bold yellow]Exiting draft...[/bold yellow]")
+            sys.exit(0)
 
-    return DraftMove(
-        hero_id=hero_id,
-        is_pick=(schedule_action == "pick"),
-        team=schedule_team,
-        step_index=step,
-    )
+        if not hero_input:
+            console.print("[bold red]Input cannot be empty. Please enter a hero name.[/bold red]")
+            continue
+
+        if hero_input.lower() == "skip":
+            console.print("[bold red]Draft moves cannot be skipped in Captains Mode. Please enter a hero name.[/bold red]")
+            continue
+
+        # Try exact case-insensitive match
+        match_idx = name_to_idx.get(hero_input.lower())
+
+        # If not exact match, try partial match (e.g. "anti" matches "Anti-Mage")
+        if match_idx is None:
+            matches = [
+                (idx, name) for idx, name in hero_names.items()
+                if hero_input.lower() in name.lower()
+            ]
+            if len(matches) == 1:
+                match_idx = matches[0][0]
+                console.print(f"[dim]Auto-resolved to: {matches[0][1]}[/dim]")
+            elif len(matches) > 1:
+                console.print(f"[bold yellow]Multiple matches found:[/bold yellow] {', '.join(name for _, name in matches)}")
+                console.print("Please be more specific.")
+                continue
+
+        if match_idx is not None:
+            return DraftMove(
+                hero_id=match_idx,
+                is_pick=(schedule_action == "pick"),
+                team=schedule_team,
+                step_index=step,
+            )
+
+        console.print(f"[bold red]Hero '{hero_input}' not found. Please try again.[/bold red]")
 
 
 def main() -> None:
@@ -398,7 +433,7 @@ def main() -> None:
     model.eval()
 
     # Load hero names
-    hero_names = load_hero_names(args.hero_mapping)
+    hero_names = load_hero_names(args.hero_mapping, hero_indexer)
 
     # Team selection
     console.print()
@@ -498,7 +533,10 @@ def main() -> None:
                 else:
                     move = recommendations[0].move
 
-                console.print(f"[bold green]Selected: {move}[/bold green]")
+                hero_name = hero_names.get(move.hero_id, f"Hero {move.hero_id}")
+                action_past = "Picked" if move.is_pick else "Banned"
+                team_str = "Radiant" if move.team == 0 else "Dire"
+                console.print(f"[bold green]{team_str} {action_past} {hero_name} (Step {step + 1})[/bold green]")
                 agent.update_state(move)
             else:
                 console.print("[bold red]No valid moves available.[/bold red]")
@@ -513,7 +551,10 @@ def main() -> None:
                 console.print("[bold yellow]Skipping opponent move.[/bold yellow]")
                 continue
 
-            console.print(f"[bold green]Opponent: {move}[/bold green]")
+            hero_name = hero_names.get(move.hero_id, f"Hero {move.hero_id}")
+            action_past = "Picked" if move.is_pick else "Banned"
+            team_str = "Radiant" if move.team == 0 else "Dire"
+            console.print(f"[bold green]{team_str} {action_past} {hero_name} (Step {step + 1})[/bold green]")
             agent.update_state(move)
 
     # Final summary
@@ -524,6 +565,28 @@ def main() -> None:
         title="[bold green]Session Complete[/bold green]",
         border_style="green",
     ))
+
+    # Display final draft summary table
+    if hasattr(agent, "state") and hasattr(agent.state, "actions") and agent.state.actions:
+        console.print()
+        table = Table(show_header=True, header_style="bold magenta")
+        table.add_column("Step", style="cyan", width=6)
+        table.add_column("Team", width=10)
+        table.add_column("Action", width=8)
+        table.add_column("Hero", style="green", width=20)
+
+        for move in agent.state.actions:
+            team_name = "Radiant" if move.team == 0 else "Dire"
+            action_word = "Pick" if move.is_pick else "Ban"
+            hero_name = hero_names.get(move.hero_id, f"Hero {move.hero_id}")
+            table.add_row(
+                str(move.step_index + 1),
+                team_name,
+                action_word,
+                hero_name,
+            )
+
+        console.print(Panel(table, title="[bold blue]Final Draft Summary[/bold blue]", border_style="blue"))
 
 
 if __name__ == "__main__":

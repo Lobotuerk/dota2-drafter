@@ -16,6 +16,7 @@ class MatchStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     INVALID = "invalid"
+    TEMP_FAILED = "temp_failed"
 
 
 class StateDatabase:
@@ -84,13 +85,13 @@ class StateDatabase:
             return {row["id"] for row in cursor.fetchall()}
 
     def upsert_matches(self, matches: list[tuple[str, str, str | None]]) -> None:
-        """Insert or update multiple match records.
+        """Insert multiple match records if they do not already exist.
 
         Each tuple is (match_id, status, league_id).
         """
         with self._connection() as conn:
             conn.executemany(
-                """INSERT OR REPLACE INTO matches (match_id, status, league_id)
+                """INSERT OR IGNORE INTO matches (match_id, status, league_id)
                    VALUES (?, ?, ?)""",
                 matches,
             )
@@ -149,6 +150,23 @@ class StateDatabase:
                 """UPDATE matches SET status = 'invalid',
                    updated_at = CURRENT_TIMESTAMP WHERE match_id = ?""",
                 (match_id,),
+            )
+
+    def mark_temp_failed(self, match_id: str) -> None:
+        """Mark a match as temporarily failed so it is not retried in the same run."""
+        with self._connection() as conn:
+            conn.execute(
+                """UPDATE matches SET status = 'temp_failed',
+                   updated_at = CURRENT_TIMESTAMP WHERE match_id = ?""",
+                (match_id,),
+            )
+
+    def reset_temp_failures(self) -> None:
+        """Reset all temporarily failed matches back to pending status."""
+        with self._connection() as conn:
+            conn.execute(
+                """UPDATE matches SET status = 'pending',
+                   updated_at = CURRENT_TIMESTAMP WHERE status = 'temp_failed'"""
             )
 
     def get_stats(self) -> dict[str, int]:

@@ -81,10 +81,11 @@ async def _process_match(
 
         if is_temporary:
             logger.warning(
-                "Temporary error processing match %s (will remain pending): %s",
+                "Temporary error processing match %s (will remain pending for next run): %s",
                 match_id,
                 e,
             )
+            state_db.mark_temp_failed(match_id)
             return "failed"
 
         # For actual permanent code/schema or hard errors, mark as failed in DB
@@ -100,6 +101,7 @@ async def run_pipeline(config: PipelineConfig) -> None:
     opendota_client = OpenDotaClient(config.opendota)
     try:
         state_db = StateDatabase(config.state.database_path)
+        state_db.reset_temp_failures()
         hero_indexer = HeroIndexer()
         validator = DraftValidator()
         transformer = TensorTransformer(hero_indexer, validator)
@@ -209,6 +211,7 @@ async def run_pipeline(config: PipelineConfig) -> None:
                 )
         finally:
             dataset_builder.flush()
+            state_db.reset_temp_failures()
 
         # Print summary
         console.print("\n[bold blue]Pipeline Complete![/bold blue]")

@@ -57,6 +57,8 @@ class Dota2DraftAgent:
         max_iterations: int = 1000,
         max_seconds: float = 30.0,
         c_puct: float = 1.414,
+        batch_size: int = 64,
+        num_search_threads: int = 4,
         top_n: int = 5,
         hero_indexer: Any | None = None,
         max_candidates: int = 20,
@@ -69,12 +71,17 @@ class Dota2DraftAgent:
             active_team: Team being optimized (0 = Radiant, 1 = Dire).
             max_iterations: Maximum MCTS simulations.
             max_seconds: Maximum search time in seconds.
-            c_puct: PUCT exploration constant (unused by pymcts, kept for API compat).
+            c_puct: PUCT exploration constant.
+            batch_size: MCTS batch size for batched leaf evaluation.
+            num_search_threads: MCTS parallel search threads.
             top_n: Number of top recommendations to return.
             hero_indexer: HeroIndexer for hero ID management.
             max_candidates: Number of candidates to consider per node.
         """
         self.top_n = top_n
+        self.c_puct = float(c_puct)
+        self.batch_size = int(batch_size)
+        self.num_search_threads = int(num_search_threads)
 
         root_state = DraftState(
             model=model,
@@ -91,7 +98,10 @@ class Dota2DraftAgent:
             wrapped_state,
             max_iter=int(max_iterations),
             max_seconds=int(max_seconds),
+            exploration_constant=self.c_puct,
         )
+        self.agent.batch_size = self.batch_size
+        self.agent.num_search_threads = self.num_search_threads
 
         self.state = root_state
 
@@ -106,7 +116,7 @@ class Dota2DraftAgent:
             List of Recommendation objects.
         """
         # Grow the tree from the current root (without advancing it!)
-        self.agent.tree.grow_tree(self.agent.max_iter, self.agent.max_seconds)
+        self.agent.tree.grow_tree(self.agent.max_iter, self.agent.max_seconds, c=self.c_puct)
 
         # Extract recommendations from the C++ tree
         recommendations = self._extract_recommendations()
@@ -291,9 +301,13 @@ class Dota2DraftAgent:
             logger.warning("Move %s not found in MCTS tree. Falling back to cold start.", move)
             # Re-wrap the new state for the C++ agent
             wrapped_state = pymcts.SerializedPythonState(self.state)
-            # Create a new agent with the updated state
-            self.agent = pymcts.MCTS_agent(
+            # Create a new agent with the updated state, preserving tuned params
+            new_agent = pymcts.MCTS_agent(
                 wrapped_state,
                 max_iter=self.agent.max_iter,
                 max_seconds=self.agent.max_seconds,
+                exploration_constant=self.agent.exploration_constant,
             )
+            new_agent.batch_size = self.agent.batch_size
+            new_agent.num_search_threads = self.agent.num_search_threads
+            self.agent = new_agent

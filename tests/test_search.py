@@ -405,3 +405,114 @@ def test_mcts_agent_update_state_fallback(caplog):
     assert any("not found in MCTS tree" in record.message for record in caplog.records)
 
 
+def test_mcts_agent_params_propagation():
+    """Verify c_puct, batch_size, num_search_threads are forwarded into pymcts agent."""
+    mock_model = MagicMock()
+    mock_model.predict_proba.side_effect = lambda x, c: torch.full((x.shape[0],), 0.55)
+    mock_model.forward.side_effect = lambda x, c: torch.full((x.shape[0],), 0.5)
+
+    comfort_matrix = torch.zeros(10, 64)
+    agent = Dota2DraftAgent(
+        model=mock_model,
+        comfort_matrix=comfort_matrix,
+        active_team=0,
+        c_puct=2.0,
+        batch_size=16,
+        num_search_threads=2,
+        max_iterations=10,
+        max_seconds=0.1,
+    )
+
+    assert agent.agent.exploration_constant == 2.0
+    assert agent.agent.batch_size == 16
+    assert agent.agent.num_search_threads == 2
+
+    # Trigger cold-start path
+    unexplored_move = DraftMove(hero_id=99, is_pick=True, team=0, step_index=0)
+    original_agent_id = id(agent.agent)
+    agent.update_state(unexplored_move)
+
+    assert id(agent.agent) != original_agent_id
+    assert agent.agent.exploration_constant == 2.0
+    assert agent.agent.batch_size == 16
+    assert agent.agent.num_search_threads == 2
+
+
+def test_draft_state_evaluate_batch():
+    """Verify evaluate_batch correctness with a recording mock."""
+
+    class _RecordingMock:
+        def __init__(self):
+            self.calls: list[tuple] = []
+
+        def predict_proba(self, batch, comfort):
+            B = batch.shape[0]
+            self.calls.append((batch.shape, comfort.shape))
+            return torch.full((B,), 0.7)
+
+        def forward(self, batch, comfort):
+            n = batch.shape[0]
+            return torch.linspace(0.0, float(n - 1), n)
+
+        def eval(self):
+            return self
+
+    mock_model = _RecordingMock()
+    comfort_matrix = torch.zeros(10, 64)
+
+    # Build non-terminal states with different active teams
+    state_radiant = DraftState(
+        model=mock_model,
+        comfort_matrix=comfort_matrix,
+        active_team=0,
+        max_candidates=5,
+    )
+    state_dire = DraftState(
+        model=mock_model,
+        comfort_matrix=comfort_matrix,
+        active_team=1,
+        max_candidates=5,
+    )
+
+    # Build a terminal state (24 actions)
+    terminal_actions = []
+    for idx, (action_type, team) in enumerate(DRAFT_SCHEDULE):
+        terminal_actions.append(
+            DraftMove(hero_id=idx + 1, is_pick=(action_type == "pick"), team=team, step_index=idx)
+        )
+    terminal_state = DraftState(
+        model=mock_model,
+        comfort_matrix=comfort_matrix,
+        active_team=0,
+        initial_actions=terminal_actions,
+    )
+
+    states = [state_radiant, state_dire, terminal_state]
+    results = state_radiant.evaluate_batch(states)
+
+    # predict_proba called exactly once
+    assert len(mock_model.calls) == 1
+    batch_shape, comfort_shape = mock_model.calls[0]
+    assert batch_shape == (3, 24, 4)
+    assert comfort_shape == (3, 10, 64)
+
+    # Return length and order match
+    assert len(results) == 3
+    for i, s in enumerate(states):
+        assert results[i][0] is not None  # value present
+
+    # Values: radiant-win 0.7 -> active_team==0 gives 0.7, active_team==1 gives 0.3
+    assert pytest.approx(results[0][0], 1e-6) == 0.7  # radiant active, radiant-win 0.7
+    assert pytest.approx(results[1][0], 1e-6) == 0.3  # dire active, 1.0 - 0.7
+    assert pytest.approx(results[2][0], 1e-6) == 0.7  # terminal state, radiant active
+
+    # Non-terminal states: priors non-empty, len == max_candidates, sum ~ 1.0
+    assert len(results[0][1]) == 5
+    assert abs(sum(results[0][1]) - 1.0) < 1e-5
+    assert len(results[1][1]) == 5
+    assert abs(sum(results[1][1]) - 1.0) < 1e-5
+
+    # Terminal state: priors == []
+    assert results[2][1] == []
+
+

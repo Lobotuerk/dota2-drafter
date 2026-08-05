@@ -262,8 +262,8 @@ class DraftState(pymcts.MCTS_state):
             sequences.append(tensor)
 
         batch = torch.stack(sequences)
-        N = batch.size(0)
-        comfort = self.comfort_matrix.unsqueeze(0).expand(N, -1, -1)
+        num_seqs = batch.size(0)
+        comfort = self.comfort_matrix.unsqueeze(0).expand(num_seqs, -1, -1)
 
         device = torch.device("cpu")
         if hasattr(self.model, "parameters"):
@@ -402,7 +402,8 @@ class DraftState(pymcts.MCTS_state):
         if hasattr(self.model, "parameters") and "Mock" not in type(self.model).__name__:
             try:
                 model_device = next(self.model.parameters()).device
-                if isinstance(model_device, (torch.device, str)) and "Mock" not in type(model_device).__name__:
+                is_device_str = isinstance(model_device, (torch.device, str))
+                if is_device_str and "Mock" not in type(model_device).__name__:
                     device = model_device
             except (StopIteration, AttributeError):
                 pass

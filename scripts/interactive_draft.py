@@ -100,6 +100,9 @@ def parse_args() -> argparse.Namespace:
         "--max_seconds", type=float, default=30.0, help="Max MCTS search time (default: 30)"
     )
     parser.add_argument(
+        "--max_candidates", type=int, default=20, help="Max candidate moves to evaluate per MCTS node (default: 20)"
+    )
+    parser.add_argument(
         "--top_n", type=int, default=5, help="Number of recommendations to show (default: 5)"
     )
     parser.add_argument(
@@ -484,6 +487,7 @@ def main() -> None:
         max_seconds=args.max_seconds,
         top_n=args.top_n,
         hero_indexer=hero_indexer,
+        max_candidates=args.max_candidates,
     )
 
     # Main draft loop
@@ -515,9 +519,12 @@ def main() -> None:
             elapsed = time.time() - start_time
 
             if recommendations:
+                # Log the actual number of iterations completed
+                actual_iterations = agent.agent.tree.root.visit_count if agent.agent.tree and agent.agent.tree.root else 0
+                console.print(f"[dim]Search completed in {elapsed:.1f}s ({actual_iterations} iterations)[/dim]")
+
                 display_recommendations(recommendations, step, hero_names, args.top_n)
                 display_principal_variation(agent.get_principal_variation(), hero_names)
-                console.print(f"[dim]Search completed in {elapsed:.1f}s[/dim]")
 
                 # Ask user to confirm or pick from recommendations
                 console.print()
@@ -565,6 +572,27 @@ def main() -> None:
         title="[bold green]Session Complete[/bold green]",
         border_style="green",
     ))
+
+    # Calculate and display final win probability
+    if hasattr(agent, "state") and agent.state is not None:
+        console.print()
+        with console.status("[bold blue]Evaluating final draft win probability...[/bold blue]"):
+            active_win_prob = agent.state.rollout()
+
+        if active_team == 0:
+            radiant_win_prob = active_win_prob
+            dire_win_prob = 1.0 - active_win_prob
+        else:
+            radiant_win_prob = 1.0 - active_win_prob
+            dire_win_prob = active_win_prob
+
+        console.print(Panel(
+            f"Active Team ([bold]{team_name}[/bold]) Win Probability: [bold green]{active_win_prob:.2%}[/bold green]\n"
+            f"Radiant Win Probability: [bold cyan]{radiant_win_prob:.2%}[/bold cyan]\n"
+            f"Dire Win Probability: [bold magenta]{dire_win_prob:.2%}[/bold magenta]",
+            title="[bold gold3]Final Draft Win Probability[/bold gold3]",
+            border_style="gold3",
+        ))
 
     # Display final draft summary table
     if hasattr(agent, "state") and hasattr(agent.state, "actions") and agent.state.actions:

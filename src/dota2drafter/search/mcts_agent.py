@@ -59,6 +59,7 @@ class Dota2DraftAgent:
         c_puct: float = 1.414,
         top_n: int = 5,
         hero_indexer: Any | None = None,
+        max_candidates: int = 20,
     ) -> None:
         """Initialize the draft agent.
 
@@ -71,6 +72,7 @@ class Dota2DraftAgent:
             c_puct: PUCT exploration constant (unused by pymcts, kept for API compat).
             top_n: Number of top recommendations to return.
             hero_indexer: HeroIndexer for hero ID management.
+            max_candidates: Number of candidates to consider per node.
         """
         self.top_n = top_n
 
@@ -79,6 +81,7 @@ class Dota2DraftAgent:
             comfort_matrix=comfort_matrix,
             active_team=active_team,
             hero_indexer=hero_indexer,
+            max_candidates=max_candidates,
         )
 
         # Wrap Python state with SerializedPythonState for C++ MCTS engine

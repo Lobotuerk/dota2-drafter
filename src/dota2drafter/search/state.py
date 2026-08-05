@@ -152,15 +152,13 @@ def _build_tensor_from_moves(actions: list[DraftMove], num_heroes: int) -> torch
     Returns:
         Tensor of shape (24, 4).
     """
-    steps: list[torch.Tensor] = [_ZERO_STEP.clone() for _ in range(24)]
+    tensor = torch.zeros((24, 4), dtype=torch.float32)
     for move in actions:
-        is_pick_val = 1.0 if move.is_pick else 0.0
-        hero_val = float(move.hero_id) if move.hero_id > 0 else -1.0
-        steps[move.step_index] = torch.tensor(
-            [is_pick_val, float(move.team), hero_val, float(move.step_index)],
-            dtype=torch.float32,
-        )
-    return torch.stack(steps)
+        tensor[move.step_index, 0] = 1.0 if move.is_pick else 0.0
+        tensor[move.step_index, 1] = float(move.team)
+        tensor[move.step_index, 2] = float(move.hero_id) if move.hero_id > 0 else -1.0
+        tensor[move.step_index, 3] = float(move.step_index)
+    return tensor
 
 
 class DraftState(pymcts.MCTS_state):
@@ -254,15 +252,17 @@ class DraftState(pymcts.MCTS_state):
         if not valid_moves:
             return ([], [])
 
-        # Build batch tensor for all candidates
-        sequences: list[torch.Tensor] = []
-        for move in valid_moves:
-            extended = self.actions + [move]
-            tensor = _build_tensor_from_moves(extended, self._num_heroes)
-            sequences.append(tensor)
+        # Build batch tensor for all candidates (Vectorized)
+        base_tensor = _build_tensor_from_moves(self.actions, self._num_heroes)
+        num_seqs = len(valid_moves)
+        
+        batch = base_tensor.unsqueeze(0).expand(num_seqs, 24, 4).clone()
+        for i, move in enumerate(valid_moves):
+            batch[i, step_idx, 0] = 1.0 if move.is_pick else 0.0
+            batch[i, step_idx, 1] = float(move.team)
+            batch[i, step_idx, 2] = float(move.hero_id)
+            batch[i, step_idx, 3] = float(step_idx)
 
-        batch = torch.stack(sequences)
-        num_seqs = batch.size(0)
         comfort = self.comfort_matrix.unsqueeze(0).expand(num_seqs, -1, -1)
 
         device = torch.device("cpu")

@@ -64,6 +64,7 @@ def test_draft_state_inherits_from_pymcts_state():
 def test_draft_state_basic_flow():
     """Verify basic DraftState transitions and properties."""
     mock_model = MagicMock()
+    mock_model.forward.return_value = torch.zeros(1)
     comfort_matrix = torch.zeros(10, 64)
     state = DraftState(model=mock_model, comfort_matrix=comfort_matrix, active_team=0)
 
@@ -134,29 +135,33 @@ def test_draft_state_rollout():
 
 def test_draft_state_get_action_probabilities_uses_logits():
     """Verify action probabilities use logits + comfort scaling + softmax."""
-    mock_model = MagicMock()
-    # Mock forward() to return raw logits (not probabilities)
-    mock_model.forward.return_value = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0])
+
+    _call_count = 0
+
+    class _DynamicLogitsMock:
+        def forward(self, batch, comfort):
+            nonlocal _call_count
+            _call_count += 1
+            n = batch.shape[0]
+            return torch.linspace(0.0, float(n - 1), n)
+
+        def eval(self):
+            return self
+
+    mock_model = _DynamicLogitsMock()
 
     comfort_matrix = torch.zeros(10, 64)
-    # Set comfort weight for first player to 0.8
     comfort_matrix[0] = 0.8
 
     state = DraftState(model=mock_model, comfort_matrix=comfort_matrix, active_team=0)
-    # Stub actions_to_try to return only 5 pick moves
-    moves = [
-        DraftMove(hero_id=h, is_pick=True, team=0, step_index=2)
-        for h in range(1, 6)
-    ]
-    state.actions_to_try = MagicMock(return_value=moves)
 
     probs = state.get_action_probabilities()
-    assert len(probs) == 5
+    assert len(probs) == 20
     assert all(0.0 <= p <= 1.0 for p in probs)
     assert pytest.approx(sum(probs), 1e-5) == 1.0
 
-    # Verify forward() was called (not predict_proba)
-    mock_model.forward.assert_called()
+    # Verify forward() was called exactly once
+    assert _call_count == 1
 
 
 def test_serialized_python_state_wrapper():

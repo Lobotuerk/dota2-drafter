@@ -186,6 +186,7 @@ class DraftState(pymcts.MCTS_state):
         active_team: int = 0,
         hero_indexer: HeroIndexer | None = None,
         initial_actions: list[DraftMove] | None = None,
+        max_candidates: int = 20,
     ) -> None:
         """Initialize a draft state for MCTS search.
 
@@ -195,6 +196,7 @@ class DraftState(pymcts.MCTS_state):
             active_team: Team being optimized (0 = Radiant, 1 = Dire).
             hero_indexer: HeroIndexer for hero ID management.
             initial_actions: Pre-applied moves (for continuing from partial state).
+            max_candidates: Maximum number of candidate moves to evaluate and return.
         """
         super().__init__()
         self.model = model
@@ -203,23 +205,30 @@ class DraftState(pymcts.MCTS_state):
         self.hero_indexer = hero_indexer
         self.actions: list[DraftMove] = initial_actions if initial_actions is not None else []
         self._num_heroes = hero_indexer.get_contiguous_count() if hero_indexer else 120
+        self.max_candidates = max_candidates
+        self._cached_valid_moves: list[DraftMove] | None = None
+        self._cached_priors: list[float] | None = None
 
     # ------------------------------------------------------------------
     # MCTS interface methods
     # ------------------------------------------------------------------
 
-    def actions_to_try(self) -> list[DraftMove]:
-        """Return all valid DraftMove candidates for the current step.
+    def _evaluate_and_prune_moves(
+        self,
+    ) -> tuple[list[DraftMove], list[float]]:
+        """Evaluate all valid moves via a single batched forward pass and prune to top candidates.
 
-        Filters out heroes that have already been picked or banned.
-        Only returns moves matching the current schedule entry.
+        Generates all unpicked/unbanned candidate moves, runs a single
+        model.forward(batch, comfort) to get raw logits, applies comfort
+        scaling, selects the top ``max_candidates`` based on the schedule
+        team's perspective, and computes PUCT priors for the active team.
 
         Returns:
-            List of valid DraftMove objects.
+            Tuple of (top moves, prior probabilities).
         """
         step_idx = len(self.actions)
         if step_idx >= 24:
-            return []
+            return ([], [])
 
         schedule_action, schedule_team = DRAFT_SCHEDULE[step_idx]
 
@@ -229,39 +238,88 @@ class DraftState(pymcts.MCTS_state):
             if move.hero_id > 0:
                 used_heroes.add(move.hero_id)
 
+        # Generate all valid candidate moves
         valid_moves: list[DraftMove] = []
-        if schedule_action == "ban":
-            # For bans, suggest all unpicked heroes (up to a reasonable limit)
-            for hero_idx in range(1, self._num_heroes + 1):
-                if hero_idx not in used_heroes:
-                    valid_moves.append(
-                        DraftMove(
-                            hero_id=hero_idx,
-                            is_pick=False,
-                            team=schedule_team,
-                            step_index=step_idx,
-                        )
+        for hero_idx in range(1, self._num_heroes + 1):
+            if hero_idx not in used_heroes:
+                valid_moves.append(
+                    DraftMove(
+                        hero_id=hero_idx,
+                        is_pick=(schedule_action == "pick"),
+                        team=schedule_team,
+                        step_index=step_idx,
                     )
-            # Limit to top 20 unpicked heroes for performance
-            if len(valid_moves) > 20:
-                valid_moves = valid_moves[:20]
-        else:
-            # For picks, suggest all unpicked heroes (up to a reasonable limit)
-            for hero_idx in range(1, self._num_heroes + 1):
-                if hero_idx not in used_heroes:
-                    valid_moves.append(
-                        DraftMove(
-                            hero_id=hero_idx,
-                            is_pick=True,
-                            team=schedule_team,
-                            step_index=step_idx,
-                        )
-                    )
-            # Limit to top 20 unpicked heroes for performance
-            if len(valid_moves) > 20:
-                valid_moves = valid_moves[:20]
+                )
 
-        return valid_moves
+        if not valid_moves:
+            return ([], [])
+
+        # Build batch tensor for all candidates
+        sequences: list[torch.Tensor] = []
+        for move in valid_moves:
+            extended = self.actions + [move]
+            tensor = _build_tensor_from_moves(extended, self._num_heroes)
+            sequences.append(tensor)
+
+        batch = torch.stack(sequences)
+        N = batch.size(0)
+        comfort = self.comfort_matrix.unsqueeze(0).expand(N, -1, -1)
+
+        device = torch.device("cpu")
+        if hasattr(self.model, "parameters"):
+            try:
+                model_device = next(self.model.parameters()).device
+                if isinstance(model_device, (torch.device, str)):
+                    device = model_device
+            except (StopIteration, AttributeError):
+                pass
+        batch = batch.to(device)
+        comfort = comfort.to(device)
+
+        self.model.eval()
+        with torch.no_grad():
+            raw_logits = self.model.forward(batch, comfort)
+
+        # Determine perspective from schedule team
+        if schedule_team == 1:
+            sort_logits = -raw_logits
+        else:
+            sort_logits = raw_logits.clone()
+
+        # Apply comfort scaling and sort descending
+        sort_scores = self._apply_comfort_scaling_to_logits(sort_logits, valid_moves)
+        _, top_indices = torch.sort(sort_scores, descending=True)
+        top_indices = top_indices[: self.max_candidates]
+
+        top_moves = [valid_moves[i] for i in top_indices]
+        top_raw_logits = raw_logits[top_indices]
+
+        # Compute PUCT priors from top_raw_logits for the active team
+        if self.active_team == 1:
+            active_logits = -top_raw_logits
+        else:
+            active_logits = top_raw_logits.clone()
+
+        active_scores = self._apply_comfort_scaling_to_logits(active_logits, top_moves)
+        log_probs = active_scores - active_scores.max()
+        priors = torch.exp(log_probs) / torch.exp(log_probs).sum()
+
+        return (top_moves, priors.tolist())
+
+    def actions_to_try(self) -> list[DraftMove]:
+        """Return all valid DraftMove candidates for the current step.
+
+        Uses model-guided pruning: evaluates all unpicked/unbanned
+        candidates via a single batched forward pass, applies comfort
+        scaling, and returns the top ``max_candidates`` moves based on
+        the schedule team's perspective.
+
+        Returns:
+            List of pruned valid DraftMove objects.
+        """
+        if self._cached_valid_moves is None:
+            self._cached_valid_moves, self._cached_priors = self._evaluate_and_prune_moves()
+        return self._cached_valid_moves
 
     def next_state(self, move: DraftMove) -> DraftState:
         """Create a new DraftState with the move applied.
@@ -279,6 +337,7 @@ class DraftState(pymcts.MCTS_state):
             active_team=self.active_team,
             hero_indexer=self.hero_indexer,
             initial_actions=new_actions,
+            max_candidates=self.max_candidates,
         )
 
     def clone(self) -> DraftState:
@@ -293,6 +352,7 @@ class DraftState(pymcts.MCTS_state):
             active_team=self.active_team,
             hero_indexer=self.hero_indexer,
             initial_actions=list(self.actions),
+            max_candidates=self.max_candidates,
         )
 
     def is_terminal(self) -> bool:
@@ -364,61 +424,15 @@ class DraftState(pymcts.MCTS_state):
     def get_action_probabilities(self) -> list[float]:
         """Compute comfort-scaled prior probabilities for all valid actions.
 
-        For each valid action a, constructs the extended draft sequence,
-        evaluates raw logits via MatchNetwork.forward() in a single GPU batch,
-        then scales the logits by the player comfort matrix:
-            P'(a|S) = Softmax(Logits(P(a|S)) * W_comfort)
+        Returns the cached priors computed by ``_evaluate_and_prune_moves``.
+        Triggers evaluation lazily if the cache is empty.
 
         Returns:
-            List of prior probabilities (one per valid action), sorted
-            in the same order as actions_to_try().
+            List of prior probabilities (one per pruned valid action).
         """
-        valid_moves = self.actions_to_try()
-        if not valid_moves:
-            return []
-
-        # Build extended sequences for all valid actions
-        sequences: list[torch.Tensor] = []
-        for move in valid_moves:
-            extended = self.actions + [move]
-            tensor = _build_tensor_from_moves(extended, self._num_heroes)
-            sequences.append(tensor)
-
-        # Stack into batch
-        batch = torch.stack(sequences)  # (N, 24, 4)
-        N = batch.size(0)
-        comfort = self.comfort_matrix.unsqueeze(0).expand(N, -1, -1)  # (N, 10, C)
-
-        device = torch.device("cpu")
-        if hasattr(self.model, "parameters") and "Mock" not in type(self.model).__name__:
-            try:
-                model_device = next(self.model.parameters()).device
-                if isinstance(model_device, (torch.device, str)) and "Mock" not in type(model_device).__name__:
-                    device = model_device
-            except (StopIteration, AttributeError):
-                pass
-        batch = batch.to(device)
-        comfort = comfort.to(device)
-
-        self.model.eval()
-        with torch.no_grad():
-            # Use forward() to get raw logits (no sigmoid)
-            logits = self.model.forward(batch, comfort)  # (N,)
-
-        # Adjust logits for active team
-        if self.active_team == 1:
-            # For Dire, flip the logits (Win for Dire = 1 - Win for Radiant)
-            logits = -logits
-
-        # Apply comfort scaling to logits
-        comfort_scaled = self._apply_comfort_scaling_to_logits(logits, valid_moves)
-
-        # Softmax to get prior probabilities
-        log_probs = comfort_scaled - comfort_scaled.max()  # numerical stability
-        priors = torch.exp(log_probs)
-        priors = priors / priors.sum()
-
-        return priors.tolist()
+        if self._cached_priors is None:
+            self.actions_to_try()
+        return self._cached_priors
 
     def _apply_comfort_scaling_to_logits(
         self, logits: torch.Tensor, moves: list[DraftMove]

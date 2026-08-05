@@ -257,19 +257,40 @@ class Dota2DraftAgent:
         return None
 
     def update_state(self, move: DraftMove) -> None:
-        """Update the internal state after an opponent's move.
+        """Update the internal state after a move.
 
-        Advances the draft state by applying the opponent's action.
+        Advances the draft state by applying the action.
+        Attempts to reuse the existing MCTS tree if the move is found
+        among the root's children, preserving lookahead statistics.
+        Falls back to a cold-start if the move is unexplored.
 
         Args:
             move: The DraftMove to apply.
         """
         self.state = self.state.next_state(move)
-        # Re-wrap the new state for the C++ agent
-        wrapped_state = pymcts.SerializedPythonState(self.state)
-        # Create a new agent with the updated state
-        self.agent = pymcts.MCTS_agent(
-            wrapped_state,
-            max_iter=self.agent.max_iter,
-            max_seconds=self.agent.max_seconds,
-        )
+
+        matching_cpp_move = None
+        if hasattr(self.agent, "tree") and self.agent.tree is not None:
+            root = self.agent.tree.root
+            if root is not None:
+                for child in root.get_children():
+                    cpp_move = child.get_move()
+                    if cpp_move is None:
+                        continue
+                    py_move = self._extract_python_move(cpp_move)
+                    if py_move == move:
+                        matching_cpp_move = cpp_move
+                        break
+
+        if matching_cpp_move is not None:
+            self.agent.tree.advance_tree(matching_cpp_move)
+        else:
+            logger.warning("Move %s not found in MCTS tree. Falling back to cold start.", move)
+            # Re-wrap the new state for the C++ agent
+            wrapped_state = pymcts.SerializedPythonState(self.state)
+            # Create a new agent with the updated state
+            self.agent = pymcts.MCTS_agent(
+                wrapped_state,
+                max_iter=self.agent.max_iter,
+                max_seconds=self.agent.max_seconds,
+            )

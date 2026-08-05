@@ -295,7 +295,8 @@ def test_draft_state_evaluate_and_prune_moves_perspectives_and_caching():
     assert len(state._cached_priors) == 3
 
     # For schedule team 1 (Dire), sort ascending (minimizing Radiant's win probability)
-    # under _ScorePredictorMock, so smallest raw logits are selected: indices [0, 1, 2] should be selected.
+    # under _ScorePredictorMock, so smallest raw logits are selected:
+    # indices [0, 1, 2] should be selected.
     # Therefore, the hero_id of the moves should be 1, 2, 3
     assert [m.hero_id for m in moves] == [1, 2, 3]
 
@@ -331,4 +332,76 @@ def test_draft_state_evaluate_and_prune_moves_perspectives_and_caching():
     next_s = state_step2.next_state(moves_step2[0])
     assert next_s.max_candidates == 3
     assert next_s._cached_valid_moves is None  # Cache should not be copied
+
+
+def test_mcts_agent_update_state_tree_reuse():
+    """Verify that update_state reuses the existing MCTS tree when move matches a child."""
+    mock_model = MagicMock()
+    mock_model.predict_proba.side_effect = lambda x, c: torch.full((x.shape[0],), 0.55)
+    mock_model.forward.side_effect = lambda x, c: torch.full((x.shape[0],), 0.5)
+
+    comfort_matrix = torch.zeros(10, 64)
+    agent = Dota2DraftAgent(
+        model=mock_model,
+        comfort_matrix=comfort_matrix,
+        active_team=0,
+        max_iterations=100,
+        max_seconds=0.5,
+    )
+
+    # Grow the tree to populate children
+    recs = agent.search()
+    assert len(recs) > 0
+
+    # Get one of the moves from the children
+    root = agent.agent.tree.root
+    assert root is not None
+    children = root.get_children()
+    assert len(children) > 0
+
+    # Extract the matching python move
+    cpp_move = children[0].get_move()
+    py_move = agent._extract_python_move(cpp_move)
+    assert py_move is not None
+
+    # Track original agent ID
+    original_agent_id = id(agent.agent)
+
+    # Call update_state with the matching move
+    agent.update_state(py_move)
+
+    # Verify that the agent was NOT recreated (id is the same)
+    assert id(agent.agent) == original_agent_id
+
+
+def test_mcts_agent_update_state_fallback(caplog):
+    """Verify that update_state falls back to cold start when move is not in the tree."""
+    mock_model = MagicMock()
+    mock_model.predict_proba.side_effect = lambda x, c: torch.full((x.shape[0],), 0.55)
+    mock_model.forward.side_effect = lambda x, c: torch.full((x.shape[0],), 0.5)
+
+    comfort_matrix = torch.zeros(10, 64)
+    agent = Dota2DraftAgent(
+        model=mock_model,
+        comfort_matrix=comfort_matrix,
+        active_team=0,
+        max_iterations=10,
+        max_seconds=0.1,
+    )
+
+    # Track original agent ID
+    original_agent_id = id(agent.agent)
+
+    # Make a move that is definitely not in the un-grown/empty root's children
+    unexplored_move = DraftMove(hero_id=99, is_pick=True, team=0, step_index=0)
+
+    import logging
+    with caplog.at_level(logging.WARNING):
+        agent.update_state(unexplored_move)
+
+    # Verify that the agent was recreated (id has changed)
+    assert id(agent.agent) != original_agent_id
+    # Verify that a warning was logged
+    assert any("not found in MCTS tree" in record.message for record in caplog.records)
+
 

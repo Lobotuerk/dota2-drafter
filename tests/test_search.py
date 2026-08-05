@@ -446,9 +446,9 @@ def test_draft_state_evaluate_batch():
             self.calls: list[tuple] = []
 
         def predict_proba(self, batch, comfort):
-            B = batch.shape[0]
+            batch_size = batch.shape[0]
             self.calls.append((batch.shape, comfort.shape))
-            return torch.full((B,), 0.7)
+            return torch.full((batch_size,), 0.7)
 
         def forward(self, batch, comfort):
             n = batch.shape[0]

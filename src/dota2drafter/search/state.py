@@ -255,7 +255,7 @@ class DraftState(pymcts.MCTS_state):
         # Build batch tensor for all candidates (Vectorized)
         base_tensor = _build_tensor_from_moves(self.actions, self._num_heroes)
         num_seqs = len(valid_moves)
-        
+
         batch = base_tensor.unsqueeze(0).expand(num_seqs, 24, 4).clone()
         for i, move in enumerate(valid_moves):
             batch[i, step_idx, 0] = 1.0 if move.is_pick else 0.0
@@ -498,8 +498,8 @@ class DraftState(pymcts.MCTS_state):
         draft_tensors = [_build_tensor_from_moves(s.actions, s._num_heroes) for s in states]
         batch = torch.stack(draft_tensors, dim=0)  # (B, 24, 4)
 
-        B = len(states)
-        comfort = self.comfort_matrix.unsqueeze(0).expand(B, -1, -1)  # (B, 10, C)
+        batch_size = len(states)
+        comfort = self.comfort_matrix.unsqueeze(0).expand(batch_size, -1, -1)  # (B, 10, C)
 
         device = self._resolve_model_device()
         batch = batch.to(device)

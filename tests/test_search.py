@@ -64,6 +64,7 @@ def test_draft_state_inherits_from_pymcts_state():
 def test_draft_state_basic_flow():
     """Verify basic DraftState transitions and properties."""
     mock_model = MagicMock()
+    mock_model.forward.return_value = torch.zeros(1)
     comfort_matrix = torch.zeros(10, 64)
     state = DraftState(model=mock_model, comfort_matrix=comfort_matrix, active_team=0)
 
@@ -134,29 +135,33 @@ def test_draft_state_rollout():
 
 def test_draft_state_get_action_probabilities_uses_logits():
     """Verify action probabilities use logits + comfort scaling + softmax."""
-    mock_model = MagicMock()
-    # Mock forward() to return raw logits (not probabilities)
-    mock_model.forward.return_value = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0])
+
+    _call_count = 0
+
+    class _DynamicLogitsMock:
+        def forward(self, batch, comfort):
+            nonlocal _call_count
+            _call_count += 1
+            n = batch.shape[0]
+            return torch.linspace(0.0, float(n - 1), n)
+
+        def eval(self):
+            return self
+
+    mock_model = _DynamicLogitsMock()
 
     comfort_matrix = torch.zeros(10, 64)
-    # Set comfort weight for first player to 0.8
     comfort_matrix[0] = 0.8
 
     state = DraftState(model=mock_model, comfort_matrix=comfort_matrix, active_team=0)
-    # Stub actions_to_try to return only 5 pick moves
-    moves = [
-        DraftMove(hero_id=h, is_pick=True, team=0, step_index=2)
-        for h in range(1, 6)
-    ]
-    state.actions_to_try = MagicMock(return_value=moves)
 
     probs = state.get_action_probabilities()
-    assert len(probs) == 5
+    assert len(probs) == 20
     assert all(0.0 <= p <= 1.0 for p in probs)
     assert pytest.approx(sum(probs), 1e-5) == 1.0
 
-    # Verify forward() was called (not predict_proba)
-    mock_model.forward.assert_called()
+    # Verify forward() was called exactly once
+    assert _call_count == 1
 
 
 def test_serialized_python_state_wrapper():
@@ -251,3 +256,79 @@ def test_mcts_agent_genmove():
 
     if best_move is not None:
         assert len(agent.state.actions) == initial_count + 1
+
+
+def test_draft_state_evaluate_and_prune_moves_perspectives_and_caching():
+    """Verify that _evaluate_and_prune_moves handles sorting directions, caching,
+
+    active team perspective and max_candidates configuration correctly.
+    """
+    class _ScorePredictorMock:
+        def forward(self, batch, comfort):
+            # Return distinct values for each candidate in the batch.
+            n = batch.shape[0]
+            return torch.arange(0.0, float(n))
+
+        def eval(self):
+            return self
+
+    mock_model = _ScorePredictorMock()
+    comfort_matrix = torch.zeros(10, 64)
+
+    # Radiant is active team, schedule team is Dire (team 1) at step 0
+    state = DraftState(
+        model=mock_model,
+        comfort_matrix=comfort_matrix,
+        active_team=0,
+        max_candidates=3
+    )
+
+    # Verify actions_to_try uses the mock model, prunes to max_candidates, and caches
+    assert state._cached_valid_moves is None
+    assert state._cached_priors is None
+
+    moves = state.actions_to_try()
+    assert len(moves) == 3
+    # Check that caching is populated
+    assert state._cached_valid_moves is not None
+    assert state._cached_priors is not None
+    assert len(state._cached_priors) == 3
+
+    # For schedule team 1 (Dire), sort ascending (minimizing Radiant's win probability)
+    # under _ScorePredictorMock, so smallest raw logits are selected: indices [0, 1, 2] should be selected.
+    # Therefore, the hero_id of the moves should be 1, 2, 3
+    assert [m.hero_id for m in moves] == [1, 2, 3]
+
+    # Let's test with schedule team 0 (Radiant) at Step 2
+    move0 = DraftMove(hero_id=1, is_pick=False, team=1, step_index=0)
+    move1 = DraftMove(hero_id=2, is_pick=False, team=1, step_index=1)
+    state_step2 = DraftState(
+        model=mock_model,
+        comfort_matrix=comfort_matrix,
+        active_team=0,
+        max_candidates=3,
+        initial_actions=[move0, move1]
+    )
+
+    # Step 2 is Radiant's turn. We want to maximize win probability.
+    # Descending sort of [0.0, 1.0, 2.0, ...] means larger logits are selected.
+    # Available heroes start from 3 onwards (since 1 and 2 are used).
+    # The last 3 available heroes should be selected because they have the highest index.
+    # Max hero index is 120 by default. Used: 1, 2. Available: 3..120 (118 total).
+    # Corresponding logits for index 0..117 of available list are 0.0..117.0.
+    # The top 3 logits are 117 (hero 120), 116 (hero 119), 115 (hero 118).
+    # So descending sort of these should select hero_ids [120, 119, 118].
+    moves_step2 = state_step2.actions_to_try()
+    assert len(moves_step2) == 3
+    assert [m.hero_id for m in moves_step2] == [120, 119, 118]
+
+    # Test cloning passes max_candidates
+    cloned = state_step2.clone()
+    assert cloned.max_candidates == 3
+    assert cloned._cached_valid_moves is None  # Cache should not be cloned
+
+    # Test next_state passes max_candidates
+    next_s = state_step2.next_state(moves_step2[0])
+    assert next_s.max_candidates == 3
+    assert next_s._cached_valid_moves is None  # Cache should not be copied
+

@@ -106,6 +106,18 @@ def parse_args() -> argparse.Namespace:
         "--top_n", type=int, default=5, help="Number of recommendations to show (default: 5)"
     )
     parser.add_argument(
+        "--c_puct", type=float, default=1.414,
+        help="PUCT exploration constant (default: 1.414)",
+    )
+    parser.add_argument(
+        "--batch_size", type=int, default=64,
+        help="MCTS batch size for batched leaf evaluation (default: 64)",
+    )
+    parser.add_argument(
+        "--num_search_threads", type=int, default=4,
+        help="MCTS parallel search threads (default: 4)",
+    )
+    parser.add_argument(
         "--device", type=str, default=None, help='Device: "cpu" or "cuda" (auto-detect if None)'
     )
     parser.add_argument(
@@ -485,6 +497,9 @@ def main() -> None:
         active_team=active_team,
         max_iterations=args.max_iterations,
         max_seconds=args.max_seconds,
+        c_puct=args.c_puct,
+        batch_size=args.batch_size,
+        num_search_threads=args.num_search_threads,
         top_n=args.top_n,
         hero_indexer=hero_indexer,
         max_candidates=args.max_candidates,

@@ -255,7 +255,7 @@ class DraftState(pymcts.MCTS_state):
         # Build batch tensor for all candidates (Vectorized)
         base_tensor = _build_tensor_from_moves(self.actions, self._num_heroes)
         num_seqs = len(valid_moves)
-        
+
         batch = base_tensor.unsqueeze(0).expand(num_seqs, 24, 4).clone()
         for i, move in enumerate(valid_moves):
             batch[i, step_idx, 0] = 1.0 if move.is_pick else 0.0
@@ -466,6 +466,57 @@ class DraftState(pymcts.MCTS_state):
                 scaled[i] = logits[i] * comfort_weight
 
         return scaled
+
+    def _resolve_model_device(self) -> torch.device:
+        """Resolve the device of the model for tensor placement.
+
+        Returns:
+            torch.device for model inference.
+        """
+        device = torch.device("cpu")
+        if hasattr(self.model, "parameters"):
+            try:
+                model_device = next(self.model.parameters()).device
+                if isinstance(model_device, (torch.device, str)):
+                    device = model_device
+            except (StopIteration, AttributeError, TypeError):
+                pass
+        return device
+
+    def evaluate_batch(self, states: list[DraftState]) -> list[tuple[float, list[float]]]:
+        """Evaluate a batch of leaf states in a single forward pass.
+
+        Args:
+            states: List of DraftState leaf nodes to evaluate.
+
+        Returns:
+            List of (value, priors) tuples, one per state, in input order.
+        """
+        if not states:
+            return []
+
+        draft_tensors = [_build_tensor_from_moves(s.actions, s._num_heroes) for s in states]
+        batch = torch.stack(draft_tensors, dim=0)  # (B, 24, 4)
+
+        batch_size = len(states)
+        comfort = self.comfort_matrix.unsqueeze(0).expand(batch_size, -1, -1)  # (B, 10, C)
+
+        device = self._resolve_model_device()
+        batch = batch.to(device)
+        comfort = comfort.to(device)
+
+        self.model.eval()
+        with torch.no_grad():
+            win_probs = self.model.predict_proba(batch, comfort)  # (B,)
+
+        results: list[tuple[float, list[float]]] = []
+        for i, s in enumerate(states):
+            radiant = win_probs[i].item()
+            value = radiant if s.active_team == 0 else 1.0 - radiant
+            priors = [] if s.is_terminal() else s.get_action_probabilities()
+            results.append((value, priors))
+
+        return results
 
     def _get_player_index_for_step(self, step_index: int, team: int) -> int | None:
         """Determine which player index on the team is picking at this step.

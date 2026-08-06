@@ -307,30 +307,9 @@ class DraftState(pymcts.MCTS_state):
         return (top_moves, priors.tolist())
 
     def actions_to_try(self) -> list[DraftMove]:
-        if self._cached_valid_moves is not None:
-            return self._cached_valid_moves
-        
-        step_idx = len(self.actions)
-        if step_idx >= 24:
-            self._cached_valid_moves = []
-            return []
-            
-        schedule_action, schedule_team = DRAFT_SCHEDULE[step_idx]
-        used_heroes = {m.hero_id for m in self.actions if m.hero_id > 0}
-        
-        valid_moves = []
-        for hero_idx in range(1, self._num_heroes + 1):
-            if hero_idx not in used_heroes:
-                valid_moves.append(
-                    DraftMove(
-                        hero_id=hero_idx,
-                        is_pick=(schedule_action == "pick"),
-                        team=schedule_team,
-                        step_index=step_idx,
-                    )
-                )
-        self._cached_valid_moves = valid_moves
-        return valid_moves
+        if self._cached_valid_moves is None:
+            self._cached_valid_moves, self._cached_priors = self._evaluate_and_prune_moves()
+        return self._cached_valid_moves
 
     def next_state(self, move: DraftMove) -> DraftState:
         """Create a new DraftState with the move applied.
@@ -435,9 +414,7 @@ class DraftState(pymcts.MCTS_state):
 
     def get_action_probabilities(self) -> list[float]:
         if self._cached_priors is None:
-            # We must evaluate it if it wasn't evaluated by evaluate_batch!
-            # Since evaluate_batch handles multiple states, we just wrap self in a list.
-            self.evaluate_batch([self])
+            self.actions_to_try()
         return self._cached_priors
 
     def _apply_comfort_scaling_to_logits(
@@ -492,120 +469,27 @@ class DraftState(pymcts.MCTS_state):
         if not states:
             return []
 
-        M = len(states)
-        K = self._num_heroes
+        draft_tensors = [_build_tensor_from_moves(s.actions, s._num_heroes) for s in states]
+        batch = torch.stack(draft_tensors, dim=0)  # (B, 24, 4)
+
+        batch_size = len(states)
+        comfort = self.comfort_matrix.unsqueeze(0).expand(batch_size, -1, -1)  # (B, 10, C)
+
         device = self._resolve_model_device()
+        batch = batch.to(device)
+        comfort = comfort.to(device)
+
         self.model.eval()
-
-        # 1. Base batch
-        draft_tensors = [_build_tensor_from_moves(s.actions, K) for s in states]
-        base_batch = torch.stack(draft_tensors, dim=0).to(device)
-        comfort_base = self.comfort_matrix.unsqueeze(0).expand(M, -1, -1).to(device)
-
         with torch.no_grad():
-            win_probs = self.model.predict_proba(base_batch, comfort_base)
+            win_probs = self.model.predict_proba(batch, comfort)  # (B,)
 
-        # 2. Vectorized child evaluation
-        massive_batch = base_batch.unsqueeze(1).expand(M, K, 24, 4).clone()
-        valid_mask = torch.ones((M, K), dtype=torch.bool, device=device)
-        comfort_weights = torch.ones((M, K), dtype=torch.float32, device=device)
-        schedule_teams = torch.zeros(M, dtype=torch.float32, device=device)
-        
-        step_indices = [len(s.actions) for s in states]
-        
-        for i, s in enumerate(states):
-            step_idx = step_indices[i]
-            if step_idx >= 24:
-                valid_mask[i, :] = False
-                continue
-                
-            schedule_action, schedule_team = DRAFT_SCHEDULE[step_idx]
-            schedule_teams[i] = schedule_team
-            is_pick = (schedule_action == "pick")
-            
-            massive_batch[i, :, step_idx, 0] = 1.0 if is_pick else 0.0
-            massive_batch[i, :, step_idx, 1] = float(schedule_team)
-            massive_batch[i, :, step_idx, 2] = torch.arange(1, K + 1, device=device, dtype=torch.float32)
-            massive_batch[i, :, step_idx, 3] = float(step_idx)
-            
-            used_heroes = {m.hero_id for m in s.actions if m.hero_id > 0}
-            for hero_id in used_heroes:
-                valid_mask[i, hero_id - 1] = False
-                
-            if is_pick:
-                player_idx = s._get_player_index_for_step(step_idx, schedule_team)
-                if player_idx is not None and player_idx < self.comfort_matrix.shape[0]:
-                    comfort_weights[i, :] = self.comfort_matrix[player_idx, :]
-
-        # Run valid children through the model
-        massive_batch_flat = massive_batch.view(M * K, 24, 4)
-        comfort_flat = self.comfort_matrix.unsqueeze(0).expand(M * K, -1, -1).to(device)
-        valid_mask_flat = valid_mask.view(-1)
-        
-        massive_logits = torch.zeros(M * K, device=device)
-        if valid_mask_flat.any():
-            massive_batch_valid = massive_batch_flat[valid_mask_flat]
-            comfort_valid = comfort_flat[valid_mask_flat]
-            with torch.no_grad():
-                massive_logits_valid = self.model.forward(massive_batch_valid, comfort_valid)
-            massive_logits[valid_mask_flat] = massive_logits_valid
-            
-        massive_logits = massive_logits.view(M, K)
-        
-        # 3. Vectorized Logit Post-Processing
-        perspective_mult = 1.0 - 2.0 * schedule_teams.unsqueeze(1)
-        sort_logits = massive_logits * perspective_mult
-        sort_scores = sort_logits * comfort_weights
-        sort_scores = sort_scores.masked_fill(~valid_mask, float('-inf'))
-        
-        active_teams = torch.tensor([s.active_team for s in states], device=device, dtype=torch.float32)
-        active_mult = 1.0 - 2.0 * active_teams.unsqueeze(1)
-        active_logits = massive_logits * active_mult
-        active_scores = active_logits * comfort_weights
-        active_scores = active_scores.masked_fill(~valid_mask, float('-inf'))
-
-        # To slice to max_candidates, we set all non-topk to -inf
-        max_c = min(s.max_candidates for s in states) if states else 20
-        # If max_c > number of valid moves, clamp it
-        max_c = min(max_c, K)
-        
-        # We need to set active_scores to -inf if they are not in the top K of sort_scores
-        _, top_indices = torch.topk(sort_scores, k=max_c, dim=1)
-        topk_mask = torch.zeros((M, K), dtype=torch.bool, device=device)
-        topk_mask.scatter_(1, top_indices, True)
-        
-        active_scores = active_scores.masked_fill(~topk_mask, float('-inf'))
-        
-        log_probs = active_scores - active_scores.max(dim=1, keepdim=True).values
-        is_invalid = active_scores == float('-inf')
-        log_probs = log_probs.masked_fill(is_invalid, float('-inf'))
-        
-        priors_tensor = torch.exp(log_probs)
-        priors_sum = priors_tensor.sum(dim=1, keepdim=True)
-        priors_tensor = priors_tensor / priors_sum.clamp(min=1e-9)
-        
-        # 4. Write back to states and return
-        results = []
+        results: list[tuple[float, list[float]]] = []
         for i, s in enumerate(states):
             radiant = win_probs[i].item()
             value = radiant if s.active_team == 0 else 1.0 - radiant
-            
-            step_idx = step_indices[i]
-            if step_idx >= 24:
-                s._cached_priors = []
-                results.append((value, []))
-                continue
-                
-            valid_priors = []
-            valid_moves = s.actions_to_try()
-            priors_list = priors_tensor[i].tolist()
-            for m in valid_moves:
-                hero_idx = m.hero_id - 1
-                valid_priors.append(priors_list[hero_idx])
-                
-            s._cached_priors = valid_priors
-            results.append((value, valid_priors))
-            
+            priors = [] if s.is_terminal() else s.get_action_probabilities()
+            results.append((value, priors))
+
         return results
 
     def _get_player_index_for_step(self, step_index: int, team: int) -> int | None:

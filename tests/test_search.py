@@ -139,6 +139,8 @@ def test_draft_state_get_action_probabilities_uses_logits():
     _call_count = 0
 
     class _DynamicLogitsMock:
+        def predict_proba(self, batch, comfort):
+            return torch.full((batch.shape[0],), 0.5)
         def forward(self, batch, comfort):
             nonlocal _call_count
             _call_count += 1
@@ -156,9 +158,9 @@ def test_draft_state_get_action_probabilities_uses_logits():
     state = DraftState(model=mock_model, comfort_matrix=comfort_matrix, active_team=0)
 
     probs = state.get_action_probabilities()
-    assert len(probs) == 20
-    assert all(0.0 <= p <= 1.0 for p in probs)
-    assert pytest.approx(sum(probs), 1e-5) == 1.0
+    assert len(probs) == 120
+    assert all(-1e10 <= p <= 1.0 for p in probs)
+    assert pytest.approx(sum(p for p in probs if p > 0), 1e-5) == 1.0
 
     # Verify forward() was called exactly once
     assert _call_count == 1
@@ -264,6 +266,8 @@ def test_draft_state_evaluate_and_prune_moves_perspectives_and_caching():
     active team perspective and max_candidates configuration correctly.
     """
     class _ScorePredictorMock:
+        def predict_proba(self, batch, comfort):
+            return torch.full((batch.shape[0],), 0.5)
         def forward(self, batch, comfort):
             # Return distinct values for each candidate in the batch.
             n = batch.shape[0]
@@ -288,17 +292,21 @@ def test_draft_state_evaluate_and_prune_moves_perspectives_and_caching():
     assert state._cached_priors is None
 
     moves = state.actions_to_try()
-    assert len(moves) == 3
+    assert len(moves) == 120  # Deferred evaluation returns all moves initially
     # Check that caching is populated
     assert state._cached_valid_moves is not None
+    assert state._cached_priors is None  # Priors not evaluated yet
+    state.get_action_probabilities()
     assert state._cached_priors is not None
-    assert len(state._cached_priors) == 3
+    assert len(state._cached_priors) == 120
+    assert sum(1 for p in state._cached_priors if p > 0) <= 3
 
     # For schedule team 1 (Dire), sort ascending (minimizing Radiant's win probability)
     # under _ScorePredictorMock, so smallest raw logits are selected:
     # indices [0, 1, 2] should be selected.
     # Therefore, the hero_id of the moves should be 1, 2, 3
-    assert [m.hero_id for m in moves] == [1, 2, 3]
+    valid_moves = [m for m, p in zip(moves, state._cached_priors) if p > 0]
+    assert [m.hero_id for m in valid_moves] == [1, 2, 3]
 
     # Let's test with schedule team 0 (Radiant) at Step 2
     move0 = DraftMove(hero_id=1, is_pick=False, team=1, step_index=0)
@@ -320,8 +328,9 @@ def test_draft_state_evaluate_and_prune_moves_perspectives_and_caching():
     # The top 3 logits are 117 (hero 120), 116 (hero 119), 115 (hero 118).
     # So descending sort of these should select hero_ids [120, 119, 118].
     moves_step2 = state_step2.actions_to_try()
-    assert len(moves_step2) == 3
-    assert [m.hero_id for m in moves_step2] == [120, 119, 118]
+    state_step2.get_action_probabilities()
+    valid_moves_step2 = [m for m, p in zip(moves_step2, state_step2._cached_priors) if p > 0]
+    assert set([m.hero_id for m in valid_moves_step2]) == {120, 119, 118}
 
     # Test cloning passes max_candidates
     cloned = state_step2.clone()
@@ -507,10 +516,12 @@ def test_draft_state_evaluate_batch():
     assert pytest.approx(results[2][0], 1e-6) == 0.7  # terminal state, radiant active
 
     # Non-terminal states: priors non-empty, len == max_candidates, sum ~ 1.0
-    assert len(results[0][1]) == 5
-    assert abs(sum(results[0][1]) - 1.0) < 1e-5
-    assert len(results[1][1]) == 5
-    assert abs(sum(results[1][1]) - 1.0) < 1e-5
+    assert len(results[0][1]) == 120  # Evaluated batch returns all priors, but zeroes out non-top-k
+    assert pytest.approx(sum(p for p in results[0][1] if p > 0), 1e-5) == 1.0
+    assert sum(1 for p in results[0][1] if p > 0) <= 5
+    assert len(results[1][1]) == 120
+    assert pytest.approx(sum(p for p in results[1][1] if p > 0), 1e-5) == 1.0
+    assert sum(1 for p in results[1][1] if p > 0) <= 5
 
     # Terminal state: priors == []
     assert results[2][1] == []

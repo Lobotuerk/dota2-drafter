@@ -490,6 +490,10 @@ def main() -> None:
         device,
     )
 
+    # Set global pymcts threads to match agent
+    import pymcts
+    pymcts.set_rollout_threads(args.num_search_threads)
+    
     # Initialize the draft agent
     agent = Dota2DraftAgent(
         model=model,

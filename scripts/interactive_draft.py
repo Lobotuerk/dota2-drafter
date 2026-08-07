@@ -41,6 +41,7 @@ from dota2drafter.search.state import DRAFT_SCHEDULE, DraftMove
 
 logger = logging.getLogger(__name__)
 console = Console()
+torch.set_float32_matmul_precision('high')
 
 
 def parse_args() -> argparse.Namespace:

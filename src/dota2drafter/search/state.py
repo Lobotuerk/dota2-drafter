@@ -73,40 +73,17 @@ class DraftMove(pymcts.MCTS_move):
         team: int,
         step_index: int,
     ) -> None:
-        """Initialize a draft move.
-
-        Args:
-            hero_id: Hero index (1-based).
-            is_pick: True for pick, False for ban.
-            team: Team making the move (0 or 1).
-            step_index: Position in the draft schedule (0-23).
-        """
         super().__init__()
         self.hero_id = hero_id
         self.is_pick = is_pick
         self.team = team
         self.step_index = step_index
-
-    def __eq__(self, other: object) -> bool:
-        """Check equality by hero_id, action type, and team at same step."""
-        if not isinstance(other, DraftMove):
-            return False
-        return (
-            self.hero_id == other.hero_id
-            and self.is_pick == other.is_pick
-            and self.team == other.team
-            and self.step_index == other.step_index
-        )
-
-    def sprint(self) -> str:
-        """Human-readable string representation for C++ MCTS.
-
-        Returns:
-            Formatted string describing this move.
-        """
         action = "pick" if self.is_pick else "ban"
         team_str = "Radiant" if self.team == 0 else "Dire"
-        return f"{team_str} {action} hero {self.hero_id} at step {self.step_index}"
+        self._sprint_cache = f"{team_str} {action} hero {self.hero_id} at step {self.step_index}"
+
+    def sprint(self) -> str:
+        return self._sprint_cache
 
     def __hash__(self) -> int:
         """Hash by hero_id, is_pick, team, and step_index."""
@@ -556,7 +533,8 @@ class DraftState(pymcts.MCTS_state):
         sort_scores = sort_logits * comfort_weights
         sort_scores = sort_scores.masked_fill(~valid_mask, float('-inf'))
         
-        active_teams = torch.tensor([s.active_team for s in states], device=device, dtype=torch.float32)
+        active_teams_list = [s.active_team for s in states]
+        active_teams = torch.tensor(active_teams_list, dtype=torch.float32).to(device)
         active_mult = 1.0 - 2.0 * active_teams.unsqueeze(1)
         active_logits = massive_logits * active_mult
         active_scores = active_logits * comfort_weights
@@ -586,8 +564,11 @@ class DraftState(pymcts.MCTS_state):
         
         # 4. Write back to states and return
         results = []
+        win_probs_cpu = win_probs.cpu().tolist()
+        priors_cpu = priors_tensor.cpu().tolist()
+        
         for i, s in enumerate(states):
-            radiant = win_probs[i].item()
+            radiant = win_probs_cpu[i]
             value = radiant if s.active_team == 0 else 1.0 - radiant
             
             step_idx = step_indices[i]
@@ -598,7 +579,7 @@ class DraftState(pymcts.MCTS_state):
                 
             valid_priors = []
             valid_moves = s.actions_to_try()
-            priors_list = priors_tensor[i].tolist()
+            priors_list = priors_cpu[i]
             for m in valid_moves:
                 hero_idx = m.hero_id - 1
                 valid_priors.append(priors_list[hero_idx])

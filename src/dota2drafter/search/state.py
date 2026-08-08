@@ -81,9 +81,21 @@ class DraftMove(pymcts.MCTS_move):
         action = "pick" if self.is_pick else "ban"
         team_str = "Radiant" if self.team == 0 else "Dire"
         self._sprint_cache = f"{team_str} {action} hero {self.hero_id} at step {self.step_index}"
+        self._hash_cache = hash((self.hero_id, self.is_pick, self.team, self.step_index))
 
     def sprint(self) -> str:
         return self._sprint_cache
+
+    def __eq__(self, other: object) -> bool:
+        """Check equality by hero_id, action type, and team at same step."""
+        if not isinstance(other, DraftMove):
+            return False
+        return (
+            self.hero_id == other.hero_id
+            and self.is_pick == other.is_pick
+            and self.team == other.team
+            and self.step_index == other.step_index
+        )
 
     def __hash__(self) -> int:
         """Hash by hero_id, is_pick, team, and step_index."""

@@ -106,8 +106,8 @@ class HeroRGCN(nn.Module):
             if i < len(self.rgcn_layers) - 1:
                 h = self.activation(h)
 
-            # Apply L2 Unit-Sphere Normalization
-            h = F.normalize(h, p=2, dim=1)
+            # Note: Removed L2 norm to prevent gradient scaling constraints
+            # on the decoder logits
 
         return h
 

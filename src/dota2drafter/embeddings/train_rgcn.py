@@ -25,20 +25,26 @@ logger = logging.getLogger(__name__)
 
 
 class LinkPredictionDecoder(nn.Module):
-    """Bilinear / DistMult link prediction decoder for multi-relational RGCN graph."""
+    """Directed link prediction decoder for multi-relational RGCN graph.
+    
+    Replaces symmetric DistMult with a directed MLP to properly model
+    directed antagonist and required-bans edges.
+    """
 
     def __init__(self, d_model: int, num_relations: int):
         super().__init__()
-        # DistMult relation diagonal matrices parameter
-        self.rel_emb = nn.Parameter(torch.Tensor(num_relations, d_model))
-        nn.init.xavier_uniform_(self.rel_emb)
+        self.rel_emb = nn.Embedding(num_relations, d_model)
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model * 3, d_model),
+            nn.LeakyReLU(),
+            nn.Linear(d_model, 1)
+        )
 
     def forward(self, h_src: torch.Tensor, h_dst: torch.Tensor, edge_type: torch.Tensor) -> torch.Tensor:
-        # Retrieve relation diagonal matrices
-        r = self.rel_emb[edge_type]  # Shape: [E, d_model]
-        
-        # Bilinear dot product: (h_src * r) . h_dst
-        scores = torch.sum(h_src * r * h_dst, dim=-1)
+        r = self.rel_emb(edge_type)
+        # Concatenate src, relation, and dst to preserve directionality
+        cat = torch.cat([h_src, r, h_dst], dim=-1)
+        scores = self.mlp(cat).squeeze(-1)
         return scores
 
 

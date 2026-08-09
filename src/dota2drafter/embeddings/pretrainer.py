@@ -96,7 +96,7 @@ def train_embeddings(
     num_heroes = extractor._num_heroes
     logger.info("Extracting Skip-Gram pairs and building hero graph...")
     pairs = extractor.extract_skip_gram_pairs(batches)
-    hero_graph = extractor.build_hero_graph(batches)
+    hero_graph = extractor.build_pruned_hero_graph(batches)
 
     if len(pairs) == 0:
         raise ValueError("No Skip-Gram pairs extracted. Check input data.")

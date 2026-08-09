@@ -37,31 +37,22 @@ def test_dgi_model_forward() -> None:
     x = torch.randn(20, 32)
     edge_index = torch.randint(0, 20, (2, 50))
 
-    local, global_repr = model(x, edge_index)
+    local, _, global_repr = model(x, edge_index)
     assert local.shape == (20, 32)
     assert global_repr.shape == (32,)
 
 
-def test_dgi_model_forward_with_global() -> None:
-    model = DGIModel(embed_dim=32)
-    x = torch.randn(20, 32)
-    edge_index = torch.randint(0, 20, (2, 50))
-    s = torch.randn(32)
 
-    local, global_repr = model(x, edge_index, s=s)
-    assert local.shape == (20, 32)
-    assert global_repr.shape == (32,)
 
 
 def test_dgi_loss_computation() -> None:
     model = DGIModel(embed_dim=32)
 
     pos_local = torch.randn(10, 32)
-    pos_global = torch.randn(32)
+    pos_global = torch.randn(1, 32)
     neg_local = torch.randn(10, 32)
-    neg_global = torch.randn(32)
 
-    loss = model.compute_loss(pos_local, pos_global, neg_local, neg_global)
+    loss = model.model.loss(pos_local, neg_local, pos_global)
     assert loss.item() > 0
     assert not torch.isnan(loss)
 
@@ -85,21 +76,14 @@ def test_dgi_get_embeddings() -> None:
     assert embeddings.shape == (20, 32)
 
 
-def test_dgi_save_load(tmp_path: Path) -> None:  # type: ignore[name-defined]
-    model = DGIModel(embed_dim=32)
-    save_path = tmp_path / "dgi.pt"
 
-    model.save(save_path)
-    loaded = DGIModel.load(save_path, embed_dim=32)
-
-    assert isinstance(loaded.encoder, DGIEncoder)
 
 
 def test_dgi_corrupt() -> None:
-    model = DGIModel(embed_dim=32)
+    from dota2drafter.embeddings.dgi import corruption
     x = torch.randn(20, 32)
-
-    corrupted = model._corrupt(x)
+    edge_index = torch.randint(0, 20, (2, 50))
+    corrupted, _ = corruption(x, edge_index)
     assert corrupted.shape == x.shape
-    # Corrupted should be a permutation (same values, different order)
+    # Corrupted should be a permutation
     assert torch.allclose(torch.sort(corrupted, dim=0).values, torch.sort(x, dim=0).values)

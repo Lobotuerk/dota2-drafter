@@ -236,7 +236,7 @@ class HierarchicalTransformer(nn.Module):
         decoder_output = self.transformer_decoder(
             tgt=tgt,
             memory=memory,
-            tgt_mask=None, #TODO
+            tgt_mask=causal_mask,
             tgt_key_padding_mask=pad_mask,
         )  # (B, 24, d_model)
 

@@ -35,28 +35,40 @@ class MatchFinder:
         self._batch_size = batch_size
 
     async def find_matches_for_league(self, league_id: str) -> list[tuple[str, str]]:
-        """Fetch match IDs for a single league and register them in the state DB using OpenDota exclusively."""
+        """Fetch match IDs for a single league using both Stratz and OpenDota."""
         matches_data = []
+        
+        # Try Stratz First
         try:
-            # OpenDota matches return raw match dicts
+            st_matches = await self._stratz.fetch_matches_by_league(league_id, self._config.cutoff_date)
+            for m in st_matches:
+                match_id = str(m.get("id", ""))
+                if match_id:
+                    matches_data.append({"id": match_id})
+        except Exception as e:
+            logger.warning("Failed to fetch matches for league %s from Stratz: %s", league_id, e)
+            
+        # Try OpenDota
+        try:
             od_matches = await self._opendota.fetch_league_matches(int(league_id))
             cutoff_timestamp = int(datetime.fromisoformat(self._config.cutoff_date).timestamp())
             for m in od_matches:
                 start_time = m.get("start_time")
                 if start_time and start_time >= cutoff_timestamp:
-                    # Map fields to match what MatchFinder expects (specifically a dict with "id")
-                    matches_data.append({
-                        "id": str(m.get("match_id"))
-                    })
+                    match_id = str(m.get("match_id", ""))
+                    if match_id:
+                        matches_data.append({"id": match_id})
         except Exception as e:
             logger.warning("Failed to fetch matches for league %s from OpenDota: %s", league_id, e)
 
         new_matches = []
+        seen = set()
         for match_entry in matches_data:
             match_id = match_entry.get("id", "")
-            if not match_id:
+            if not match_id or match_id in seen:
                 continue
 
+            seen.add(match_id)
             # Only insert if not already present (avoid duplicates)
             status = "pending"
             new_matches.append((match_id, status, league_id))

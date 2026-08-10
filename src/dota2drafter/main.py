@@ -145,7 +145,7 @@ async def run_discovery_pipeline(config: PipelineConfig) -> None:
         # Step 2: League discovery
         console.print("\n[bold yellow]Step 2/2:[/bold yellow] Discovering leagues...")
         league_mapper = LeagueMapper(
-            opendota_client, config, config.concurrency
+            opendota_client, config, config.concurrency, stratz_client
         )
         discovered = await league_mapper.discover_leagues()
         console.print(f"  [green]OK[/green] Discovered {len(discovered)} leagues")

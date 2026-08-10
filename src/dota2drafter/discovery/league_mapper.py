@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from dota2drafter.api.opendota_client import OpenDotaClient
+from dota2drafter.api.stratz_client import StratzClient
 from dota2drafter.config import ConcurrencyConfig, PipelineConfig
 
 logger = logging.getLogger(__name__)
@@ -57,8 +58,10 @@ class LeagueMapper:
         opendota_client: OpenDotaClient,
         config: PipelineConfig,
         concurrency: ConcurrencyConfig,
+        stratz_client: StratzClient | None = None,
     ) -> None:
         self._opendota = opendota_client
+        self._stratz = stratz_client
         self._config = config
         self._semaphore = asyncio.Semaphore(concurrency.max_connections_per_host)
 
@@ -106,12 +109,23 @@ class LeagueMapper:
 
         api_tiers = await self._fetch_api_tiers()
 
+        # Promote major tournaments to Tier 1 manually due to Valve/API tiering flaws post-DPC
+        tier1_keywords = ["esports world cup", "riyadh masters", "the international", "esl one", "dreamleague", "pgl wallachia", "blast slam"]
+        
         leagues = []
         for league_id, observation in observations.items():
+            name = observation.name
+            tier = api_tiers.get(league_id, 2)
+            
+            # Keyword promotion
+            name_lower = name.lower()
+            if any(kw in name_lower for kw in tier1_keywords):
+                tier = 1
+                
             leagues.append({
                 "id": int(league_id),
-                "name": observation.name,
-                "tier": api_tiers.get(league_id, 2),
+                "name": name,
+                "tier": tier,
                 "start_date": self._boundary_date(observation.earliest_match_time),
                 "end_date": self._boundary_date(observation.latest_match_time),
             })
@@ -124,8 +138,22 @@ class LeagueMapper:
         return leagues
 
     async def _fetch_api_tiers(self) -> dict[str, int]:
-        """Map OpenDota league ids to their tier values (best-effort)."""
+        """Map league ids to their tier values using Stratz if available, else OpenDota."""
         tiers: dict[str, int] = {}
+        
+        if self._stratz:
+            try:
+                # Stratz gives excellent tier classification (1, 2, 3)
+                raw_leagues = await self._stratz.fetch_leagues(tiers=[1, 2, 3], cutoff_date=self._config.cutoff_date)
+                for league in raw_leagues:
+                    league_id = str(league.get("id", ""))
+                    if league_id:
+                        tiers[league_id] = league.get("tier", 2)
+                if tiers:
+                    return tiers
+            except Exception as e:
+                logger.warning("Failed to fetch leagues from Stratz: %s", e)
+
         try:
             raw_leagues = await self._opendota.fetch_leagues()
         except Exception as e:

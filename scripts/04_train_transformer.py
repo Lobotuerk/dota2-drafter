@@ -178,8 +178,16 @@ def load_data(data_dir: str):
             y_labels.append(batch["y"][i])
             radiant_players.append(batch["radiant_players"][i])
             dire_players.append(batch["dire_players"][i])
+            
+            # Extract patch IDs if present in the dataset (backward compatibility)
+            if "patch_ids" in batch:
+                if "patch_ids_list" not in locals():
+                    patch_ids_list = []
+                patch_ids_list.append(batch["patch_ids"][i])
 
-    return x_drafts, y_labels, radiant_players, dire_players
+    if "patch_ids_list" in locals():
+        return x_drafts, y_labels, radiant_players, dire_players, patch_ids_list
+    return x_drafts, y_labels, radiant_players, dire_players, None
 
 
 def load_h_gnn(
@@ -239,7 +247,7 @@ def main() -> None:
             sys.exit(1)
 
         console.print("[bold blue]Loading data...[/bold blue]")
-        x_drafts, y_labels, radiant_players, dire_players = load_data(args.data_dir)
+        x_drafts, y_labels, radiant_players, dire_players, patch_ids = load_data(args.data_dir)
 
         # Dynamically compute max hero index from loaded data
         max_hero_idx = args.num_heroes
@@ -314,6 +322,7 @@ def main() -> None:
                 dire_players=dire_players,
                 player_comfort_map=player_comfort_map,
                 num_epochs=args.mlm_epochs,
+                patch_ids=patch_ids,
             )
             console.print("[bold green]MLM Pre-training complete! Transitioning to standard fine-tuning...[/bold green]")
 
@@ -350,7 +359,7 @@ def main() -> None:
             sys.exit(1)
 
         console.print("[bold blue]Loading data for prediction...[/bold blue]")
-        x_drafts, y_labels, radiant_players, dire_players = load_data(args.data_dir)
+        x_drafts, y_labels, radiant_players, dire_players, patch_ids = load_data(args.data_dir)
 
         # Dynamically compute max hero index from loaded data
         max_hero_idx = args.num_heroes

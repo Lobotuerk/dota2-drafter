@@ -21,12 +21,42 @@ class ProcessedMatch:
     x_tensor: torch.Tensor  # (24, 4) - draft sequence: [hero_val, is_pick, team, step_index]
     y_tensor: torch.Tensor  # (1,) - radiant_win label
     match_id: str
+    patch_id: int  # Added: ID representing the game patch version
     radiant_players: list[int] = field(default_factory=list)
     dire_players: list[int] = field(default_factory=list)
     radiant_heroes: list[int] = field(default_factory=list)
     dire_heroes: list[int] = field(default_factory=list)
     player_comfort: torch.Tensor | None = None  # (B, 10, C) - optional comfort tensor
 
+
+
+PATCH_DATES = [
+    (1747872000, 0),  # 7.39 - 2025-05-21
+    (1748563200, 1),  # 7.39b - 2025-05-29
+    (1750809600, 2),  # 7.39c - 2025-06-24
+    (1754438400, 3),  # 7.39d - 2025-08-05
+    (1759363200, 4),  # 7.39e - 2025-10-02
+    (1765756800, 5),  # 7.40 - 2025-12-15
+    (1766448000, 6),  # 7.40b - 2025-12-23
+    (1768953600, 7),  # 7.40c - 2026-01-21
+    (1774310400, 8),  # 7.41 - 2026-03-24
+    (1774656000, 9),  # 7.41a - 2026-03-28
+    (1775520000, 10), # 7.41b - 2026-04-07
+    (1778025600, 11), # 7.41c - 2026-05-06
+    (1780531200, 12), # 7.41d - 2026-06-04
+    (1785369600, 13), # 7.41e - 2026-07-30
+]
+
+def get_patch_id(timestamp: int | None) -> int:
+    """Return the patch ID based on the Unix timestamp. Default to latest if unknown."""
+    if not timestamp:
+        return PATCH_DATES[-1][1]
+    
+    # Iterate backwards to find the first patch date before the timestamp
+    for ts, pid in reversed(PATCH_DATES):
+        if timestamp >= ts:
+            return pid
+    return PATCH_DATES[0][1]
 
 class TensorTransformer:
     """Converts raw draft data into PyTorch tensors."""
@@ -72,10 +102,15 @@ class TensorTransformer:
         x_tensor = torch.tensor(steps, dtype=torch.float32)  # (24, 4)
         y_tensor = torch.tensor([1.0 if radiant_win else 0.0], dtype=torch.float32)  # (1,)
 
+        # Extract timestamp, Stratz doesn't typically provide a clean start_time in the basic query
+        # so we fallback to latest patch. (In a full implementation, you'd add startDateTime to the GraphQL query)
+        patch_id = get_patch_id(match_data.get("startDateTime"))
+
         return ProcessedMatch(
             x_tensor=x_tensor,
             y_tensor=y_tensor,
             match_id=match_id,
+            patch_id=patch_id,
             radiant_players=radiant_players,
             dire_players=dire_players,
             radiant_heroes=radiant_heroes,
@@ -118,10 +153,13 @@ class TensorTransformer:
         x_tensor = torch.tensor(steps, dtype=torch.float32)  # (24, 4)
         y_tensor = torch.tensor([1.0 if radiant_win else 0.0], dtype=torch.float32)  # (1,)
 
+        patch_id = get_patch_id(match_data.get("start_time"))
+
         return ProcessedMatch(
             x_tensor=x_tensor,
             y_tensor=y_tensor,
             match_id=match_id,
+            patch_id=patch_id,
             radiant_players=radiant_players,
             dire_players=dire_players,
             radiant_heroes=radiant_heroes,

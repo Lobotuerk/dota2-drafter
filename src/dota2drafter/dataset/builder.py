@@ -63,21 +63,24 @@ class DatasetBuilder:
         x_batch = torch.stack(x_tensors)  # (N, 24, 4)
         y_batch = torch.cat(y_tensors)  # (N,)
 
-        # Collect player data
+        # Collect player and patch data
         radiant_players = []
         dire_players = []
         radiant_heroes = []
         dire_heroes = []
+        patch_ids = []
         for m in self._buffer:
             radiant_players.append(m.radiant_players)
             dire_players.append(m.dire_players)
             radiant_heroes.append(m.radiant_heroes)
             dire_heroes.append(m.dire_heroes)
+            patch_ids.append(m.patch_id)
 
         dataset: dict[str, Any] = {
             "x": x_batch,
             "y": y_batch,
             "match_ids": match_ids,
+            "patch_ids": torch.tensor(patch_ids, dtype=torch.long),
             "radiant_players": radiant_players,
             "dire_players": dire_players,
             "radiant_heroes": radiant_heroes,

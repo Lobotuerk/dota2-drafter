@@ -48,13 +48,14 @@ class JointEmbedding(nn.Module):
     z_t = Project(H_GNN[h_t]) + W_type e(p_t) + W_team e(c_t) + PE(o_t)
     """
 
-    def __init__(self, d_model: int, num_heroes: int, h_gnn: torch.Tensor) -> None:
+    def __init__(self, d_model: int, num_heroes: int, h_gnn: torch.Tensor, num_patches: int = 20) -> None:
         """Initialize JointEmbedding.
 
         Args:
             d_model: Transformer embedding dimension.
             num_heroes: Number of heroes K (for embedding matrix sizing).
             h_gnn: Frozen RGCN hero embeddings of shape (K+1, d_model).
+            num_patches: Number of unique patches for patch embedding.
         """
         super().__init__()
         self.d_model = d_model
@@ -71,18 +72,23 @@ class JointEmbedding(nn.Module):
         # Team side embedding (Radiant=0, Dire=1)
         self.w_team = nn.Embedding(2, d_model)
 
+        # Patch embedding
+        self.w_patch = nn.Embedding(num_patches, d_model)
+
         # Positional encoding
         self.pos_enc = SinusoidalPositionalEncoding(d_model, max_len=24)
 
     def forward(
         self,
         x_draft: torch.Tensor,
+        patch_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute joint embeddings for the draft sequence.
 
         Args:
             x_draft: Draft sequence tensor of shape (B, 24, 4),
                      where each step is [hero_val, is_pick, team, step_index].
+            patch_ids: Patch ID tensor of shape (B,).
 
         Returns:
             Joint embedding tensor z of shape (B, 24, d_model).
@@ -117,6 +123,13 @@ class JointEmbedding(nn.Module):
 
         # Joint embedding: sum of all components
         z = hero_projected + type_embeds + team_embeds + pos_embeds
+        
+        # Add patch embeddings if provided
+        if patch_ids is not None:
+            # Clamp in case of unknown patch
+            patch_ids_clamped = torch.clamp(patch_ids, 0, self.w_patch.num_embeddings - 1)
+            patch_embeds = self.w_patch(patch_ids_clamped).unsqueeze(1) # (B, 1, d_model)
+            z = z + patch_embeds
 
         return z
 
@@ -194,6 +207,7 @@ class HierarchicalTransformer(nn.Module):
         x_draft: torch.Tensor,
         player_pref_vectors: torch.Tensor,
         mlm_mode: bool = False,
+        patch_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass through the Match Network.
 
@@ -203,6 +217,7 @@ class HierarchicalTransformer(nn.Module):
                                  shape (B, 10, d_model).
             mlm_mode: If True, return MLM logits for masked hero prediction
                       instead of win probability.
+            patch_ids: Patch ID tensor of shape (B,).
 
         Returns:
             If mlm_mode is False: Win probability scalar per sample, shape (B,).
@@ -211,7 +226,7 @@ class HierarchicalTransformer(nn.Module):
         batch_size = x_draft.size(0)
 
         # Compute joint embeddings
-        z = self.joint_embedding(x_draft)  # (B, 24, d_model)
+        z = self.joint_embedding(x_draft, patch_ids)  # (B, 24, d_model)
 
         # Prepare for transformer decoder:
         # query = draft sequence (z), key/value = player preference vectors
@@ -329,6 +344,7 @@ class MatchNetwork(nn.Module):
         x_draft: torch.Tensor,
         player_comfort: torch.Tensor,
         mlm_mode: bool = False,
+        patch_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass through the full Match Network.
 
@@ -336,6 +352,7 @@ class MatchNetwork(nn.Module):
             x_draft: Draft sequence tensor of shape (B, 24, 4).
             player_comfort: Player comfort tensor of shape (B, 10, C).
             mlm_mode: If True, return MLM logits for masked hero prediction.
+            patch_ids: Patch ID tensor of shape (B,).
 
         Returns:
             If mlm_mode is False: Win probability logits, shape (B,).
@@ -344,9 +361,9 @@ class MatchNetwork(nn.Module):
         player_pref_vectors = self.player_network(player_comfort)
 
         if mlm_mode:
-            logits = self.match_network(x_draft, player_pref_vectors, mlm_mode=True)
+            logits = self.match_network(x_draft, player_pref_vectors, mlm_mode=True, patch_ids=patch_ids)
         else:
-            logits = self.match_network(x_draft, player_pref_vectors, mlm_mode=False)
+            logits = self.match_network(x_draft, player_pref_vectors, mlm_mode=False, patch_ids=patch_ids)
 
         return logits
 
@@ -354,15 +371,17 @@ class MatchNetwork(nn.Module):
         self,
         x_draft: torch.Tensor,
         player_comfort: torch.Tensor,
+        patch_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute win probability.
 
         Args:
             x_draft: Draft sequence tensor of shape (B, 24, 4).
             player_comfort: Player comfort tensor of shape (B, 10, C).
+            patch_ids: Patch ID tensor of shape (B,).
 
         Returns:
             Win probability, shape (B,).
         """
-        logits = self.forward(x_draft, player_comfort, mlm_mode=False)
+        logits = self.forward(x_draft, player_comfort, mlm_mode=False, patch_ids=patch_ids)
         return torch.sigmoid(logits)

@@ -48,7 +48,9 @@ MATCH_DETAILS_QUERY = """
         match(id: $matchId) {
             id
             didRadiantWin
+            startDateTime
             gameMode
+            gameVersionId
             league {
                 id
                 name

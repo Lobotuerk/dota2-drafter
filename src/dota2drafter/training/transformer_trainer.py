@@ -198,6 +198,7 @@ class PlayerComfortDataset(Dataset):
         player_comfort_map: dict[int, torch.Tensor] | None = None,
         player_input_dim: int = 127,
         augment: int | bool = 0,
+        patch_ids: list[torch.Tensor] | None = None,
     ) -> None:
         """Initialize the dataset.
 
@@ -217,6 +218,7 @@ class PlayerComfortDataset(Dataset):
         self.dire_players = dire_players
         self.player_comfort_map = player_comfort_map or {}
         self.player_input_dim = player_input_dim
+        self.patch_ids = patch_ids
 
         # Parse augment type and determine limit per original match
         if isinstance(augment, bool):
@@ -325,12 +327,13 @@ class PlayerComfortDataset(Dataset):
     def _build_player_comfort_sample(
         self,
         idx: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Build a basic sample tuple (x_draft, player_comfort, y) for pre-computation."""
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build a basic sample tuple (x_draft, player_comfort, y, patch_id) for pre-computation."""
         x_draft = self.x_drafts[idx]
         y = self.y_labels[idx]
         player_comfort = self._build_player_comfort(idx)
-        return x_draft, player_comfort, y
+        patch_id = self.patch_ids[idx] if self.patch_ids else torch.tensor(0, dtype=torch.long)
+        return x_draft, player_comfort, y, patch_id
 
     def _build_player_comfort(self, idx: int) -> torch.Tensor:
         """Build the (10, C) player comfort tensor for a sample.
@@ -501,6 +504,7 @@ class TransformerTrainer:
         radiant_players: list[list[int]],
         dire_players: list[list[int]],
         player_comfort_map: dict[int, torch.Tensor] | None = None,
+        patch_ids: list[torch.Tensor] | None = None,
     ) -> TrainingMetrics:
         """Run the full training loop with label smoothing and augmentation.
 
@@ -537,6 +541,7 @@ class TransformerTrainer:
             player_comfort_map=player_comfort_map,
             player_input_dim=player_input_dim,
             augment=self.config.augment,
+            patch_ids=[patch_ids[i] for i in train_indices] if patch_ids else None,
         )
 
         val_dataset = PlayerComfortDataset(
@@ -547,6 +552,7 @@ class TransformerTrainer:
             player_comfort_map=player_comfort_map,
             player_input_dim=player_input_dim,
             augment=False,
+            patch_ids=[patch_ids[i] for i in val_indices] if patch_ids else None,
         )
 
         train_loader = DataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True)
@@ -567,12 +573,17 @@ class TransformerTrainer:
 
             eps = self.config.label_smoothing_eps
 
-            for x_batch, player_batch, y_batch in tqdm(train_loader, desc=f"Epoch {epoch}/{self.config.num_epochs} [Train]"):
+            for batch_data in tqdm(train_loader, desc=f"Epoch {epoch}/{self.config.num_epochs} [Train]"):
+                x_batch, player_batch, y_batch = batch_data[:3]
+                patch_batch = batch_data[3] if len(batch_data) > 3 else None
+
                 x_batch = x_batch.to(self.device)
                 player_batch = player_batch.to(self.device)
                 y_batch = y_batch.to(self.device).squeeze(-1)
+                if patch_batch is not None:
+                    patch_batch = patch_batch.to(self.device)
 
-                logits = self.model(x_batch, player_batch)
+                logits = self.model(x_batch, player_batch, mlm_mode=False, patch_ids=patch_batch)
 
                 # Label smoothing
                 y_smoothed = y_batch * (1.0 - eps) + (eps / 2.0)
@@ -648,6 +659,7 @@ class TransformerTrainer:
         player_comfort_map: dict[int, torch.Tensor] | None = None,
         num_epochs: int = 20,
         mlm_probability: float = 0.15,
+        patch_ids: list[torch.Tensor] | None = None,
     ) -> TrainingMetrics:
         """Pre-train the Transformer using Masked Language Modeling.
 
@@ -887,6 +899,7 @@ class _MLMDataset(Dataset):
         self.dire_players = dire_players
         self.player_comfort_map = player_comfort_map or {}
         self.player_input_dim = player_input_dim
+        self.patch_ids = patch_ids
         self.mlm_probability = mlm_probability
 
     def __len__(self) -> int:

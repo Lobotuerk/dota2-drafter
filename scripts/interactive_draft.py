@@ -496,8 +496,28 @@ def main() -> None:
     pymcts.set_rollout_threads(args.num_search_threads)
     
     # Initialize the draft agent
+    
+    # We pass the absolute latest patch ID (index 13 which corresponds to 7.41e)
+    # to evaluate all games in the current meta.
+    import torch
+    patch_tensor = torch.tensor([13], dtype=torch.long, device=device)
+    
+    # Wrap model to automatically inject the patch_tensor
+    class PatchWrappedModel(torch.nn.Module):
+        def __init__(self, m, p):
+            super().__init__()
+            self.model = m
+            self.p = p
+        def predict_proba(self, x_draft, player_comfort):
+            expanded_patch = self.p.expand(x_draft.size(0))
+            return self.model.predict_proba(x_draft, player_comfort, patch_ids=expanded_patch)
+        def forward(self, *args, **kwargs):
+            return self.model(*args, **kwargs)
+            
+    wrapped_model = PatchWrappedModel(model, patch_tensor)
+    
     agent = Dota2DraftAgent(
-        model=model,
+        model=wrapped_model,
         comfort_matrix=comfort_tensor,
         active_team=active_team,
         max_iterations=args.max_iterations,

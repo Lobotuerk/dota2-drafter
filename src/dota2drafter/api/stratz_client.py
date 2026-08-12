@@ -229,8 +229,10 @@ class StratzClient:
             MATCHES_BY_LEAGUE_QUERY,
             {"leagueId": league_id_int, "request": request_params},
         )
-        matches_data = data.get("data", {}).get("league", {}).get("matches", [])
-        return matches_data
+        league_data = data.get("data", {}).get("league")
+        if not league_data:
+            return []
+        return league_data.get("matches", [])
 
     async def fetch_match_details(self, match_id: str) -> dict[str, Any] | None:
         """Fetch detailed match data including draft picks/bans."""

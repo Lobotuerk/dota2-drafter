@@ -86,9 +86,9 @@ class TensorTransformer:
 
         steps: list[list[float]] = []
         for step_idx, pb in enumerate(picks_bans):
-            is_pick = 1.0 if pb.get("type") == "pick" else 0.0
-            team = float(pb.get("team", 0))
-            hero_id = pb.get("hero", {}).get("id") if isinstance(pb.get("hero"), dict) else pb.get("hero")
+            is_pick = 1.0 if pb.get("isPick") else 0.0
+            team = float(0) if pb.get("isRadiant") else float(1)
+            hero_id = pb.get("heroId")
 
             if hero_id is not None:
                 hero_idx = self._hero_indexer.map_hero_id(int(hero_id))
@@ -194,6 +194,7 @@ class TensorTransformer:
                 hero_id = player.get("heroId")
                 account_ids.append(int(account_id) if account_id is not None else 0)
                 if hero_id is not None:
+                    # Stratz hero IDs might come in as strings or ints, and they map differently sometimes
                     mapped = self._hero_indexer.map_hero_id(int(hero_id))
                     hero_ids.append(mapped if mapped is not None else -1)
                 else:

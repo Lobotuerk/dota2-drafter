@@ -191,7 +191,7 @@ class TensorTransformer:
             player_team = player.get("team", 0)
             if player_team == team + 1:  # STRATZ uses 1-based team (1=Radiant, 2=Dire)
                 account_id = player.get("accountid")
-                hero_id = player.get("hero_id")
+                hero_id = player.get("heroId")
                 account_ids.append(int(account_id) if account_id is not None else 0)
                 if hero_id is not None:
                     mapped = self._hero_indexer.map_hero_id(int(hero_id))

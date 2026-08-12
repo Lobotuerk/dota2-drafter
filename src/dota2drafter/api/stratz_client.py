@@ -58,6 +58,7 @@ MATCH_DETAILS_QUERY = """
             players {
                 isRadiant
                 steamAccountId
+                heroId
             }
             pickBans {
                 isPick
@@ -256,7 +257,8 @@ class StratzClient:
         for p in match_data.get("players", []) or []:
             mapped_players.append({
                 "team": 1 if p.get("isRadiant") else 2,
-                "accountid": p.get("steamAccountId")
+                "accountid": p.get("steamAccountId"),
+                "heroId": p.get("heroId")
             })
             
         mapped_match = {

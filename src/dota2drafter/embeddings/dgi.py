@@ -20,7 +20,7 @@ class DGIEncoder(nn.Module):
 
         self.conv1 = GCNConv(embed_dim, self.hidden_dim)
         self.conv2 = GCNConv(self.hidden_dim, embed_dim)
-        self.prelu = nn.PReLU(self.hidden_dim)
+        self.prelu = nn.LeakyReLU(0.1)
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         x = self.prelu(self.conv1(x, edge_index))

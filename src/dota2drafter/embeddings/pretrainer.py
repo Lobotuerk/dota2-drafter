@@ -127,7 +127,7 @@ def train_embeddings(
 
     # Step 3: Train DGI
     logger.info("Step 3: Training DGI model (epochs=%d)", dgi_epochs)
-    dgi = DGIModel(embed_dim)
+    dgi = DGIModel(embed_dim, hidden_dim=embed_dim*2)
     dgi_optimizer = torch.optim.Adam(dgi.parameters(), lr=dgi_lr, weight_decay=1e-4)
     dgi_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(dgi_optimizer, T_max=dgi_epochs)
 

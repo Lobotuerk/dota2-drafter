@@ -116,10 +116,22 @@ class JointEmbedding(nn.Module):
         teams_clamped = torch.clamp(teams, 0, 1)
         team_embeds = self.w_team(teams_clamped)  # (B, 24, d_model)
 
-        # Positional encoding using step index
+        # Positional encoding using step index dynamically mapping to actual steps
         step_indices_clamped = torch.clamp(step_indices, 0, 23)
-        pos_embeds = self.pos_enc.pe[:, :24, :]  # (1, 24, d_model)
-        pos_embeds = pos_embeds.expand(batch_size, -1, -1)  # (B, 24, d_model)
+        
+        # self.pos_enc.pe has shape (1, 24, d_model)
+        # We need to gather the correct PE for each step_index in the batch
+        # step_indices_clamped has shape (B, 24)
+        
+        # Expand PE to match batch size: (B, 24, d_model)
+        pe_expanded = self.pos_enc.pe[:, :24, :].expand(batch_size, -1, -1)
+        
+        # Gather the specific PEs along the sequence dimension based on step_indices
+        pos_embeds = torch.gather(
+            pe_expanded, 
+            dim=1, 
+            index=step_indices_clamped.unsqueeze(-1).expand(-1, -1, self.d_model)
+        )
 
         # Joint embedding: sum of all components
         z = hero_projected + type_embeds + team_embeds + pos_embeds
@@ -156,6 +168,7 @@ class HierarchicalTransformer(nn.Module):
         dropout: float = 0.1,
         num_heroes: int = 120,
         h_gnn: Optional[torch.Tensor] = None,
+        num_patches: int = 20,
     ) -> None:
         """Initialize the HierarchicalTransformer.
 
@@ -303,6 +316,7 @@ class MatchNetwork(nn.Module):
         num_heroes: int = 120,
         player_input_dim: int = 127,
         h_gnn: Optional[torch.Tensor] = None,
+        num_patches: int = 20,
     ) -> None:
         """Initialize the Match Network.
 
@@ -337,6 +351,7 @@ class MatchNetwork(nn.Module):
             dropout=dropout,
             num_heroes=num_heroes,
             h_gnn=h_gnn,
+            num_patches=num_patches,
         )
 
     def forward(

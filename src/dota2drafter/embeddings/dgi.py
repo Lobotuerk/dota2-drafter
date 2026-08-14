@@ -13,18 +13,24 @@ logger = logging.getLogger(__name__)
 class DGIEncoder(nn.Module):
     """GCN encoder for DGI."""
 
-    def __init__(self, embed_dim: int, hidden_dim: int | None = None) -> None:
+    def __init__(self, embed_dim: int, hidden_dim: int | None = None, dropout: float = 0.2) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim or embed_dim
         self.embed_dim = embed_dim
+        self.dropout = nn.Dropout(dropout)
 
         self.conv1 = GCNConv(embed_dim, self.hidden_dim)
         self.conv2 = GCNConv(self.hidden_dim, embed_dim)
         self.prelu = nn.LeakyReLU(0.1)
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        x = self.prelu(self.conv1(x, edge_index))
-        return self.conv2(x, edge_index)
+        residual = x
+        h = self.dropout(x)
+        h = self.prelu(self.conv1(h, edge_index))
+        h = self.dropout(h)
+        h = self.conv2(h, edge_index)
+        # Residual connection prevents oversmoothing in dense graphs
+        return h + residual
 
 def corruption(x: torch.Tensor, edge_index: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Row-wise permutation of node features for negative sampling."""

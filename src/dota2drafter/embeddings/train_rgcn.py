@@ -35,8 +35,12 @@ class LinkPredictionDecoder(nn.Module):
         super().__init__()
         self.rel_emb = nn.Embedding(num_relations, d_model)
         self.mlp = nn.Sequential(
-            nn.Linear(d_model * 3, d_model),
-            nn.LeakyReLU(),
+            nn.Linear(d_model * 3, d_model * 2),
+            nn.LeakyReLU(0.1),
+            nn.Dropout(0.2),
+            nn.Linear(d_model * 2, d_model),
+            nn.LeakyReLU(0.1),
+            nn.Dropout(0.2),
             nn.Linear(d_model, 1)
         )
 

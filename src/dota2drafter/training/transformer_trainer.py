@@ -164,7 +164,7 @@ class TrainingConfig:
     val_split: float = 0.2
     device: str = "cpu"
     checkpoint_dir: str = "./checkpoints"
-    patience: int = 30
+    patience: int = 10
     min_delta: float = 1e-4
     label_smoothing_eps: float = 0.15
     augment: int | bool = True
@@ -697,6 +697,7 @@ class TransformerTrainer:
             player_comfort_map=player_comfort_map,
             player_input_dim=player_input_dim,
             mlm_probability=mlm_probability,
+            patch_ids=patch_ids,
         )
 
         mlm_loader = DataLoader(mlm_dataset, batch_size=self.config.batch_size, shuffle=True)
@@ -788,12 +789,17 @@ class TransformerTrainer:
         val_batches = 0
 
         with torch.no_grad():
-            for x_batch, player_batch, y_batch in tqdm(val_loader, desc="Validation"):
+            for batch_data in tqdm(val_loader, desc="Validation"):
+                x_batch, player_batch, y_batch = batch_data[:3]
+                patch_batch = batch_data[3] if len(batch_data) > 3 else None
+
                 x_batch = x_batch.to(self.device)
                 player_batch = player_batch.to(self.device)
                 y_batch = y_batch.to(self.device).squeeze(-1)
+                if patch_batch is not None:
+                    patch_batch = patch_batch.to(self.device)
 
-                logits = self.model(x_batch, player_batch)
+                logits = self.model(x_batch, player_batch, mlm_mode=False, patch_ids=patch_batch)
 
                 if self.config.step_loss_gamma > 0.0:
                     loss_elements = F.binary_cross_entropy_with_logits(
@@ -881,6 +887,7 @@ class _MLMDataset(Dataset):
         player_comfort_map: dict[int, torch.Tensor] | None = None,
         player_input_dim: int = 127,
         mlm_probability: float = 0.15,
+        patch_ids: list[torch.Tensor] | None = None,
     ) -> None:
         """Initialize MLM dataset.
 
@@ -905,7 +912,7 @@ class _MLMDataset(Dataset):
     def __len__(self) -> int:
         return len(self.x_drafts)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Get a single MLM sample with masked hero indices.
 
         Returns:

@@ -519,13 +519,46 @@ class TransformerTrainer:
             TrainingMetrics with full training history.
         """
         n = len(x_drafts)
-        val_size = int(n * self.config.val_split)
-        indices = list(range(n))
+        
+        # Filter validation set to ONLY include matches from the latest patch
+        latest_patch_id = -1
+        if patch_ids is not None:
+            latest_patch_id = max([p.item() for p in patch_ids])
+            
+        latest_patch_indices = []
+        older_patch_indices = []
+        
+        for i in range(n):
+            if patch_ids is not None and patch_ids[i].item() == latest_patch_id:
+                latest_patch_indices.append(i)
+            else:
+                older_patch_indices.append(i)
+                
+        # Shuffle indices
         torch.manual_seed(42)
-        indices = torch.randperm(n).tolist()
-
-        train_indices = indices[val_size:]
-        val_indices = indices[:val_size]
+        latest_shuffled = torch.randperm(len(latest_patch_indices)).tolist()
+        latest_patch_indices = [latest_patch_indices[i] for i in latest_shuffled]
+        
+        older_shuffled = torch.randperm(len(older_patch_indices)).tolist()
+        older_patch_indices = [older_patch_indices[i] for i in older_shuffled]
+        
+        # Calculate exactly how many matches we need for the validation set
+        val_size = int(n * self.config.val_split)
+        
+        # Pull entirely from the latest patch for validation
+        if len(latest_patch_indices) >= val_size:
+            val_indices = latest_patch_indices[:val_size]
+            # Put the remaining latest patch matches into the train set
+            train_indices = older_patch_indices + latest_patch_indices[val_size:]
+        else:
+            # If we don't have enough latest patch matches, use all of them and pad with older ones
+            # (Though in a real scenario, you almost always have enough recent matches)
+            val_indices = latest_patch_indices + older_patch_indices[:(val_size - len(latest_patch_indices))]
+            train_indices = older_patch_indices[(val_size - len(latest_patch_indices)):]
+            
+        # Shuffle training set one more time so old and new patches are mixed
+        train_shuffled = torch.randperm(len(train_indices)).tolist()
+        train_indices = [train_indices[i] for i in train_shuffled]
 
         # Determine player_input_dim: first try model, then fallback to comfort map or default
         player_input_dim = getattr(self.model, "player_input_dim", 127)

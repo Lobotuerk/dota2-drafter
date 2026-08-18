@@ -48,7 +48,7 @@ class JointEmbedding(nn.Module):
     z_t = Project(H_GNN[h_t]) + W_type e(p_t) + W_team e(c_t) + PE(o_t)
     """
 
-    def __init__(self, d_model: int, num_heroes: int, h_gnn: torch.Tensor, num_patches: int = 20) -> None:
+    def __init__(self, d_model: int, num_heroes: int, h_gnn: torch.Tensor, num_patches: int = 30) -> None:
         """Initialize JointEmbedding.
 
         Args:
@@ -168,7 +168,7 @@ class HierarchicalTransformer(nn.Module):
         dropout: float = 0.1,
         num_heroes: int = 120,
         h_gnn: Optional[torch.Tensor] = None,
-        num_patches: int = 20,
+        num_patches: int = 30,
     ) -> None:
         """Initialize the HierarchicalTransformer.
 
@@ -316,7 +316,7 @@ class MatchNetwork(nn.Module):
         num_heroes: int = 120,
         player_input_dim: int = 127,
         h_gnn: Optional[torch.Tensor] = None,
-        num_patches: int = 20,
+        num_patches: int = 30,
     ) -> None:
         """Initialize the Match Network.
 

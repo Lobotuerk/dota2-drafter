@@ -1,7 +1,8 @@
 # Cutoff date for league filtering (ISO 8601 date string).
 # Only leagues with matches on or after this date are included.
 # cutoff_date: "2026-05-06" # 7.41c
-cutoff_date: "2025-05-21" # 7.39
+# cutoff_date: "2024-07-31" # 7.39
+cutoff_date: "2024-07-31" # 7.37
 
 # Tournament tiers to include
 tiers:

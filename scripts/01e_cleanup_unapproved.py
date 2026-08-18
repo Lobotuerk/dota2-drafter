@@ -38,7 +38,7 @@ def _load_samples(batch_path: Path) -> list[ProcessedMatch]:
     patch_ids = batch.get("patch_ids")
     
     for i, match_id in enumerate(batch["match_ids"]):
-        p_id = int(patch_ids[i].item()) if patch_ids is not None else 13  # Default to latest 7.41e
+        p_id = int(patch_ids[i].item()) if patch_ids is not None else 21  # Default to latest 7.41e
         samples.append(
             ProcessedMatch(
                 x_tensor=batch["x"][i],

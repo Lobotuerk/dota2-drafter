@@ -500,7 +500,7 @@ def main() -> None:
     # We pass the absolute latest patch ID (index 13 which corresponds to 7.41e)
     # to evaluate all games in the current meta.
     import torch
-    patch_tensor = torch.tensor([13], dtype=torch.long, device=device)
+    patch_tensor = torch.tensor([21], dtype=torch.long, device=device)
     
     # Wrap model to automatically inject the patch_tensor
     class PatchWrappedModel(torch.nn.Module):

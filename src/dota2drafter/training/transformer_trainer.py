@@ -405,7 +405,9 @@ def _compute_roc_auc(predictions: torch.Tensor, targets: torch.Tensor) -> float:
     pos_preds = predictions[pos_indices]
     neg_preds = predictions[neg_indices]
 
+    # Mann-Whitney U statistic: add 0.5 for ties
     u = torch.sum(pos_preds.unsqueeze(1) > neg_preds.unsqueeze(0)).float()
+    u += 0.5 * torch.sum(pos_preds.unsqueeze(1) == neg_preds.unsqueeze(0)).float()
     auc = u.item() / (len(pos_indices) * len(neg_indices))
 
     return auc

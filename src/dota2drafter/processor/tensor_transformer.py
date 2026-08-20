@@ -97,6 +97,11 @@ class TensorTransformer:
             is_pick = 1.0 if pb.get("type") == "pick" else 0.0
             team = float(pb.get("team", 0))
             hero_id = pb.get("hero", {}).get("id") if isinstance(pb.get("hero"), dict) else pb.get("hero")
+            # Override with Stratz GraphQL schema keys if they are present
+            if "isPick" in pb:
+                is_pick = 1.0 if pb.get("isPick") else 0.0
+                team = float(0) if pb.get("isRadiant") else float(1)
+                hero_id = pb.get("heroId")
 
             if hero_id is not None:
                 hero_idx = self._hero_indexer.map_hero_id(int(hero_id))

@@ -534,7 +534,18 @@ class DraftState(pymcts.MCTS_state):
             massive_batch_valid = massive_batch_flat[valid_mask_flat]
             comfort_valid = comfort_flat[valid_mask_flat]
             with torch.no_grad():
-                massive_logits_valid = self.model.forward(massive_batch_valid, comfort_valid)
+                # Process the massive valid batch in chunks to avoid GPU memory saturation
+                # and massive latency spikes.
+                chunk_size = 4096  # Increased chunk size for better GPU utilization
+                massive_logits_valid_list = []
+                for idx in range(0, massive_batch_valid.size(0), chunk_size):
+                    mb_chunk = massive_batch_valid[idx : idx + chunk_size]
+                    mc_chunk = comfort_valid[idx : idx + chunk_size]
+                    out_chunk = self.model(mb_chunk, mc_chunk)
+                    massive_logits_valid_list.append(out_chunk)
+                
+                massive_logits_valid = torch.cat(massive_logits_valid_list, dim=0)
+            
             massive_logits[valid_mask_flat] = massive_logits_valid
             
         massive_logits = massive_logits.view(M, K)

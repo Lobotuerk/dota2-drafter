@@ -274,8 +274,10 @@ class HierarchicalTransformer(nn.Module):
             return mlm_logits
 
         # Win prediction mode: masked global average pooling + output head
-        is_pick = x_draft[:, :, 0]  # (B, 24)
-        valid_mask = is_pick == 1.0  # (B, 24)
+        # We must pool over BOTH picks and bans to allow bans to influence win probability!
+        # x_draft[:, :, 2] holds the hero_val. -1.0 means it's an empty/padding step.
+        hero_vals = x_draft[:, :, 2]
+        valid_mask = hero_vals != -1.0
         valid_mask = valid_mask.unsqueeze(-1).float()  # (B, 24, 1)
 
         masked_output = decoder_output * valid_mask  # (B, 24, d_model)

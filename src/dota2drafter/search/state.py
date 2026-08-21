@@ -455,7 +455,7 @@ class DraftState(pymcts.MCTS_state):
             if player_idx is not None and player_idx < self.comfort_matrix.shape[0]:
                 comfort_weight = self.comfort_matrix[player_idx].mean().item()
                 # Scale logits by comfort weight
-                scaled[i] = logits[i] * comfort_weight
+                scaled[i] = logits[i] + comfort_weight
 
         return scaled
 
@@ -495,7 +495,7 @@ class DraftState(pymcts.MCTS_state):
         # 2. Vectorized child evaluation
         massive_batch = base_batch.unsqueeze(1).expand(M, K, 24, 4).clone()
         valid_mask = torch.ones((M, K), dtype=torch.bool, device=device)
-        comfort_weights = torch.ones((M, K), dtype=torch.float32, device=device)
+        comfort_weights = torch.zeros((M, K), dtype=torch.float32, device=device)
         schedule_teams = torch.zeros(M, dtype=torch.float32, device=device)
         
         step_indices = [len(s.actions) for s in states]
@@ -553,14 +553,18 @@ class DraftState(pymcts.MCTS_state):
         # 3. Vectorized Logit Post-Processing
         perspective_mult = 1.0 - 2.0 * schedule_teams.unsqueeze(1)
         sort_logits = massive_logits * perspective_mult
-        sort_scores = sort_logits * comfort_weights
+        
+        # Comfort is an additive bonus/penalty to the logits, not a multiplier.
+        # This prevents a 0 comfort array (anonymous player) from flattening the distribution.
+        # We also replace the default torch.ones with torch.zeros for the additive baseline.
+        sort_scores = sort_logits + comfort_weights
         sort_scores = sort_scores.masked_fill(~valid_mask, float('-inf'))
         
         active_teams_list = [s.active_team for s in states]
         active_teams = torch.tensor(active_teams_list, dtype=torch.float32).to(device)
         active_mult = 1.0 - 2.0 * active_teams.unsqueeze(1)
         active_logits = massive_logits * active_mult
-        active_scores = active_logits * comfort_weights
+        active_scores = active_logits + comfort_weights
         active_scores = active_scores.masked_fill(~valid_mask, float('-inf'))
 
         # To slice to max_candidates, we set all non-topk to -inf

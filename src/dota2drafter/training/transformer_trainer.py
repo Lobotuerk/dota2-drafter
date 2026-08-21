@@ -537,7 +537,7 @@ class TransformerTrainer:
                 older_patch_indices.append(i)
                 
         # Shuffle indices
-        torch.manual_seed(42)
+        # torch.manual_seed(42)
         latest_shuffled = torch.randperm(len(latest_patch_indices)).tolist()
         latest_patch_indices = [latest_patch_indices[i] for i in latest_shuffled]
         
@@ -559,6 +559,7 @@ class TransformerTrainer:
             train_indices = older_patch_indices[(val_size - len(latest_patch_indices)):]
             
         # Shuffle training set one more time so old and new patches are mixed
+        # torch.manual_seed(42)  # Removed to prevent identical shuffle on every epoch!
         train_shuffled = torch.randperm(len(train_indices)).tolist()
         train_indices = [train_indices[i] for i in train_shuffled]
 

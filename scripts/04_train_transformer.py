@@ -274,6 +274,11 @@ def main() -> None:
         console.print(f"[bold green]Player input dim (vocab size): {player_input_dim}[/bold green]")
 
         device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        num_patches_dynamic = 30
+        if patch_ids is not None:
+            max_p = max([p.item() for p in patch_ids])
+            num_patches_dynamic = max(30, max_p + 10)
+
         model = MatchNetwork(
             d_model=args.d_model,
             nhead=args.nhead,
@@ -283,6 +288,7 @@ def main() -> None:
             num_heroes=max_hero_idx,
             player_input_dim=player_input_dim,
             h_gnn=h_gnn,
+            num_patches=num_patches_dynamic,
         ).to(device)
 
         # Parse augment argument
@@ -382,6 +388,11 @@ def main() -> None:
         console.print(f"[bold green]Player input dim (vocab size): {player_input_dim}[/bold green]")
 
         device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        num_patches_dynamic = 30
+        if patch_ids is not None:
+            max_p = max([p.item() for p in patch_ids])
+            num_patches_dynamic = max(30, max_p + 10)
+
         model = MatchNetwork(
             d_model=args.d_model,
             nhead=args.nhead,
@@ -391,6 +402,7 @@ def main() -> None:
             num_heroes=max_hero_idx,
             player_input_dim=player_input_dim,
             h_gnn=h_gnn,
+            num_patches=num_patches_dynamic,
         ).to(device)
 
         config = TrainingConfig(device=str(device))

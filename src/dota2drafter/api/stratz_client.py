@@ -264,6 +264,7 @@ class StratzClient:
         mapped_match = {
             "id": str(match_data.get("id", "")),
             "radiantWin": match_data.get("didRadiantWin"),
+            "startDateTime": match_data.get("startDateTime"),
             "draft": {
                 "picksBans": mapped_picks_bans
             },

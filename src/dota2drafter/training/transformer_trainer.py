@@ -619,6 +619,7 @@ class TransformerTrainer:
                 if patch_batch is not None:
                     patch_batch = patch_batch.to(self.device)
 
+                # 1. Main win-prediction forward pass
                 logits = self.model(x_batch, player_batch, mlm_mode=False, patch_ids=patch_batch)
 
                 # Label smoothing
@@ -635,8 +636,33 @@ class TransformerTrainer:
                 else:
                     loss = self.criterion(logits, y_smoothed)
 
+                # 2. Parallel MLM Policy task (to train the priors simultaneously)
+                # Apply 15% random masking to the current batch
+                mlm_x_batch = x_batch.clone()
+                mlm_labels = mlm_x_batch[:, :, 2].clone().long()
+                
+                # Create mask (only mask valid heroes, not -1 padding)
+                rand_mask = torch.rand(mlm_x_batch.shape[:2], device=self.device) < 0.15
+                valid_mask = mlm_x_batch[:, :, 2] != -1.0
+                mask = rand_mask & valid_mask
+                
+                mlm_x_batch[mask, 2] = -1.0
+                mlm_labels[~mask] = -1
+                
+                # Forward pass for MLM
+                mlm_logits = self.model(mlm_x_batch, player_batch, mlm_mode=True, patch_ids=patch_batch)
+                
+                mlm_loss = torch.nn.functional.cross_entropy(
+                    mlm_logits.view(-1, mlm_logits.size(-1)), 
+                    mlm_labels.view(-1), 
+                    ignore_index=-1
+                )
+                
+                # Combine losses (AlphaZero-style dual objective)
+                total_loss = loss + (0.5 * mlm_loss)
+
                 self.optimizer.zero_grad()
-                loss.backward()
+                total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
 

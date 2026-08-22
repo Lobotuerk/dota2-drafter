@@ -492,11 +492,9 @@ class DraftState(pymcts.MCTS_state):
         with torch.no_grad():
             win_probs = self.model.predict_proba(base_batch, comfort_base)
 
-        # 2. Vectorized child evaluation
-        massive_batch = base_batch.unsqueeze(1).expand(M, K, 24, 4).clone()
+        # 2. Vectorized child setup
         valid_mask = torch.ones((M, K), dtype=torch.bool, device=device)
         comfort_weights = torch.zeros((M, K), dtype=torch.float32, device=device)
-        schedule_teams = torch.zeros(M, dtype=torch.float32, device=device)
         
         step_indices = [len(s.actions) for s in states]
         
@@ -507,13 +505,7 @@ class DraftState(pymcts.MCTS_state):
                 continue
                 
             schedule_action, schedule_team = DRAFT_SCHEDULE[step_idx]
-            schedule_teams[i] = schedule_team
             is_pick = (schedule_action == "pick")
-            
-            massive_batch[i, :, step_idx, 0] = 1.0 if is_pick else 0.0
-            massive_batch[i, :, step_idx, 1] = float(schedule_team)
-            massive_batch[i, :, step_idx, 2] = torch.arange(1, K + 1, device=device, dtype=torch.float32)
-            massive_batch[i, :, step_idx, 3] = float(step_idx)
             
             used_heroes = {m.hero_id for m in s.actions if m.hero_id > 0}
             for hero_id in used_heroes:
@@ -529,43 +521,31 @@ class DraftState(pymcts.MCTS_state):
         comfort_flat = self.comfort_matrix.unsqueeze(0).expand(M * K, -1, -1).to(device)
         valid_mask_flat = valid_mask.view(-1)
         
-        massive_logits = torch.zeros(M * K, device=device)
-        if valid_mask_flat.any():
-            massive_batch_valid = massive_batch_flat[valid_mask_flat]
-            comfort_valid = comfort_flat[valid_mask_flat]
-            with torch.no_grad():
-                # Process the massive valid batch in chunks to avoid GPU memory saturation
-                # and massive latency spikes.
-                chunk_size = 4096  # Increased chunk size for better GPU utilization
-                massive_logits_valid_list = []
-                for idx in range(0, massive_batch_valid.size(0), chunk_size):
-                    mb_chunk = massive_batch_valid[idx : idx + chunk_size]
-                    mc_chunk = comfort_valid[idx : idx + chunk_size]
-                    out_chunk = self.model(mb_chunk, mc_chunk)
-                    massive_logits_valid_list.append(out_chunk)
-                
-                massive_logits_valid = torch.cat(massive_logits_valid_list, dim=0)
+        # 3. AlphaZero-Style MCTS Evaluation
+        # Instead of doing 127 forward passes of win-probability to get the priors (Value),
+        # we evaluate the MLM head (Policy) on the single base_batch to get the true priors instantly!
+        with torch.no_grad():
+            # Run the base states through the MLM head to get Policy Logits for the next step
+            # mlm_logits shape: (M, 24, num_heroes + 1)
+            # The base_batch at step_idx contains our padding token (-1.0), so the MLM 
+            # will explicitly try to predict which hero belongs in that empty slot!
+            mlm_logits = self.model(base_batch, comfort_base, mlm_mode=True)
             
-            massive_logits[valid_mask_flat] = massive_logits_valid
-            
-        massive_logits = massive_logits.view(M, K)
-        
-        # 3. Vectorized Logit Post-Processing
-        perspective_mult = 1.0 - 2.0 * schedule_teams.unsqueeze(1)
-        sort_logits = massive_logits * perspective_mult
-        
-        # Comfort is an additive bonus/penalty to the logits, not a multiplier.
-        # This prevents a 0 comfort array (anonymous player) from flattening the distribution.
-        # We also replace the default torch.ones with torch.zeros for the additive baseline.
-        sort_scores = sort_logits + comfort_weights
+            # Extract the specific logits for the exact step we are trying to predict
+            policy_logits = torch.zeros(M, K, device=device)
+            for i, s in enumerate(states):
+                step_idx = step_indices[i]
+                if step_idx < 24:
+                    # We slice 1:K+1 because index 0 is reserved/padding in the MLM vocabulary
+                    policy_logits[i] = mlm_logits[i, step_idx, 1:K+1]
+
+        # The Policy Logits represent P(a|s). We add comfort directly to the policy logits!
+        sort_scores = policy_logits + comfort_weights
         sort_scores = sort_scores.masked_fill(~valid_mask, float('-inf'))
         
-        active_teams_list = [s.active_team for s in states]
-        active_teams = torch.tensor(active_teams_list, dtype=torch.float32).to(device)
-        active_mult = 1.0 - 2.0 * active_teams.unsqueeze(1)
-        active_logits = massive_logits * active_mult
-        active_scores = active_logits + comfort_weights
-        active_scores = active_scores.masked_fill(~valid_mask, float('-inf'))
+        # Since we use the Policy for the Prior directly, we don't need perspective_mult 
+        # (the MLM naturally predicts the correct hero for the team whose turn it is).
+        active_scores = sort_scores.clone()
 
         # To slice to max_candidates, we set all non-topk to -inf
         max_c = min(s.max_candidates for s in states) if states else 20

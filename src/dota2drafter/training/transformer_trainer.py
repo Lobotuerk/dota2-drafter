@@ -544,19 +544,14 @@ class TransformerTrainer:
         older_shuffled = torch.randperm(len(older_patch_indices)).tolist()
         older_patch_indices = [older_patch_indices[i] for i in older_shuffled]
         
-        # Calculate exactly how many matches we need for the validation set
-        val_size = int(n * self.config.val_split)
+        # The user wants Val AUC to ONLY reflect the latest patch.
+        # However, we MUST leave the majority of the latest patch in the training set so the model can actually learn the current meta!
+        # We will take 20% of the latest patch for validation, and put the remaining 80% + ALL older matches into training.
+        val_size = int(len(latest_patch_indices) * 0.2)
+        val_size = max(1, val_size) if latest_patch_indices else 0
         
-        # Pull entirely from the latest patch for validation
-        if len(latest_patch_indices) >= val_size:
-            val_indices = latest_patch_indices[:val_size]
-            # Put the remaining latest patch matches into the train set
-            train_indices = older_patch_indices + latest_patch_indices[val_size:]
-        else:
-            # If we don't have enough latest patch matches, use all of them and pad with older ones
-            # (Though in a real scenario, you almost always have enough recent matches)
-            val_indices = latest_patch_indices + older_patch_indices[:(val_size - len(latest_patch_indices))]
-            train_indices = older_patch_indices[(val_size - len(latest_patch_indices)):]
+        val_indices = latest_patch_indices[:val_size]
+        train_indices = latest_patch_indices[val_size:] + older_patch_indices
             
         # Shuffle training set one more time so old and new patches are mixed
         # torch.manual_seed(42)  # Removed to prevent identical shuffle on every epoch!

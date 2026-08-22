@@ -136,9 +136,6 @@ def parse_args() -> argparse.Namespace:
         help="Augmentation setting: 'true' (all 448), 'false' (none), or an integer representing the maximum number of variations allowed per original match (e.g. 5, 10, 20). (default: 'true')",
     )
     parser.add_argument(
-        "--mlm_epochs", type=int, default=0, help="Number of MLM pre-training epochs (default: 0, meaning skip)"
-    )
-    parser.add_argument(
         "--frozen_embeddings_path",
         type=str,
         default="models/skip_gram_dgi.pt",
@@ -318,22 +315,7 @@ def main() -> None:
         console.print("[bold blue]Training transformer model...[/bold blue]")
         trainer = TransformerTrainer(model, config)
 
-        # 1. MLM Pre-training stage (if requested)
-        if args.mlm_epochs > 0:
-            console.print(f"[bold yellow]Stage 4a: Running MLM Pre-training for {args.mlm_epochs} epochs...[/bold yellow]")
-            mlm_metrics = trainer.mlm_train(
-                x_drafts=x_drafts,
-                y_labels=y_labels,
-                radiant_players=radiant_players,
-                dire_players=dire_players,
-                player_comfort_map=player_comfort_map,
-                num_epochs=args.mlm_epochs,
-                patch_ids=patch_ids,
-            )
-            console.print("[bold green]MLM Pre-training complete! Transitioning to standard fine-tuning...[/bold green]")
 
-        # 2. Main Win-Probability Fine-tuning stage
-        console.print("[bold yellow]Stage 4b: Running Win-Probability Fine-tuning...[/bold yellow]")
         metrics = trainer.train(
             x_drafts=x_drafts,
             y_labels=y_labels,

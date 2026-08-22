@@ -507,10 +507,7 @@ class DraftState(pymcts.MCTS_state):
             for hero_id in used_heroes:
                 valid_mask[i, hero_id - 1] = False
 
-        # Run valid children through the model
-        massive_batch_flat = massive_batch.view(M * K, 24, 4)
-        comfort_flat = self.comfort_matrix.unsqueeze(0).expand(M * K, -1, -1).to(device)
-        valid_mask_flat = valid_mask.view(-1)
+
         
         # 3. AlphaZero-Style MCTS Evaluation
         # Instead of doing 127 forward passes of win-probability to get the priors (Value),

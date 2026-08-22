@@ -425,7 +425,11 @@ def main() -> None:
 
     console.print("[bold blue]Loading hero indexer...[/bold blue]")
     hero_indexer = load_hero_indexer(args.data_dir)
-    player_input_dim = (hero_indexer.get_contiguous_count() if hero_indexer.get_contiguous_count() > 0 else args.num_heroes) * 2
+    if len(player_comfort_map) > 0:
+        first_tensor = next(iter(player_comfort_map.values()))
+        player_input_dim = first_tensor.size(0)
+    else:
+        player_input_dim = (hero_indexer.get_contiguous_count() if hero_indexer.get_contiguous_count() > 0 else args.num_heroes) * 2
 
     # Build model
     console.print("[bold blue]Loading model...[/bold blue]")

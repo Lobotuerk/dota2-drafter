@@ -510,8 +510,9 @@ def main() -> None:
         def predict_proba(self, x_draft, player_comfort):
             expanded_patch = self.p.expand(x_draft.size(0))
             return self.model.predict_proba(x_draft, player_comfort, patch_ids=expanded_patch)
-        def forward(self, *args, **kwargs):
-            return self.model(*args, **kwargs)
+        def forward(self, x_draft, player_comfort, *args, **kwargs):
+            expanded_patch = self.p.expand(x_draft.size(0))
+            return self.model(x_draft, player_comfort, patch_ids=expanded_patch, *args, **kwargs)
             
     wrapped_model = PatchWrappedModel(model, patch_tensor)
     

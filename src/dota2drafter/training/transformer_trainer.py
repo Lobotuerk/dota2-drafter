@@ -711,3 +711,101 @@ class TransformerTrainer:
             self.scheduler.step()
 
         return self.metrics
+
+    def _validate(self, val_loader: DataLoader) -> tuple[float, dict[str, float]]:
+        """Run validation loop with original (unsmoothed) targets for metrics."""
+        self.model.eval()
+        val_loss = 0.0
+        all_preds: list[torch.Tensor] = []
+        all_targets: list[torch.Tensor] = []
+        val_batches = 0
+
+        with torch.no_grad():
+            for batch_data in tqdm(val_loader, desc="Validation"):
+                x_batch, player_batch, y_batch = batch_data[:3]
+                patch_batch = batch_data[3] if len(batch_data) > 3 else None
+
+                x_batch = x_batch.to(self.device)
+                player_batch = player_batch.to(self.device)
+                y_batch = y_batch.to(self.device).squeeze(-1)
+                if patch_batch is not None:
+                    patch_batch = patch_batch.to(self.device)
+
+                logits = self.model(x_batch, player_batch, mlm_mode=False, patch_ids=patch_batch)
+
+                if self.config.step_loss_gamma > 0.0:
+                    loss_elements = F.binary_cross_entropy_with_logits(
+                        logits, y_batch, reduction="none"
+                    )
+                    # t is the active draft length for each sample in the batch
+                    t = torch.sum(torch.sum(torch.abs(x_batch), dim=-1) > 0, dim=-1).float()
+                    weights = (t / 24.0) ** self.config.step_loss_gamma
+                    loss = torch.mean(weights * loss_elements)
+                else:
+                    loss = self.criterion(logits, y_batch)
+
+                val_loss += loss.item()
+                all_preds.append(logits.cpu())
+                all_targets.append(y_batch.cpu())
+                val_batches += 1
+
+        avg_val_loss = val_loss / max(val_batches, 1)
+
+        if all_preds:
+            all_preds_tensor = torch.cat(all_preds)
+            all_targets_tensor = torch.cat(all_targets)
+            metrics = compute_metrics(all_preds_tensor, all_targets_tensor)
+        else:
+            metrics = {"bce": 0.0, "accuracy": 0.0, "roc_auc": 0.5}
+
+        return avg_val_loss, metrics
+
+    def save_checkpoint(self, path: str | Path) -> None:
+        """Save the current model state.
+
+        Args:
+            path: Path to save the checkpoint.
+        """
+        checkpoint = {
+            "model_state": self.model.state_dict(),
+            "optimizer_state": self.optimizer.state_dict(),
+            "metrics": {
+                "train_losses": self.metrics.train_losses,
+                "val_losses": self.metrics.val_losses,
+                "val_accuracies": self.metrics.val_accuracies,
+                "val_auc_scores": self.metrics.val_auc_scores,
+                "best_epoch": self.metrics.best_epoch,
+                "best_roc_auc": self.metrics.best_roc_auc,
+            },
+        }
+        torch.save(checkpoint, path)
+        logger.info("Saved checkpoint to %s", path)
+
+    def load_checkpoint(self, path: str | Path) -> dict[str, Any]:
+        """Load a model checkpoint.
+
+        Args:
+            path: Path to the checkpoint file.
+
+        Returns:
+            Loaded checkpoint dictionary.
+        """
+        import os
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Checkpoint not found at {path}")
+            
+        checkpoint = torch.load(path, weights_only=True)
+        self.model.load_state_dict(checkpoint["model_state"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+
+        if "metrics" in checkpoint:
+            m = checkpoint["metrics"]
+            self.metrics.train_losses = m.get("train_losses", [])
+            self.metrics.val_losses = m.get("val_losses", [])
+            self.metrics.val_accuracies = m.get("val_accuracies", [])
+            self.metrics.val_auc_scores = m.get("val_auc_scores", [])
+            self.metrics.best_epoch = m.get("best_epoch", 0)
+            self.metrics.best_roc_auc = m.get("best_roc_auc", float("inf"))
+
+        logger.info("Loaded checkpoint from %s", path)
+        return checkpoint

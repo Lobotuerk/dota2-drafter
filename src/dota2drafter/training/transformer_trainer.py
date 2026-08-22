@@ -347,20 +347,20 @@ class PlayerComfortDataset(Dataset):
         comfort_rows: list[torch.Tensor] = []
 
         for account_id in self.radiant_players[idx]:
-            if account_id == 0:
-                comfort_rows.append(torch.zeros(self.player_input_dim))
-            elif account_id in self.player_comfort_map:
-                comfort_rows.append(self.player_comfort_map[account_id])
+            if account_id == 0 or account_id not in self.player_comfort_map:
+                anon = torch.zeros(self.player_input_dim, dtype=torch.float32)
+                anon[self.player_input_dim // 2 :] = 0.5  # Default Wilson Score to 0.5 (neutral winrate)
+                comfort_rows.append(anon)
             else:
-                comfort_rows.append(torch.zeros(self.player_input_dim))
+                comfort_rows.append(self.player_comfort_map[account_id])
 
         for account_id in self.dire_players[idx]:
-            if account_id == 0:
-                comfort_rows.append(torch.zeros(self.player_input_dim))
-            elif account_id in self.player_comfort_map:
-                comfort_rows.append(self.player_comfort_map[account_id])
+            if account_id == 0 or account_id not in self.player_comfort_map:
+                anon = torch.zeros(self.player_input_dim, dtype=torch.float32)
+                anon[self.player_input_dim // 2 :] = 0.5  # Default Wilson Score to 0.5 (neutral winrate)
+                comfort_rows.append(anon)
             else:
-                comfort_rows.append(torch.zeros(self.player_input_dim))
+                comfort_rows.append(self.player_comfort_map[account_id])
 
         player_comfort = torch.stack(comfort_rows)
         return player_comfort

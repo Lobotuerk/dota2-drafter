@@ -225,7 +225,9 @@ def build_comfort_tensor(
         if account_id in comfort_map:
             rows.append(comfort_map[account_id])
         else:
-            rows.append(torch.zeros(player_input_dim))
+            anon = torch.zeros(player_input_dim, dtype=torch.float32)
+            anon[player_input_dim // 2 :] = 0.5
+            rows.append(anon)
     return torch.stack(rows).to(device)
 
 

@@ -1,22 +1,7 @@
 #!/usr/bin/env python3
-"""Build historical player comfort data for transformer training.
-
-Iterates through match batches, computes a per-player comfort vector
-W_comfort(p, h) = W_p(h) - L_p(h) (wins minus losses per hero),
-then applies L2 normalization. The resulting dictionary is saved as a
-single ``.pt`` file.
-
-Usage::
-
-    python scripts/01c_build_comfort.py --data_dir data --output data/player_comfort.pt
-    python scripts/01c_build_comfort.py --data_dir data --output data/player_comfort.pt --vocab_size 127
-"""
-
-from __future__ import annotations
-
 import argparse
-import json
 import logging
+import math
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -27,149 +12,129 @@ from rich.console import Console
 logger = logging.getLogger(__name__)
 console = Console()
 
-
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Build player comfort map from match batches.",
+    parser = argparse.ArgumentParser(description="Build player comfort mapping.")
+    parser.add_argument(
+        "--data_dir", type=str, default="data", help="Directory with match batches"
     )
     parser.add_argument(
-        "--data_dir",
-        type=str,
-        default="data",
-        help="Directory with .pt match batches (default: data)",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default="data/player_comfort.pt",
-        help="Path to save the comfort map (default: data/player_comfort.pt)",
-    )
-    parser.add_argument(
-        "--vocab_size",
-        type=int,
-        default=127,
-        help="Number of heroes (vocab size, default: 127)",
-    )
-    parser.add_argument(
-        "--hero_indexer",
-        type=str,
-        default=None,
-        help="Path to hero_indexer.json to derive vocab_size dynamically",
+        "--output", type=str, default="data/player_comfort.pt", help="Output pt file"
     )
     return parser.parse_args()
 
-
 def load_vocab_size(args: argparse.Namespace) -> int:
-    """Determine the vocabulary size (number of heroes).
+    import json
+    indexer_path = Path(args.data_dir) / "hero_indexer.json"
+    if not indexer_path.exists():
+        console.print("[bold yellow]Warning:[/bold yellow] hero_indexer.json not found, defaulting to K=127")
+        return 127
+    with open(indexer_path, "r") as f:
+        data = json.load(f)
+    return max([int(v) for v in data.keys()])
 
-    Priority:
-    1. --vocab_size CLI argument
-    2. data/hero_indexer.json (if --hero_indexer is set)
-    """
-    if args.hero_indexer:
-        indexer_path = Path(args.hero_indexer)
-        if indexer_path.exists():
-            with open(indexer_path, "r") as f:
-                indexer_data = json.load(f)
-            # hero_indexer.json stores the mapping; count keys for vocab size
-            return len(indexer_data)
-    return args.vocab_size
-
+def wilson_score(wins: int, n: int, z: float = 1.96) -> float:
+    if n == 0:
+        return 0.5
+    p = wins / n
+    denominator = 1 + z**2 / n
+    center = p + z**2 / (2 * n)
+    spread = z * math.sqrt((p * (1 - p) / n) + z**2 / (4 * n**2))
+    return (center - spread) / denominator
 
 def main() -> None:
     args = parse_args()
     data_dir = Path(args.data_dir)
 
-    if not data_dir.exists():
-        console.print(f"[bold red]Error:[/bold red] Data directory not found: {data_dir}")
-        sys.exit(1)
-
     batch_files = sorted(data_dir.glob("drafts_batch_*.pt"))
     if not batch_files:
-        console.print(f"[bold red]Error:[/bold red] No batch files found in {data_dir}")
+        console.print(f"[bold red]Error:[/bold red] No drafts_batch_*.pt found in {data_dir}")
         sys.exit(1)
 
     vocab_size = load_vocab_size(args)
-    console.print(f"[bold blue]Building player comfort map from {len(batch_files)} batches...[/bold blue]")
+    console.print(f"[bold blue]Building Hybrid Player Comfort map from {len(batch_files)} batches...[/bold blue]")
     console.print(f"[bold blue]Vocab size (heroes): {vocab_size}[/bold blue]")
+    console.print(f"[bold blue]Player vector size: {vocab_size * 2} (Affinity + Wilson Score)[/bold blue]")
 
-    # Track wins and losses per (account_id, hero_id) pair
-    # win_count[(account_id, hero_id)] = number of wins
-    # loss_count[(account_id, hero_id)] = number of losses
+    # Tracking dictionaries
     win_count: dict[tuple[int, int], int] = defaultdict(int)
-    loss_count: dict[tuple[int, int], int] = defaultdict(int)
+    match_count: dict[tuple[int, int], int] = defaultdict(int)
+    player_totals: dict[int, int] = defaultdict(int)
 
-    for batch_file in batch_files:
-        try:
-            batch = torch.load(batch_file, weights_only=True)
-        except FileNotFoundError:
-            console.print(f"[bold yellow]Warning:[/bold yellow] Could not load {batch_file}, skipping.")
-            continue
+    for batch_path in batch_files:
+        batch = torch.load(batch_path, weights_only=True)
+        y = batch["y"]  # (N, 1) or (N,)
+        
+        if y.dim() == 2:
+            y = y.squeeze(-1)
+            
+        r_players = batch["radiant_players"]  # list of lists or (N, 5)
+        d_players = batch["dire_players"]
+        r_heroes = batch["radiant_heroes"]
+        d_heroes = batch["dire_heroes"]
 
-        radiant_players = batch.get("radiant_players", [])
-        dire_players = batch.get("dire_players", [])
-        radiant_heroes = batch.get("radiant_heroes", [])
-        dire_heroes = batch.get("dire_heroes", [])
-        y_labels = batch.get("y", [])
+        n_matches = len(y)
+        for i in range(n_matches):
+            radiant_win = y[i].item() == 1.0
 
-        for i in range(len(radiant_players)):
-            radiant_win = y_labels[i].item() == 1.0 if hasattr(y_labels[i], "item") else y_labels[i] == 1
-
-            # Process radiant players
-            for j, (account_id, hero_id) in enumerate(zip(radiant_players[i], radiant_heroes[i])):
-                # Skip anonymous players and unmapped heroes
-                if account_id == 0 or hero_id == -1:
+            for p_acc, h_idx in zip(r_players[i], r_heroes[i]):
+                if h_idx == -1 or p_acc == 0:
                     continue
-                pair = (account_id, hero_id)
+                pair = (int(p_acc), int(h_idx) - 1)  # 0-indexed for tensors
+                match_count[pair] += 1
+                player_totals[int(p_acc)] += 1
                 if radiant_win:
                     win_count[pair] += 1
-                else:
-                    loss_count[pair] += 1
 
-            # Process dire players
-            for j, (account_id, hero_id) in enumerate(zip(dire_players[i], dire_heroes[i])):
-                if account_id == 0 or hero_id == -1:
+            for p_acc, h_idx in zip(d_players[i], d_heroes[i]):
+                if h_idx == -1 or p_acc == 0:
                     continue
-                pair = (account_id, hero_id)
-                if not radiant_win:  # Dire wins when radiant loses
+                pair = (int(p_acc), int(h_idx) - 1)
+                match_count[pair] += 1
+                player_totals[int(p_acc)] += 1
+                if not radiant_win:
                     win_count[pair] += 1
-                else:
-                    loss_count[pair] += 1
 
-    # Build comfort map
+    # Compile the final mapping
     comfort_map: dict[int, torch.Tensor] = {}
-    all_player_ids = set()
-    for (account_id, _hero_id) in win_count.keys():
-        all_player_ids.add(account_id)
-    for (account_id, _hero_id) in loss_count.keys():
-        all_player_ids.add(account_id)
+    unique_players = set([p for (p, h) in match_count.keys()])
 
-    for account_id in all_player_ids:
-        # Build raw comfort vector: W_p(h) - L_p(h) for each hero
-        raw_vector = torch.zeros(vocab_size, dtype=torch.float32)
+    for account_id in unique_players:
+        total_games = player_totals[account_id]
+        if total_games == 0:
+            continue
+
+        vector = torch.zeros(vocab_size * 2, dtype=torch.float32)
+        
+        # Default all Wilson scores to 0.5 initially
+        vector[vocab_size:] = 0.5 
+
         for hero_idx in range(vocab_size):
             pair = (account_id, hero_idx)
-            w = win_count.get(pair, 0)
-            l = loss_count.get(pair, 0)
-            raw_vector[hero_idx] = float(w - l)
+            games_on_hero = match_count.get(pair, 0)
+            
+            if games_on_hero > 0:
+                wins_on_hero = win_count.get(pair, 0)
+                
+                # 1. Affinity (Play rate)
+                affinity = games_on_hero / total_games
+                
+                # 2. Wilson Score
+                w_score = wilson_score(wins_on_hero, games_on_hero)
+                
+                vector[hero_idx] = affinity
+                vector[vocab_size + hero_idx] = w_score
 
-        # L2 normalization: divide by max(1.0, L2_norm)
-        l2_norm = raw_vector.norm().item()
-        normalized_vector = raw_vector / max(1.0, l2_norm)
-
-        comfort_map[account_id] = normalized_vector
+        comfort_map[account_id] = vector
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(comfort_map, output_path)
 
-    console.print(f"[bold green]Saved player comfort map: {len(comfort_map)} unique players -> {output_path}[/bold green]")
-
+    console.print(f"[bold green]Saved Hybrid player comfort map: {len(comfort_map)} unique players -> {output_path}[/bold green]")
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
         console.print_exception(show_locals=True)
-        logger.exception("Build comfort script failed with an error:")
         sys.exit(1)

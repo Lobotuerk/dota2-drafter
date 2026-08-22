@@ -494,7 +494,6 @@ class DraftState(pymcts.MCTS_state):
 
         # 2. Vectorized child setup
         valid_mask = torch.ones((M, K), dtype=torch.bool, device=device)
-        comfort_weights = torch.zeros((M, K), dtype=torch.float32, device=device)
         
         step_indices = [len(s.actions) for s in states]
         
@@ -504,17 +503,9 @@ class DraftState(pymcts.MCTS_state):
                 valid_mask[i, :] = False
                 continue
                 
-            schedule_action, schedule_team = DRAFT_SCHEDULE[step_idx]
-            is_pick = (schedule_action == "pick")
-            
             used_heroes = {m.hero_id for m in s.actions if m.hero_id > 0}
             for hero_id in used_heroes:
                 valid_mask[i, hero_id - 1] = False
-                
-            if is_pick:
-                player_idx = s._get_player_index_for_step(step_idx, schedule_team)
-                if player_idx is not None and player_idx < self.comfort_matrix.shape[0]:
-                    comfort_weights[i, :] = self.comfort_matrix[player_idx, :]
 
         # Run valid children through the model
         massive_batch_flat = massive_batch.view(M * K, 24, 4)
@@ -539,8 +530,10 @@ class DraftState(pymcts.MCTS_state):
                     # We slice 1:K+1 because index 0 is reserved/padding in the MLM vocabulary
                     policy_logits[i] = mlm_logits[i, step_idx, 1:K+1]
 
-        # The Policy Logits represent P(a|s). We add comfort directly to the policy logits!
-        sort_scores = policy_logits + comfort_weights
+        # The Policy Logits represent P(a|s).
+        # Because we passed comfort_base into the model above, the network's internal cross-attention
+        # ALREADY dynamically adjusts policy_logits based on the Affinity and Wilson Scores of the players!
+        sort_scores = policy_logits.clone()
         sort_scores = sort_scores.masked_fill(~valid_mask, float('-inf'))
         
         # Since we use the Policy for the Prior directly, we don't need perspective_mult 

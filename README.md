@@ -1,6 +1,6 @@
 # Dota 2 Draft Ingestion Pipeline
 
-A Python-based data ingestion pipeline that fetches, validates, and transforms Dota 2 Captains Mode draft sequences into PyTorch-ready tensor datasets, followed by a multi-stage embedding and match prediction training pipeline.
+A Python-based data ingestion pipeline that fetches, validates, and transforms Dota 2 Captains Mode draft sequences into PyTorch-ready tensor datasets, followed by a state-of-the-art AlphaZero-style multi-stage neural network training pipeline.
 
 ## Table of Contents
 
@@ -8,11 +8,10 @@ A Python-based data ingestion pipeline that fetches, validates, and transforms D
 - [MCTS Library Installation](#mcts-library-installation)
 - [Pipeline Overview](#pipeline-overview)
 - [Stage 1: Data Gathering](#stage-1-data-gathering)
-- [Stage 1b: Build Comfort Data](#stage-1b-build-comfort-data)
 - [Stage 2: Hero Embeddings](#stage-2-hero-embeddings)
 - [Stage 3: RGCN Training](#stage-3-rgcn-training)
 - [Stage 4: Transformer Training](#stage-4-transformer-training)
-- [Detailed Configuration](#detailed-configuration)
+- [Stage 5: Interactive Draft (MCTS)](#stage-5-interactive-draft-mcts)
 
 ---
 
@@ -45,12 +44,6 @@ Obtain a STRATZ API key from [https://www.stratz.com/account/api](https://www.st
 
 This project uses the `pymcts` C++ library (via pybind11) for high-performance Monte Carlo Tree Search. The library must be installed from source before running the interactive draft tool.
 
-### Prerequisites
-
-- CMake 3.15+
-- A C++11-compatible compiler (g++ 7+, clang 6+, or MSVC 2017+)
-- Python 3.11+ with `pybind11`
-
 ### Install from source
 
 ```bash
@@ -62,41 +55,17 @@ cd MonteCarloTreeSearch
 pip install --no-build-isolation -e .
 ```
 
-### Verify installation
-
-```python
-import pymcts
-print(pymcts.__version__)  # Should print 0.1.0
-```
-
-### Using with dota2-drafter
-
-Once `pymcts` is installed, install the dota2-drafter package:
-
-```bash
-cd dota2-drafter
-pip install -e .
-```
-
-The `pymcts` module will be available for import in all search-related modules:
-
-```python
-import pymcts
-from dota2drafter.search import DraftState, DraftMove, Dota2DraftAgent
-```
-
 ---
 
 ## Pipeline Overview
 
-The pipeline consists of four sequential stages:
+The architecture utilizes a state-of-the-art approach to Dota 2 drafting:
 
-1. **Data Gathering** — Fetch Dota 2 matches from STRATZ/OpenDota APIs, validate drafts, produce `.pt` tensor batches.
-2. **Hero Embeddings** — Train Skip-Gram + DGI unsupervised hero embeddings from draft co-occurrence data.
-3. **RGCN Training** — Train a Relational Graph Convolutional Network over the multi-relational hero graph.
-4. **Transformer Training** — Train the Hierarchical Sequence Transformer for match win-probability prediction.
-
-Each stage has a standalone script under `scripts/`. Run them in order.
+1. **Data Gathering** — Dual-API fetch (STRATZ/OpenDota) with automatic Historical Patch Tagging.
+2. **Hero Embeddings (Skip-Gram + DGI)** — Unsupervised deep graph infomax to map the spatial topology of heroes.
+3. **Hero Embeddings (RGCN)** — Multi-relational GCN with a deep Link Prediction Decoder to encode synergies, counters, and required bans.
+4. **Transformer Training** — A Two-Headed AlphaZero-style Transformer (predicts Win-Probability alongside Masked Language Modeling) utilizing Contextual Patch Embeddings.
+5. **MCTS Inference** — Real-time interactive drafting using PyMCTS, utilizing the MLM Policy Head for instant O(B) PUCT priors.
 
 ---
 
@@ -105,123 +74,61 @@ Each stage has a standalone script under `scripts/`. Run them in order.
 Runs the ingestion pipeline to fetch matches and produce PyTorch batch files.
 
 ```bash
+# 1. Discover leagues
 python scripts/01a_gather_leagues.py
+
+# 2. (Optional) Edit data/leagues.json and set review=false for leagues you want to reject.
+
+# 3. Gather matches from OpenDota/Stratz
 python scripts/01b_gather_matches.py
+
+# 4. Clean unapproved leagues and mathematically re-chunk the dataset uniformly
+python scripts/01e_cleanup_unapproved.py
+
+# 5. Build player comfort vectors based on the downloaded matches
+python scripts/01c_build_comfort.py
 ```
 
-Review `data/leagues.json` after `01a` and set the `review` flag to `true` only for
-leagues you want included. `01b` gathers matches only for approved leagues.
-
-```bash
-python scripts/01a_gather_leagues.py custom_config.yaml
-python scripts/01b_gather_matches.py custom_config.yaml
-```
-
-Reads configuration from `config.yaml`. Output is saved to `./data/` as `drafts_batch_*.pt` files.
-
-**Configuration:** See `src/dota2drafter/README.md` for full parameter tables.
-
----
-
-## Stage 1c: Build Comfort Data
-
-Builds historical player comfort data (required before transformer training).
-
-```bash
-python scripts/01c_build_comfort.py --data_dir data --output data/player_comfort.pt
-python scripts/01c_build_comfort.py --data_dir data --output data/player_comfort.pt --dim 10 --random
-```
+**Configuration:** See `config.yaml` to adjust the `cutoff_date` (determines how far back in patch history the scraper goes) and `chunk_size`.
 
 ---
 
 ## Stage 2: Hero Embeddings
 
-Trains Skip-Gram + DGI hero embeddings.
+Trains Skip-Gram + DGI unsupervised hero embeddings from draft co-occurrence data.
 
 ```bash
-# Train
-python scripts/02_train_embeddings.py --mode train \
-    --data_dir data \
-    --output_file models/skip_gram_dgi.pt \
-    --dgi_epochs 100 \
-    --skip_gram_epochs 10 \
-    --embed_dim 64 \
-    --dgi_lr 5e-4
-
-# Predict (print embedding for a specific hero)
-python scripts/02_train_embeddings.py --mode predict \
-    --output_file models/skip_gram_dgi.pt --hero_id 1
+python scripts/02_train_embeddings.py --mode train --dgi_epochs 100 --skip_gram_epochs 5 --dgi_lr 5e-4
 ```
-
-**Configuration:** See `src/dota2drafter/embeddings/README.md` for full parameter tables.
 
 ---
 
 ## Stage 3: RGCN Training
 
-Trains the Relational GNN over the multi-relational hero graph.
+Trains the Relational GNN over the multi-relational hero graph using a 3-layer deep MLP Link Prediction Decoder.
 
 ```bash
-# Train
-python scripts/03_train_rgcn.py --mode train  \
-    --data_dir data  \
-    --frozen_embeddings_path models/skip_gram_dgi.pt  \
-    --output_file models/rgcn.pt \
-    --d_model 64 \
-    --rgcn_epochs 275 \
-    --learning_rate 1.5e-3
-
-# Predict (extract structural hero embeddings)
-python scripts/03_train_rgcn.py --mode predict \
-    --data_dir data \
-    --frozen_embeddings_path models/skip_gram_dgi.pt \
-    --rgcn_path models/rgcn.pt
+python scripts/03_train_rgcn.py --mode train --data_dir data --frozen_embeddings_path models/skip_gram_dgi.pt --output_file models/rgcn.pt --d_model 64 --rgcn_epochs 150 --learning_rate 5e-4
 ```
-
-**Configuration:** See `src/dota2drafter/embeddings/README.md` for full parameter tables.
 
 ---
 
 ## Stage 4: Transformer Training
 
-Trains the Hierarchical Sequence Transformer for match prediction.
+Trains the Two-Headed Hierarchical Sequence Transformer. The script automatically isolates the absolute latest patch in your dataset for the Validation Split, ensuring your `Val AUC` accurately reflects generalizability to the current meta.
+
+*Note: MLM training is now performed in parallel with Value training (AlphaZero-style), so no `--mlm_epochs` flag is needed.*
 
 ```bash
-# Train (requires data from stages 1, 1b, and 3)
-python scripts/04_train_transformer.py --mode train  \
-    --data_dir data  \
-    --rgcn_path models/rgcn.pt \
-    --comfort_path data/player_comfort.pt \
-    --checkpoint_dir checkpoints \
-    --device cuda \
-    --dropout 0.3 \
-    --learning_rate 1e-4 \
-    --lr_backbone 1e-5 \
-    --lr_head 1e-3 \
-    --step_loss_gamma 1.0 \
-    --label_smoothing_eps 0.6 \
-    --mlm_epochs 10 \
-    --num_heroes 127 \
-    --d_model 64 \
-    --dim_feedforward 128 \
-    --augment True
-
-# Predict (requires a trained checkpoint)
-python scripts/04_train_transformer.py --mode predict \
-    --data_dir data \
-    --rgcn_path models/rgcn.pt \
-    --comfort_path data/player_comfort.pt \
-    --checkpoint_dir checkpoints
+python scripts/04_train_transformer.py     --mode train     --data_dir data     --rgcn_path models/rgcn.pt     --comfort_path data/player_comfort.pt     --checkpoint_dir checkpoints     --device cuda     --num_heroes 127     --num_epochs 20     --batch_size 256     --dropout 0.5     --dim_feedforward 128     --lr_backbone 1e-4     --lr_head 5e-4     --augment 2
 ```
-
-**Configuration:** See `src/dota2drafter/training/README.md` for full parameter tables.
 
 ---
 
-## Detailed Configuration
+## Stage 5: Interactive Draft (MCTS)
 
-Full parameter tables for each module are available in the module READMEs:
+Boot up the real-time CLI assistant to guide you through a draft. The MCTS engine evaluates thousands of sequences per second by using the Transformer policy (MLM) head for highly contextualized priors, scaled progressively by temperature.
 
-- **Ingestion config:** `src/dota2drafter/README.md`
-- **Embeddings & RGCN:** `src/dota2drafter/embeddings/README.md`
-- **Match Network & Training:** `src/dota2drafter/training/README.md`
+```bash
+python scripts/interactive_draft.py     --num_heroes 127     --max_iterations 15000     --max_seconds 60     --device cuda     --top_n 10     --max_candidates 5
+```

@@ -267,8 +267,14 @@ def main() -> None:
 
         console.print("[bold blue]Loading hero indexer...[/bold blue]")
         hero_indexer = load_hero_indexer(args.data_dir)
-        player_input_dim = hero_indexer.get_contiguous_count() if hero_indexer.get_contiguous_count() > 0 else max_hero_idx
-        console.print(f"[bold green]Player input dim (vocab size): {player_input_dim}[/bold green]")
+        # The comfort matrix was built using the full vocab size from hero_indexer (which can be larger than max_hero_idx seen in current batches)
+        if len(player_comfort_map) > 0:
+            first_tensor = next(iter(player_comfort_map.values()))
+            player_input_dim = first_tensor.size(0)
+        else:
+            player_input_dim = max_hero_idx * 2
+        
+        console.print(f"[bold green]Player input dim (vocab size * 2): {player_input_dim}[/bold green]")
 
         device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
         num_patches_dynamic = 30
@@ -366,8 +372,14 @@ def main() -> None:
 
         console.print("[bold blue]Loading hero indexer...[/bold blue]")
         hero_indexer = load_hero_indexer(args.data_dir)
-        player_input_dim = hero_indexer.get_contiguous_count() if hero_indexer.get_contiguous_count() > 0 else max_hero_idx
-        console.print(f"[bold green]Player input dim (vocab size): {player_input_dim}[/bold green]")
+        # The comfort matrix was built using the full vocab size from hero_indexer (which can be larger than max_hero_idx seen in current batches)
+        if len(player_comfort_map) > 0:
+            first_tensor = next(iter(player_comfort_map.values()))
+            player_input_dim = first_tensor.size(0)
+        else:
+            player_input_dim = max_hero_idx * 2
+        
+        console.print(f"[bold green]Player input dim (vocab size * 2): {player_input_dim}[/bold green]")
 
         device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
         num_patches_dynamic = 30

@@ -520,9 +520,14 @@ class DraftState(pymcts.MCTS_state):
         with torch.no_grad():
             # Run the base states through the MLM head to get Policy Logits for the next step
             # mlm_logits shape: (M, 24, num_heroes + 1)
-            # The base_batch at step_idx contains our padding token (-1.0), so the MLM 
+            # The base_batch at step_idx contains our padding token (-1.0), so the MLM
             # will explicitly try to predict which hero belongs in that empty slot!
-            mlm_logits = self.model(base_batch, comfort_base, mlm_mode=True)
+
+            # Check if model has a forward method, otherwise call it directly
+            if hasattr(self.model, "forward"):
+                mlm_logits = self.model.forward(base_batch, comfort_base, mlm_mode=True)
+            else:
+                mlm_logits = self.model(base_batch, comfort_base, mlm_mode=True)
             
             # Extract the specific logits for the exact step we are trying to predict
             policy_logits = torch.zeros(M, K, device=device)

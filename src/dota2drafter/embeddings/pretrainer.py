@@ -140,12 +140,32 @@ def train_embeddings(
     # Temporarily set node features on graph for DGI
     hero_graph.x = initial_x
 
+    import copy
+    dgi_patience = 25
+    dgi_min_delta = 1e-4
+    best_dgi_loss = float('inf')
+    dgi_patience_counter = 0
+    best_dgi_state = None
+
     for epoch in range(1, dgi_epochs + 1):
         avg_loss = dgi.train_epoch(hero_graph, dgi_optimizer, device)
         logger.info("DGI epoch %d/%d, loss: %.4f", epoch, dgi_epochs, avg_loss)
         if epoch % 10 == 0:
             check_embedding_health(dgi, hero_graph.x, hero_graph.edge_index)
         dgi_scheduler.step()
+
+        # Early stopping logic
+        if avg_loss < best_dgi_loss - dgi_min_delta:
+            best_dgi_loss = avg_loss
+            dgi_patience_counter = 0
+            best_dgi_state = copy.deepcopy(dgi.state_dict())
+        else:
+            dgi_patience_counter += 1
+            if dgi_patience_counter >= dgi_patience:
+                logger.info("Early stopping DGI after %d epochs due to loss plateau.", epoch)
+                if best_dgi_state is not None:
+                    dgi.load_state_dict(best_dgi_state)
+                break
 
     # Extract final DGI embeddings
     final_embeddings = dgi.get_embeddings(hero_graph, device)

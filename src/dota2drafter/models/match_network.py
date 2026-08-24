@@ -75,8 +75,38 @@ class JointEmbedding(nn.Module):
         # Patch embedding
         self.w_patch = nn.Embedding(num_patches, d_model)
 
+        # FiLM parameters: Linear layers to generate gamma (scale) and beta (shift)
+        self.film_gamma = nn.Linear(d_model, d_model)
+        self.film_beta = nn.Linear(d_model, d_model)
+
+        # Initialize gamma near 1 and beta near 0 for identity transformation start
+        nn.init.ones_(self.film_gamma.weight)
+        nn.init.zeros_(self.film_gamma.bias)
+        nn.init.zeros_(self.film_beta.weight)
+        nn.init.zeros_(self.film_beta.bias)
+
         # Positional encoding
         self.pos_enc = SinusoidalPositionalEncoding(d_model, max_len=24)
+
+    @torch.no_grad()
+    def fuse_embeddings_for_inference(self):
+        """Pre-computes the linear projection to speed up MCTS.
+        
+        This replaces the project layer with an Identity function and
+        pre-multiplies the h_gnn buffer. Call this once before starting MCTS.
+        """
+        if isinstance(self.project, nn.Identity):
+            return  # Already fused
+            
+        # Compute projection once for all K heroes and replace the raw h_gnn buffer
+        fused_h_gnn = self.project(self.h_gnn)
+        
+        # We must delete the old buffer first before re-registering it with new shape/data
+        del self.h_gnn
+        self.register_buffer("h_gnn", fused_h_gnn)
+        
+        # Replace the linear layer with an Identity function to make it a no-op
+        self.project = nn.Identity()
 
     def forward(
         self,
@@ -136,12 +166,18 @@ class JointEmbedding(nn.Module):
         # Joint embedding: sum of all components
         z = hero_projected + type_embeds + team_embeds + pos_embeds
         
-        # Add patch embeddings if provided
+        # Apply FiLM conditioning if patch_ids is provided
         if patch_ids is not None:
-            # Clamp in case of unknown patch
+            # 1. Get base patch embedding (e_patch)
             patch_ids_clamped = torch.clamp(patch_ids, 0, self.w_patch.num_embeddings - 1)
-            patch_embeds = self.w_patch(patch_ids_clamped).unsqueeze(1) # (B, 1, d_model)
-            z = z + patch_embeds
+            e_patch = self.w_patch(patch_ids_clamped)  # (B, d_model)
+            
+            # 2. Compute affine parameters and unsqueeze for sequence broadcasting
+            gamma = self.film_gamma(e_patch).unsqueeze(1)  # (B, 1, d_model)
+            beta = self.film_beta(e_patch).unsqueeze(1)    # (B, 1, d_model)
+            
+            # 3. Apply FiLM modulation: gamma * z + beta
+            z = gamma * z + beta
 
         return z
 
@@ -402,3 +438,8 @@ class MatchNetwork(nn.Module):
         """
         logits = self.forward(x_draft, player_comfort, mlm_mode=False, patch_ids=patch_ids)
         return torch.sigmoid(logits)
+
+    @torch.no_grad()
+    def fuse_embeddings_for_inference(self):
+        """Pre-computes the linear projection to speed up MCTS."""
+        self.match_network.joint_embedding.fuse_embeddings_for_inference()

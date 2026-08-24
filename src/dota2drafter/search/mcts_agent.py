@@ -83,6 +83,12 @@ class Dota2DraftAgent:
         self.batch_size = int(batch_size)
         self.num_search_threads = int(num_search_threads)
 
+        # Fuse the RGCN embeddings into the transformer to save 
+        # a matrix multiplication operation at every MCTS rollout
+        if hasattr(model, "fuse_embeddings_for_inference"):
+            model.eval()
+            model.fuse_embeddings_for_inference()
+
         root_state = DraftState(
             model=model,
             comfort_matrix=comfort_matrix,

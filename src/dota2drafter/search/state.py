@@ -367,9 +367,6 @@ class DraftState(pymcts.MCTS_state):
         base_batch = torch.stack(draft_tensors, dim=0).to(device)
         comfort_base = self.comfort_matrix.unsqueeze(0).expand(M, -1, -1).to(device)
 
-        with torch.no_grad():
-            win_probs = self.model.predict_proba(base_batch, comfort_base)
-
         # 2. Vectorized child setup
         valid_mask = torch.ones((M, K), dtype=torch.bool, device=device)
         
@@ -388,19 +385,16 @@ class DraftState(pymcts.MCTS_state):
 
         
         # 3. AlphaZero-Style MCTS Evaluation
-        # Instead of doing 127 forward passes of win-probability to get the priors (Value),
-        # we evaluate the MLM head (Policy) on the single base_batch to get the true priors instantly!
+        # We evaluate both the Win Probability (Value) and the MLM head (Policy) 
+        # instantly in a single batched forward pass!
         with torch.no_grad():
-            # Run the base states through the MLM head to get Policy Logits for the next step
+            # Run the base states through the network
             # mlm_logits shape: (M, 24, num_heroes + 1)
             # The base_batch at step_idx contains our padding token (-1.0), so the MLM
             # will explicitly try to predict which hero belongs in that empty slot!
 
-            # Check if model has a forward method, otherwise call it directly
-            if hasattr(self.model, "forward"):
-                mlm_logits = self.model.forward(base_batch, comfort_base, mlm_mode=True)
-            else:
-                mlm_logits = self.model(base_batch, comfort_base, mlm_mode=True)
+            logits, mlm_logits = self.model(base_batch, comfort_base)
+            win_probs = torch.sigmoid(logits)
             
             # Extract the specific logits for the exact step we are trying to predict
             policy_logits = torch.zeros(M, K, device=device)

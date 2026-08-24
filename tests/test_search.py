@@ -146,7 +146,12 @@ def test_draft_state_get_action_probabilities_uses_logits():
             _call_count += 1
             n = batch.shape[0]
             # mlm_logits shape: (M, 24, num_heroes + 1)
-            return torch.linspace(0.0, float(n - 1), n).view(n, 1, 1).expand(-1, 24, 128)
+            logits = torch.full((n,), 0.5)
+            mlm_logits = torch.linspace(0.0, float(n - 1), n).view(n, 1, 1).expand(-1, 24, 128)
+            return logits, mlm_logits
+
+        def __call__(self, batch, comfort, **kwargs):
+            return self.forward(batch, comfort, **kwargs)
 
         def eval(self):
             return self
@@ -219,7 +224,8 @@ def test_mcts_agent_search_returns_real_data():
     """Verify search() returns recommendations with real visit counts."""
     mock_model = MagicMock()
     mock_model.predict_proba.side_effect = lambda x, c: torch.full((x.shape[0],), 0.55)
-    mock_model.forward.side_effect = lambda x, c, **kwargs: torch.full((x.shape[0], 24, 128), 0.5)
+    mock_model.forward.side_effect = lambda x, c, **kwargs: (torch.full((x.shape[0],), 0.5), torch.full((x.shape[0], 24, 128), 0.5))
+    mock_model.side_effect = mock_model.forward.side_effect
 
     comfort_matrix = torch.zeros(10, 64)
     agent = Dota2DraftAgent(
@@ -273,11 +279,16 @@ def test_draft_state_evaluate_and_prune_moves_perspectives_and_caching():
             n = batch.shape[0]
             # MLM Logits shape: (M, 24, num_heroes + 1)
             # Create a base tensor where hero logits correspond to their ID
-            logits = torch.zeros(n, 24, 128)
+            mlm_logits = torch.zeros(n, 24, 128)
             # Make hero 1 have score 1, hero 2 score 2, etc. so that picking hero X yields prior X
             for hero_id in range(1, 121):
-                logits[:, :, hero_id] = hero_id
-            return logits
+                mlm_logits[:, :, hero_id] = hero_id
+                
+            logits = torch.full((n,), 0.5)
+            return logits, mlm_logits
+
+        def __call__(self, batch, comfort, **kwargs):
+            return self.forward(batch, comfort, **kwargs)
 
         def eval(self):
             return self
@@ -352,7 +363,8 @@ def test_mcts_agent_update_state_tree_reuse():
     """Verify that update_state reuses the existing MCTS tree when move matches a child."""
     mock_model = MagicMock()
     mock_model.predict_proba.side_effect = lambda x, c: torch.full((x.shape[0],), 0.55)
-    mock_model.forward.side_effect = lambda x, c, **kwargs: torch.full((x.shape[0], 24, 128), 0.5)
+    mock_model.forward.side_effect = lambda x, c, **kwargs: (torch.full((x.shape[0],), 0.5), torch.full((x.shape[0], 24, 128), 0.5))
+    mock_model.side_effect = mock_model.forward.side_effect
 
     comfort_matrix = torch.zeros(10, 64)
     agent = Dota2DraftAgent(
@@ -392,7 +404,8 @@ def test_mcts_agent_update_state_fallback(caplog):
     """Verify that update_state falls back to cold start when move is not in the tree."""
     mock_model = MagicMock()
     mock_model.predict_proba.side_effect = lambda x, c: torch.full((x.shape[0],), 0.55)
-    mock_model.forward.side_effect = lambda x, c, **kwargs: torch.full((x.shape[0], 24, 128), 0.5)
+    mock_model.forward.side_effect = lambda x, c, **kwargs: (torch.full((x.shape[0],), 0.5), torch.full((x.shape[0], 24, 128), 0.5))
+    mock_model.side_effect = mock_model.forward.side_effect
 
     comfort_matrix = torch.zeros(10, 64)
     agent = Dota2DraftAgent(
@@ -423,7 +436,8 @@ def test_mcts_agent_params_propagation():
     """Verify c_puct, batch_size, num_search_threads are forwarded into pymcts agent."""
     mock_model = MagicMock()
     mock_model.predict_proba.side_effect = lambda x, c: torch.full((x.shape[0],), 0.55)
-    mock_model.forward.side_effect = lambda x, c, **kwargs: torch.full((x.shape[0], 24, 128), 0.5)
+    mock_model.forward.side_effect = lambda x, c, **kwargs: (torch.full((x.shape[0],), 0.5), torch.full((x.shape[0], 24, 128), 0.5))
+    mock_model.side_effect = mock_model.forward.side_effect
 
     comfort_matrix = torch.zeros(10, 64)
     agent = Dota2DraftAgent(
@@ -461,12 +475,17 @@ def test_draft_state_evaluate_batch():
 
         def predict_proba(self, batch, comfort):
             batch_size = batch.shape[0]
-            self.calls.append((batch.shape, comfort.shape))
             return torch.full((batch_size,), 0.7)
 
         def forward(self, batch, comfort, mlm_mode=False):
             n = batch.shape[0]
-            return torch.linspace(0.0, float(n - 1), n).view(n, 1, 1).expand(-1, 24, 128)
+            self.calls.append((batch.shape, comfort.shape))
+            logits = torch.full((n,), 0.5)
+            mlm_logits = torch.linspace(0.0, float(n - 1), n).view(n, 1, 1).expand(-1, 24, 128)
+            return logits, mlm_logits
+
+        def __call__(self, batch, comfort, **kwargs):
+            return self.forward(batch, comfort, **kwargs)
 
         def eval(self):
             return self
@@ -515,10 +534,13 @@ def test_draft_state_evaluate_batch():
     for i, s in enumerate(states):
         assert results[i][0] is not None  # value present
 
-    # Values: radiant-win 0.7 -> active_team==0 gives 0.7, active_team==1 gives 0.3
-    assert pytest.approx(results[0][0], 1e-6) == 0.7  # radiant active, radiant-win 0.7
-    assert pytest.approx(results[1][0], 1e-6) == 0.3  # dire active, 1.0 - 0.7
-    assert pytest.approx(results[2][0], 1e-6) == 0.7  # terminal state, radiant active
+    # Values: logits=0.5 -> sigmoid(0.5) ≈ 0.622459
+    # active_team==0 gives 0.622459, active_team==1 gives 1.0 - 0.622459 = 0.377541
+    val_rad = torch.sigmoid(torch.tensor(0.5)).item()
+
+    assert pytest.approx(results[0][0], 1e-6) == val_rad  # radiant active
+    assert pytest.approx(results[1][0], 1e-6) == 1.0 - val_rad  # dire active
+    assert pytest.approx(results[2][0], 1e-6) == val_rad  # terminal state, radiant active
 
     # Non-terminal states: priors non-empty, len == max_candidates, sum ~ 1.0
     assert len(results[0][1]) == 120  # Evaluated batch returns all priors, but zeroes out non-top-k

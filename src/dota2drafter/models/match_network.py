@@ -255,22 +255,20 @@ class HierarchicalTransformer(nn.Module):
         self,
         x_draft: torch.Tensor,
         player_pref_vectors: torch.Tensor,
-        mlm_mode: bool = False,
         patch_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass through the Match Network.
 
         Args:
             x_draft: Draft sequence tensor of shape (B, 24, 4).
             player_pref_vectors: Player preference vectors from PlayerComfortNetwork,
                                  shape (B, 10, d_model).
-            mlm_mode: If True, return MLM logits for masked hero prediction
-                      instead of win probability.
             patch_ids: Patch ID tensor of shape (B,).
 
         Returns:
-            If mlm_mode is False: Win probability scalar per sample, shape (B,).
-            If mlm_mode is True: MLM logits per step, shape (B, 24, num_heroes + 1).
+            Tuple of:
+                - Win probability scalar per sample, shape (B,).
+                - MLM logits per step, shape (B, 24, num_heroes + 1).
         """
         batch_size = x_draft.size(0)
 
@@ -304,10 +302,8 @@ class HierarchicalTransformer(nn.Module):
             tgt_key_padding_mask=pad_mask,
         )  # (B, 24, d_model)
 
-        if mlm_mode:
-            # MLM mode: return per-step hero prediction logits
-            mlm_logits = self.mlm_head(decoder_output)
-            return mlm_logits
+        # MLM mode: return per-step hero prediction logits
+        mlm_logits = self.mlm_head(decoder_output)
 
         # Win prediction mode: masked global average pooling + output head
         # We must pool over BOTH picks and bans to allow bans to influence win probability!
@@ -322,19 +318,25 @@ class HierarchicalTransformer(nn.Module):
 
         logits = self.output_head(pooled).squeeze(-1)  # (B,)
 
-        return logits
+        return logits, mlm_logits
 
-    def predict_proba(self, x_draft: torch.Tensor, player_pref_vectors: torch.Tensor) -> torch.Tensor:
+    def predict_proba(
+        self,
+        x_draft: torch.Tensor,
+        player_pref_vectors: torch.Tensor,
+        patch_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Compute win probability using sigmoid on logits.
 
         Args:
             x_draft: Draft sequence tensor of shape (B, 24, 4).
             player_pref_vectors: Player preference vectors, shape (B, 10, d_model).
+            patch_ids: Patch ID tensor of shape (B,).
 
         Returns:
             Win probability, shape (B,).
         """
-        logits = self.forward(x_draft, player_pref_vectors, mlm_mode=False)
+        logits, _ = self.forward(x_draft, player_pref_vectors, patch_ids=patch_ids)
         return torch.sigmoid(logits)
 
 
@@ -396,29 +398,23 @@ class MatchNetwork(nn.Module):
         self,
         x_draft: torch.Tensor,
         player_comfort: torch.Tensor,
-        mlm_mode: bool = False,
         patch_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass through the full Match Network.
 
         Args:
             x_draft: Draft sequence tensor of shape (B, 24, 4).
             player_comfort: Player comfort tensor of shape (B, 10, C).
-            mlm_mode: If True, return MLM logits for masked hero prediction.
             patch_ids: Patch ID tensor of shape (B,).
 
         Returns:
-            If mlm_mode is False: Win probability logits, shape (B,).
-            If mlm_mode is True: MLM logits, shape (B, 24, num_heroes + 1).
+            Tuple of:
+                - Win probability logits, shape (B,).
+                - MLM logits, shape (B, 24, num_heroes + 1).
         """
         player_pref_vectors = self.player_network(player_comfort)
-
-        if mlm_mode:
-            logits = self.match_network(x_draft, player_pref_vectors, mlm_mode=True, patch_ids=patch_ids)
-        else:
-            logits = self.match_network(x_draft, player_pref_vectors, mlm_mode=False, patch_ids=patch_ids)
-
-        return logits
+        logits, mlm_logits = self.match_network(x_draft, player_pref_vectors, patch_ids=patch_ids)
+        return logits, mlm_logits
 
     def predict_proba(
         self,
@@ -436,7 +432,7 @@ class MatchNetwork(nn.Module):
         Returns:
             Win probability, shape (B,).
         """
-        logits = self.forward(x_draft, player_comfort, mlm_mode=False, patch_ids=patch_ids)
+        logits, _ = self.forward(x_draft, player_comfort, patch_ids=patch_ids)
         return torch.sigmoid(logits)
 
     @torch.no_grad()

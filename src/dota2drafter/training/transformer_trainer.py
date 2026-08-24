@@ -620,25 +620,7 @@ class TransformerTrainer:
                 if patch_batch is not None:
                     patch_batch = patch_batch.to(self.device)
 
-                # 1. Main win-prediction forward pass
-                logits = self.model(x_batch, player_batch, mlm_mode=False, patch_ids=patch_batch)
-
-                # Label smoothing
-                y_smoothed = y_batch * (1.0 - eps) + (eps / 2.0)
-
-                if self.config.step_loss_gamma > 0.0:
-                    loss_elements = F.binary_cross_entropy_with_logits(
-                        logits, y_smoothed, reduction="none"
-                    )
-                    # t is the active draft length for each sample in the batch
-                    t = torch.sum(torch.sum(torch.abs(x_batch), dim=-1) > 0, dim=-1).float()
-                    weights = (t / 24.0) ** self.config.step_loss_gamma
-                    loss = torch.mean(weights * loss_elements)
-                else:
-                    loss = self.criterion(logits, y_smoothed)
-
-                # 2. Parallel MLM Policy task (to train the priors simultaneously)
-                # Apply 15% random masking to the current batch
+                # Combine tasks via masking
                 mlm_x_batch = x_batch.clone()
                 mlm_labels = torch.full((mlm_x_batch.size(0), mlm_x_batch.size(1)), -1, dtype=torch.long, device=self.device)
 
@@ -654,8 +636,22 @@ class TransformerTrainer:
                     # index 2 is hero_val
                     mlm_labels[mask] = x_batch[mask, 2].long()
 
-                # Forward pass for MLM
-                mlm_logits = self.model(mlm_x_batch, player_batch, mlm_mode=True, patch_ids=patch_batch)
+                # 1 & 2. Unified forward pass for both Win-Prediction & MLM
+                logits, mlm_logits = self.model(mlm_x_batch, player_batch, patch_ids=patch_batch)
+
+                # Label smoothing
+                y_smoothed = y_batch * (1.0 - eps) + (eps / 2.0)
+
+                if self.config.step_loss_gamma > 0.0:
+                    loss_elements = F.binary_cross_entropy_with_logits(
+                        logits, y_smoothed, reduction="none"
+                    )
+                    # t is the active draft length for each sample in the batch
+                    t = torch.sum(torch.sum(torch.abs(x_batch), dim=-1) > 0, dim=-1).float()
+                    weights = (t / 24.0) ** self.config.step_loss_gamma
+                    loss = torch.mean(weights * loss_elements)
+                else:
+                    loss = self.criterion(logits, y_smoothed)
                 
                 mlm_loss = torch.nn.functional.cross_entropy(
                     mlm_logits.view(-1, mlm_logits.size(-1)), 
@@ -744,8 +740,29 @@ class TransformerTrainer:
                 if patch_batch is not None:
                     patch_batch = patch_batch.to(self.device)
 
-                # 1. Forward pass for Value head
-                logits = self.model(x_batch, player_batch, mlm_mode=False, patch_ids=patch_batch)
+                # Apply same 15% random masking rate as training
+                mlm_x_batch = x_batch.clone()
+                mlm_labels = torch.full(
+                    (mlm_x_batch.size(0), mlm_x_batch.size(1)),
+                    -1,
+                    dtype=torch.long,
+                    device=self.device
+                )
+                
+                rand_mask = torch.rand(mlm_x_batch.size(0), mlm_x_batch.size(1), device=self.device) < 0.15
+                # Feature index 2 is hero_val
+                valid_mask = mlm_x_batch[:, :, 2] != -1.0
+                mask = rand_mask & valid_mask
+                
+                mlm_x_batch[mask, 2] = -1.0
+
+                # Only evaluate if there is at least one masked token
+                if mask.any():
+                    # The true label is the hero ID (index 2 in features)
+                    mlm_labels[mask] = x_batch[mask, 2].long()
+
+                # Unified forward pass
+                logits, mlm_logits = self.model(mlm_x_batch, player_batch, patch_ids=patch_batch)
 
                 if self.config.step_loss_gamma > 0.0:
                     loss_elements = F.binary_cross_entropy_with_logits(
@@ -764,29 +781,7 @@ class TransformerTrainer:
                 val_batches += 1
                 
                 # 2. Forward pass for MLM head (Policy accuracy evaluation)
-                # Apply same 15% random masking rate as training
-                mlm_x_batch = x_batch.clone()
-                mlm_labels = torch.full(
-                    (mlm_x_batch.size(0), mlm_x_batch.size(1)),
-                    -1,
-                    dtype=torch.long,
-                    device=self.device
-                )
-                
-                rand_mask = torch.rand(mlm_x_batch.size(0), mlm_x_batch.size(1), device=self.device) < 0.15
-                # Feature index 2 is hero_val
-                valid_mask = mlm_x_batch[:, :, 2] != -1.0
-                mask = rand_mask & valid_mask
-                
-                mlm_x_batch[mask, 2] = -1.0
-                
-                # Only evaluate if there is at least one masked token
                 if mask.any():
-                    # The true label is the hero ID (index 2 in features)
-                    mlm_labels[mask] = x_batch[mask, 2].long()
-                    
-                    mlm_logits = self.model(mlm_x_batch, player_batch, mlm_mode=True, patch_ids=patch_batch)
-                    
                     # Compute Top-1 accuracy
                     preds = mlm_logits.argmax(dim=-1)
                     mlm_correct += (preds[mask] == mlm_labels[mask]).sum().item()

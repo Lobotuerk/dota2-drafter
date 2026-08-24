@@ -142,6 +142,11 @@ def _build_tensor_from_moves(actions: list[DraftMove], num_heroes: int) -> torch
         Tensor of shape (24, 4).
     """
     tensor = torch.zeros((24, 4), dtype=torch.float32)
+    
+    # CRITICAL: Empty/padding steps must have hero_id = -1.0 so the network routes it 
+    # to the dedicated padding embedding (index 127), exactly as it was trained!
+    tensor[:, 2] = -1.0 
+    
     for move in actions:
         tensor[move.step_index, 0] = 1.0 if move.is_pick else 0.0
         tensor[move.step_index, 1] = float(move.team)

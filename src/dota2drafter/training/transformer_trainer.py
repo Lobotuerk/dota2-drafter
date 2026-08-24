@@ -164,7 +164,7 @@ class TrainingConfig:
     val_split: float = 0.2
     device: str = "cpu"
     checkpoint_dir: str = "./checkpoints"
-    patience: int = 10
+    patience: int = 25
     min_delta: float = 1e-4
     label_smoothing_eps: float = 0.15
     augment: int | bool = True
@@ -524,15 +524,19 @@ class TransformerTrainer:
         
         # Filter validation set to ONLY include matches from the latest patch
         latest_patch_id = -1
-        if patch_ids is not None:
-            latest_patch_id = max([p.item() for p in patch_ids])
+        if patch_ids is not None and len(patch_ids) > 0:
+            latest_patch_id = max([p.item() if hasattr(p, 'item') else p for p in patch_ids])
             
         latest_patch_indices = []
         older_patch_indices = []
         
         for i in range(n):
-            if patch_ids is not None and patch_ids[i].item() == latest_patch_id:
-                latest_patch_indices.append(i)
+            if patch_ids is not None:
+                p_val = patch_ids[i].item() if hasattr(patch_ids[i], 'item') else patch_ids[i]
+                if p_val == latest_patch_id:
+                    latest_patch_indices.append(i)
+                else:
+                    older_patch_indices.append(i)
             else:
                 older_patch_indices.append(i)
                 

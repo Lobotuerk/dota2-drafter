@@ -161,6 +161,7 @@ def load_hero_indexer(data_dir: str) -> HeroIndexer:
 def load_data(data_dir: str):
     """Load all match batches from the data directory."""
     x_drafts, y_labels, radiant_players, dire_players = [], [], [], []
+    patch_ids_list = []
     data_path = Path(data_dir)
 
     for pt_file in sorted(data_path.glob("drafts_batch_*.pt")):
@@ -176,14 +177,13 @@ def load_data(data_dir: str):
             radiant_players.append(batch["radiant_players"][i])
             dire_players.append(batch["dire_players"][i])
             
-            # Extract patch IDs if present in the dataset (backward compatibility)
+            # Extract patch IDs if present in the dataset
             if "patch_ids" in batch:
-                if "patch_ids_list" not in locals():
-                    patch_ids_list = []
-                patch_ids_list.append(batch["patch_ids"][i])
+                patch_ids_list.append(batch["patch_ids"][i].item() if hasattr(batch["patch_ids"][i], 'item') else batch["patch_ids"][i])
 
-    if "patch_ids_list" in locals():
+    if patch_ids_list:
         return x_drafts, y_labels, radiant_players, dire_players, patch_ids_list
+        
     return x_drafts, y_labels, radiant_players, dire_players, None
 
 
@@ -279,7 +279,7 @@ def main() -> None:
         device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
         num_patches_dynamic = 30
         if patch_ids is not None:
-            max_p = max([p.item() for p in patch_ids])
+            max_p = max([p.item() if hasattr(p, 'item') else p for p in patch_ids])
             num_patches_dynamic = max(30, max_p + 10)
 
         model = MatchNetwork(
@@ -328,6 +328,7 @@ def main() -> None:
             radiant_players=radiant_players,
             dire_players=dire_players,
             player_comfort_map=player_comfort_map,
+            patch_ids=patch_ids,
         )
 
         console.print(f"[bold green]Training complete. Best epoch: {metrics.best_epoch}, "
@@ -384,7 +385,7 @@ def main() -> None:
         device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
         num_patches_dynamic = 30
         if patch_ids is not None:
-            max_p = max([p.item() for p in patch_ids])
+            max_p = max([p.item() if hasattr(p, 'item') else p for p in patch_ids])
             num_patches_dynamic = max(30, max_p + 10)
 
         model = MatchNetwork(

@@ -178,8 +178,10 @@ class TrainingMetrics:
     val_losses: list[float] = field(default_factory=list)
     val_accuracies: list[float] = field(default_factory=list)
     val_auc_scores: list[float] = field(default_factory=list)
+    val_mlm_accuracies: list[float] = field(default_factory=list)
+    val_mlm_top5_accuracies: list[float] = field(default_factory=list)
     best_epoch: int = 0
-    best_roc_auc: float = float("-inf")
+    best_mlm_top5_acc: float = float("-inf")
 
 
 class PlayerComfortDataset(Dataset):
@@ -551,7 +553,7 @@ class TransformerTrainer:
         # The user wants Val AUC to ONLY reflect the latest patch.
         # However, we MUST leave the majority of the latest patch in the training set so the model can actually learn the current meta!
         # We will take 20% of the latest patch for validation, and put the remaining 80% + ALL older matches into training.
-        val_size = int(len(latest_patch_indices) * 0.2)
+        val_size = int(len(latest_patch_indices) * 0.4)
         val_size = max(1, val_size) if latest_patch_indices else 0
         
         val_indices = latest_patch_indices[:val_size]
@@ -638,16 +640,20 @@ class TransformerTrainer:
                 # 2. Parallel MLM Policy task (to train the priors simultaneously)
                 # Apply 15% random masking to the current batch
                 mlm_x_batch = x_batch.clone()
-                mlm_labels = mlm_x_batch[:, :, 2].clone().long()
-                
+                mlm_labels = torch.full((mlm_x_batch.size(0), mlm_x_batch.size(1)), -1, dtype=torch.long, device=self.device)
+
                 # Create mask (only mask valid heroes, not -1 padding)
                 rand_mask = torch.rand(mlm_x_batch.shape[:2], device=self.device) < 0.15
                 valid_mask = mlm_x_batch[:, :, 2] != -1.0
                 mask = rand_mask & valid_mask
-                
+
                 mlm_x_batch[mask, 2] = -1.0
-                mlm_labels[~mask] = -1
-                
+
+                if mask.any():
+                    # x_draft tensor shape is (B, 24, 4)
+                    # index 2 is hero_val
+                    mlm_labels[mask] = x_batch[mask, 2].long()
+
                 # Forward pass for MLM
                 mlm_logits = self.model(mlm_x_batch, player_batch, mlm_mode=True, patch_ids=patch_batch)
                 
@@ -675,19 +681,23 @@ class TransformerTrainer:
             self.metrics.val_losses.append(val_loss)
             self.metrics.val_accuracies.append(val_metrics["accuracy"])
             self.metrics.val_auc_scores.append(val_metrics["roc_auc"])
+            self.metrics.val_mlm_accuracies.append(val_metrics["mlm_accuracy"])
+            self.metrics.val_mlm_top5_accuracies.append(val_metrics["mlm_top5_accuracy"])
 
             logger.info(
-                "Epoch %d/%d - Train Loss: %.4f - Val Loss: %.4f - Val Acc: %.4f - Val AUC: %.4f",
+                "Epoch %d/%d - Train Loss: %.4f - Val Loss: %.4f - Val Acc: %.4f - Val AUC: %.4f - Val MLM: %.4f - Top5: %.4f",
                 epoch,
                 self.config.num_epochs,
                 avg_train_loss,
                 val_loss,
                 val_metrics["accuracy"],
                 val_metrics["roc_auc"],
+                val_metrics["mlm_accuracy"],
+                val_metrics["mlm_top5_accuracy"],
             )
 
-            if val_metrics["roc_auc"] > self.metrics.best_roc_auc - self.config.min_delta:
-                self.metrics.best_roc_auc = val_metrics["roc_auc"]
+            if val_metrics["mlm_top5_accuracy"] > self.metrics.best_mlm_top5_acc + self.config.min_delta:
+                self.metrics.best_mlm_top5_acc = val_metrics["mlm_top5_accuracy"]
                 self.metrics.best_epoch = epoch
                 patience_counter = 0
 
@@ -695,12 +705,12 @@ class TransformerTrainer:
                     "model_state": self.model.state_dict(),
                     "optimizer_state": self.optimizer.state_dict(),
                     "epoch": epoch,
-                    "roc_auc": val_metrics["roc_auc"],
+                    "mlm_top5_accuracy": val_metrics["mlm_top5_accuracy"],
                 }
 
                 checkpoint_path = os.path.join(self.config.checkpoint_dir, "best_model.pt")
                 torch.save(best_state, checkpoint_path)
-                logger.info("  [checkpoint] Saved best model at epoch %d (Val AUC=%.4f)", epoch, val_metrics["roc_auc"])
+                logger.info("  [checkpoint] Saved best model at epoch %d (Val Top5=%.4f)", epoch, val_metrics["mlm_top5_accuracy"])
             else:
                 patience_counter += 1
                 if patience_counter >= self.config.patience:
@@ -718,6 +728,10 @@ class TransformerTrainer:
         all_preds: list[torch.Tensor] = []
         all_targets: list[torch.Tensor] = []
         val_batches = 0
+        
+        mlm_correct = 0
+        mlm_top5_correct = 0
+        mlm_total = 0
 
         with torch.no_grad():
             for batch_data in tqdm(val_loader, desc="Validation"):
@@ -730,6 +744,7 @@ class TransformerTrainer:
                 if patch_batch is not None:
                     patch_batch = patch_batch.to(self.device)
 
+                # 1. Forward pass for Value head
                 logits = self.model(x_batch, player_batch, mlm_mode=False, patch_ids=patch_batch)
 
                 if self.config.step_loss_gamma > 0.0:
@@ -747,8 +762,45 @@ class TransformerTrainer:
                 all_preds.append(logits.cpu())
                 all_targets.append(y_batch.cpu())
                 val_batches += 1
+                
+                # 2. Forward pass for MLM head (Policy accuracy evaluation)
+                # Apply same 15% random masking rate as training
+                mlm_x_batch = x_batch.clone()
+                mlm_labels = torch.full(
+                    (mlm_x_batch.size(0), mlm_x_batch.size(1)),
+                    -1,
+                    dtype=torch.long,
+                    device=self.device
+                )
+                
+                rand_mask = torch.rand(mlm_x_batch.size(0), mlm_x_batch.size(1), device=self.device) < 0.15
+                # Feature index 2 is hero_val
+                valid_mask = mlm_x_batch[:, :, 2] != -1.0
+                mask = rand_mask & valid_mask
+                
+                mlm_x_batch[mask, 2] = -1.0
+                
+                # Only evaluate if there is at least one masked token
+                if mask.any():
+                    # The true label is the hero ID (index 2 in features)
+                    mlm_labels[mask] = x_batch[mask, 2].long()
+                    
+                    mlm_logits = self.model(mlm_x_batch, player_batch, mlm_mode=True, patch_ids=patch_batch)
+                    
+                    # Compute Top-1 accuracy
+                    preds = mlm_logits.argmax(dim=-1)
+                    mlm_correct += (preds[mask] == mlm_labels[mask]).sum().item()
+                    
+                    # Compute Top-5 accuracy
+                    top5_preds = mlm_logits.topk(k=5, dim=-1).indices
+                    mlm_labels_expanded = mlm_labels[mask].unsqueeze(-1)
+                    mlm_top5_correct += (top5_preds[mask] == mlm_labels_expanded).any(dim=-1).sum().item()
+                    
+                    mlm_total += mask.sum().item()
 
         avg_val_loss = val_loss / max(val_batches, 1)
+        mlm_accuracy = (mlm_correct / mlm_total) if mlm_total > 0 else 0.0
+        mlm_top5_accuracy = (mlm_top5_correct / mlm_total) if mlm_total > 0 else 0.0
 
         if all_preds:
             all_preds_tensor = torch.cat(all_preds)
@@ -756,6 +808,9 @@ class TransformerTrainer:
             metrics = compute_metrics(all_preds_tensor, all_targets_tensor)
         else:
             metrics = {"bce": 0.0, "accuracy": 0.0, "roc_auc": 0.5}
+            
+        metrics["mlm_accuracy"] = mlm_accuracy
+        metrics["mlm_top5_accuracy"] = mlm_top5_accuracy
 
         return avg_val_loss, metrics
 
@@ -773,8 +828,10 @@ class TransformerTrainer:
                 "val_losses": self.metrics.val_losses,
                 "val_accuracies": self.metrics.val_accuracies,
                 "val_auc_scores": self.metrics.val_auc_scores,
+                "val_mlm_accuracies": self.metrics.val_mlm_accuracies,
+                "val_mlm_top5_accuracies": self.metrics.val_mlm_top5_accuracies,
                 "best_epoch": self.metrics.best_epoch,
-                "best_roc_auc": self.metrics.best_roc_auc,
+                "best_mlm_top5_acc": self.metrics.best_mlm_top5_acc,
             },
         }
         torch.save(checkpoint, path)
@@ -792,7 +849,7 @@ class TransformerTrainer:
         import os
         if not os.path.exists(path):
             raise FileNotFoundError(f"Checkpoint not found at {path}")
-            
+
         checkpoint = torch.load(path, weights_only=True)
         self.model.load_state_dict(checkpoint["model_state"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state"])
@@ -803,8 +860,10 @@ class TransformerTrainer:
             self.metrics.val_losses = m.get("val_losses", [])
             self.metrics.val_accuracies = m.get("val_accuracies", [])
             self.metrics.val_auc_scores = m.get("val_auc_scores", [])
+            self.metrics.val_mlm_accuracies = m.get("val_mlm_accuracies", [])
+            self.metrics.val_mlm_top5_accuracies = m.get("val_mlm_top5_accuracies", [])
             self.metrics.best_epoch = m.get("best_epoch", 0)
-            self.metrics.best_roc_auc = m.get("best_roc_auc", float("inf"))
+            self.metrics.best_mlm_top5_acc = m.get("best_mlm_top5_acc", float("-inf"))
 
         logger.info("Loaded checkpoint from %s", path)
         return checkpoint

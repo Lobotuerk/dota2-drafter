@@ -131,8 +131,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--augment",
-        type=str,
-        default="true",
+        type=float,
+        default="0.0",
         help="Augmentation setting: 'true' (all 448), 'false' (none), or an integer representing the maximum number of variations allowed per original match (e.g. 5, 10, 20). (default: 'true')",
     )
     parser.add_argument(
@@ -295,15 +295,18 @@ def main() -> None:
         ).to(device)
 
         # Parse augment argument
-        if args.augment.lower() == "true":
-            augment_val = True
-        elif args.augment.lower() == "false":
-            augment_val = False
+        if isinstance(args.augment, str):
+            if args.augment.lower() == "true":
+                augment_val = True
+            elif args.augment.lower() == "false":
+                augment_val = False
+            else:
+                try:
+                    augment_val = int(args.augment)
+                except ValueError:
+                    augment_val = False
         else:
-            try:
-                augment_val = int(args.augment)
-            except ValueError:
-                augment_val = True  # Default to True on invalid string
+            augment_val = args.augment
 
         config = TrainingConfig(
             learning_rate=args.learning_rate,
@@ -332,7 +335,7 @@ def main() -> None:
         )
 
         console.print(f"[bold green]Training complete. Best epoch: {metrics.best_epoch}, "
-                      f"Best AUC: {metrics.best_roc_auc:.4f}[/bold green]")
+                      f"Best Top-5 MLM Accuracy: {metrics.best_mlm_top5_acc:.4f}[/bold green]")
 
     elif args.mode == "predict":
         checkpoint_dir = Path(args.checkpoint_dir)

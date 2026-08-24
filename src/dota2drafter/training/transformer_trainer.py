@@ -467,7 +467,7 @@ class TransformerTrainer:
             backbone_params = []
             head_params = []
             for name, param in self.model.named_parameters():
-                if "output_head" in name or "mlm_head" in name:
+                if "set_transformer_head" in name or "mlm_head" in name:
                     head_params.append(param)
                 else:
                     backbone_params.append(param)
@@ -660,7 +660,7 @@ class TransformerTrainer:
                 )
                 
                 # Combine losses (AlphaZero-style dual objective)
-                total_loss = loss + (0.5 * mlm_loss)
+                total_loss = loss + (1.0 * mlm_loss)
 
                 self.optimizer.zero_grad()
                 total_loss.backward()

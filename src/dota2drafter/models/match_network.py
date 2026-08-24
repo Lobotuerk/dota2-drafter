@@ -42,6 +42,113 @@ class SinusoidalPositionalEncoding(nn.Module):
         return x + self.pe[:, : x.size(1), :]
 
 
+class SetTransformerHead(nn.Module):
+    """Set Transformer Head for permutation-invariant win probability estimation.
+
+    Replaces the pooled output_head with a Set Transformer that models
+    team synergies (SAB), cross-team counters (cross-set attention), and
+    variable-length set pooling (PMA).
+    """
+
+    def __init__(self, d_model: int = 128, dim_feedforward: int = 256, dropout: float = 0.1) -> None:
+        """Initialize the Set Transformer Head.
+
+        Args:
+            d_model: Transformer embedding dimension.
+            dim_feedforward: Feedforward dimension in the value MLP.
+            dropout: Dropout rate.
+        """
+        super().__init__()
+        self.d_model = d_model
+
+        # SAB: intra-team synergy attention
+        self.sab = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
+
+        # Cross-set attention (both directions)
+        self.r2d_attn = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
+        self.d2r_attn = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
+
+        # PMA seeds (k=1 per team)
+        self.seed_r = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+        self.seed_d = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+
+        # Value MLP
+        self.value_mlp = nn.Sequential(
+            nn.Linear(2 * d_model, dim_feedforward),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim_feedforward, 1),
+        )
+
+    def forward(
+        self,
+        hero_embeddings: torch.Tensor,
+        x_draft: torch.Tensor,
+    ) -> torch.Tensor:
+        """Forward pass through the Set Transformer Head.
+
+        Args:
+            hero_embeddings: Pure hero embeddings from JointEmbedding, shape (B, seq_len, d_model).
+            x_draft: Raw draft sequence tensor of shape (B, seq_len, 4).
+
+        Returns:
+            Win probability logits, shape (B,).
+        """
+        batch_size = x_draft.size(0)
+
+        # --- Set Construction ---
+        action_mask = x_draft[:, :, 0] == 1.0
+        hero_valid = x_draft[:, :, 2] != -1.0
+        pick_mask = action_mask & hero_valid
+        team_mask = x_draft[:, :, 1] == 0.0
+
+        r_mask = pick_mask & team_mask
+        d_mask = pick_mask & (~team_mask)
+
+        # Zero-pad to max 5 heroes per team
+        max_heroes = 5
+        r_embeds = torch.zeros(batch_size, max_heroes, self.d_model, device=hero_embeddings.device)
+        d_embeds = torch.zeros(batch_size, max_heroes, self.d_model, device=hero_embeddings.device)
+        r_pad_mask = torch.ones(batch_size, max_heroes, dtype=torch.bool, device=hero_embeddings.device)
+        d_pad_mask = torch.ones(batch_size, max_heroes, dtype=torch.bool, device=hero_embeddings.device)
+
+        for i in range(batch_size):
+            r_indices = torch.where(r_mask[i])[0]
+            d_indices = torch.where(d_mask[i])[0]
+            r_count = min(len(r_indices), max_heroes)
+            d_count = min(len(d_indices), max_heroes)
+            if r_count > 0:
+                r_embeds[i, :r_count] = hero_embeddings[i, r_indices[:r_count]]
+                r_pad_mask[i, :r_count] = False
+            if d_count > 0:
+                d_embeds[i, :d_count] = hero_embeddings[i, d_indices[:d_count]]
+                d_pad_mask[i, :d_count] = False
+
+        # --- Set Attention Block (SAB) ---
+        r_syn, _ = self.sab(r_embeds, r_embeds, r_embeds, key_padding_mask=r_pad_mask)
+        d_syn, _ = self.sab(d_embeds, d_embeds, d_embeds, key_padding_mask=d_pad_mask)
+
+        # --- Cross-Set Attention (symmetric) ---
+        r_cross, _ = self.r2d_attn(r_syn, d_syn, d_syn, key_padding_mask=d_pad_mask)
+        d_cross, _ = self.d2r_attn(d_syn, r_syn, r_syn, key_padding_mask=r_pad_mask)
+
+        # --- Pooling by Multihead Attention (PMA) ---
+        seed_r = self.seed_r.expand(batch_size, 1, self.d_model)
+        seed_d = self.seed_d.expand(batch_size, 1, self.d_model)
+
+        v_r, _ = self.sab(seed_r, r_cross, r_cross, key_padding_mask=r_pad_mask)
+        v_d, _ = self.sab(seed_d, d_cross, d_cross, key_padding_mask=d_pad_mask)
+
+        v_r = v_r.squeeze(1)  # (B, d_model)
+        v_d = v_d.squeeze(1)  # (B, d_model)
+
+        # --- Value MLP ---
+        concat = torch.cat([v_r, v_d], dim=-1)  # (B, 2 * d_model)
+        logits = self.value_mlp(concat).squeeze(-1)  # (B,)
+
+        return logits
+
+
 class JointEmbedding(nn.Module):
     """Computes the joint embedding z_t for each draft action a_t = (h_t, p_t, c_t, o_t).
 
@@ -87,6 +194,43 @@ class JointEmbedding(nn.Module):
 
         # Positional encoding
         self.pos_enc = SinusoidalPositionalEncoding(d_model, max_len=24)
+
+    def set_attention_block(self, x: torch.Tensor, key_padding_mask: torch.Tensor | None = None) -> torch.Tensor:
+        """Set Attention Block (SAB) - permutation-equivariant self-attention without positional encodings.
+
+        Args:
+            x: Input tensor of shape (B, N, d_model).
+            key_padding_mask: Boolean tensor of shape (B, N), True for padded positions.
+
+        Returns:
+            Attention output of shape (B, N, d_model).
+        """
+        attn = nn.MultiheadAttention(self.d_model, num_heads=4, batch_first=True, dropout=0.1)
+        return attn(x, x, x, key_padding_mask=key_padding_mask)[0]
+
+    def get_pure_hero_embeddings(
+        self, hero_indices: torch.Tensor, patch_ids: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Extract pure hero embeddings without positional/step/action/team tokens.
+
+        Args:
+            hero_indices: Hero index tensor of shape (B, seq_len).
+            patch_ids: Optional patch ID tensor of shape (B,) for FiLM conditioning.
+
+        Returns:
+            Pure hero embeddings of shape (B, seq_len, d_model).
+        """
+        hero_embeds = self.h_gnn[hero_indices.long()]  # (B, seq_len, d_model)
+        hero_projected = self.project(hero_embeds)  # (B, seq_len, d_model)
+
+        if patch_ids is not None:
+            patch_ids_clamped = torch.clamp(patch_ids, 0, self.w_patch.num_embeddings - 1)
+            e_patch = self.w_patch(patch_ids_clamped)  # (B, d_model)
+            gamma = self.film_gamma(e_patch).unsqueeze(1)  # (B, 1, d_model)
+            beta = self.film_beta(e_patch).unsqueeze(1)  # (B, 1, d_model)
+            hero_projected = gamma * hero_projected + beta
+
+        return hero_projected
 
     @torch.no_grad()
     def fuse_embeddings_for_inference(self):
@@ -240,12 +384,11 @@ class HierarchicalTransformer(nn.Module):
         )
         self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
 
-        # Output head: masked global average pooling + MLP + sigmoid
-        self.output_head = nn.Sequential(
-            nn.Linear(d_model, dim_feedforward),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(dim_feedforward, 1),
+        # Set Transformer head for permutation-invariant value estimation
+        self.set_transformer_head = SetTransformerHead(
+            d_model=d_model,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
         )
 
         # MLM head for Masked Language Modeling pre-training
@@ -305,18 +448,11 @@ class HierarchicalTransformer(nn.Module):
         # MLM mode: return per-step hero prediction logits
         mlm_logits = self.mlm_head(decoder_output)
 
-        # Win prediction mode: masked global average pooling + output head
-        # We must pool over BOTH picks and bans to allow bans to influence win probability!
-        # x_draft[:, :, 2] holds the hero_val. -1.0 means it's an empty/padding step.
-        hero_vals = x_draft[:, :, 2]
-        valid_mask = hero_vals != -1.0
-        valid_mask = valid_mask.unsqueeze(-1).float()  # (B, 24, 1)
-
-        masked_output = decoder_output * valid_mask  # (B, 24, d_model)
-        sum_mask = valid_mask.sum(dim=1, keepdim=True).clamp(min=1).squeeze(-1)  # (B, 1)
-        pooled = masked_output.sum(dim=1) / sum_mask  # (B, d_model)
-
-        logits = self.output_head(pooled).squeeze(-1)  # (B,)
+        # Win prediction mode: Set Transformer Head
+        # Extract pure hero embeddings (no positional/step/action/team tokens)
+        hero_indices = x_draft[:, :, 2]
+        pure_hero_embeds = self.joint_embedding.get_pure_hero_embeddings(hero_indices, patch_ids)
+        logits = self.set_transformer_head(pure_hero_embeds, x_draft)
 
         return logits, mlm_logits
 

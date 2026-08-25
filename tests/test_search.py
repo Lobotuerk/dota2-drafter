@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from dota2drafter.search.mcts_agent import Dota2DraftAgent
-from dota2drafter.search.state import DRAFT_SCHEDULE, DraftMove, DraftState
+from dota2drafter.search.state import DRAFT_SCHEDULE, DraftMove, DraftState, _ZERO_STEP
 
 
 def test_draft_move_inherits_from_pymcts_move():
@@ -683,5 +683,13 @@ def test_draft_state_evaluate_batch_filtering():
     expected_prior = 1.0 / len(ban_valid_moves)
     for p in ban_priors:
         assert pytest.approx(p, 1e-10) == expected_prior
+
+
+def test_zero_step_padding_value():
+    """Verify that _ZERO_STEP has hero ID set to -1.0 and other elements set to 0.0."""
+    assert _ZERO_STEP[2] == -1.0
+    assert _ZERO_STEP[0] == 0.0
+    assert _ZERO_STEP[1] == 0.0
+    assert _ZERO_STEP[3] == 0.0
 
 

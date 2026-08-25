@@ -113,8 +113,9 @@ def test_apply_prefix_truncation():
 
         # Verify zeroing out beyond truncation point
         if t < 24:
-            # Everything from index t to 23 should be 0.0
-            assert torch.all(x_truncated[t:, :] == 0.0)
+            # Column 2 must be -1.0, other columns must be 0.0
+            assert torch.all(x_truncated[t:, 2] == -1.0)
+            assert torch.all(x_truncated[t:, [0, 1, 3]] == 0.0)
             # Before t should remain intact
             assert torch.all(x_truncated[:t, :] == x_draft[:t, :])
         else:

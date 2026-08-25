@@ -52,6 +52,7 @@ def apply_prefix_truncation(
         x_truncated = x_draft.clone()
         if t < 24:
             x_truncated[t:, :] = 0.0
+            x_truncated[t:, 2] = -1.0  # Assign explicit hero padding sentinel
 
         comfort_rows: list[torch.Tensor] = []
         comfort_map = player_comfort_map or {}
@@ -272,6 +273,7 @@ class PlayerComfortDataset(Dataset):
                     for t in truncation_points:
                         x_truncated = x_permuted.clone()
                         x_truncated[t:, :] = 0.0
+                        x_truncated[t:, 2] = -1.0  # Assign explicit hero padding sentinel
                         match_augmentations.append((x_truncated, player_comfort, y_label, patch_id))
                 
                 self.all_augmented_samples.append(match_augmentations)

@@ -51,7 +51,7 @@ DRAFT_SCHEDULE: list[tuple[str, int]] = [
 ]
 
 # Zeroed dummy step for padding rollouts to 24 steps.
-_ZERO_STEP = torch.tensor([0.0, 0.0, 0.0, 0.0], dtype=torch.float32)
+_ZERO_STEP = torch.tensor([0.0, 0.0, -1.0, 0.0], dtype=torch.float32)  # Fix rollout padding
 
 
 class DraftMove(pymcts.MCTS_move):

@@ -532,11 +532,12 @@ def test_draft_state_evaluate_batch():
     states = [state_radiant, state_dire, terminal_state]
     results = state_radiant.evaluate_batch(states)
 
-    # predict_proba called exactly once
+    # forward() called exactly once for non-terminal states (batch size 2)
+    # predict_proba called separately for terminal state
     assert len(mock_model.calls) == 1
     batch_shape, comfort_shape = mock_model.calls[0]
-    assert batch_shape == (3, 24, 4)
-    assert comfort_shape == (3, 10, 64)
+    assert batch_shape == (2, 24, 4)
+    assert comfort_shape == (2, 10, 64)
 
     # Return length and order match
     assert len(results) == 3
@@ -549,7 +550,7 @@ def test_draft_state_evaluate_batch():
 
     assert pytest.approx(results[0][0], 1e-6) == val_rad  # radiant active
     assert pytest.approx(results[1][0], 1e-6) == 1.0 - val_rad  # dire active
-    assert pytest.approx(results[2][0], 1e-6) == val_rad  # terminal state, radiant active
+    assert pytest.approx(results[2][0], 1e-6) == 0.7  # terminal state, radiant active (from predict_proba)
 
     # Non-terminal states: priors non-empty, len == max_candidates, sum ~ 1.0
     assert len(results[0][1]) == 120  # Evaluated batch returns all priors, but zeroes out non-top-k
@@ -564,7 +565,7 @@ def test_draft_state_evaluate_batch():
 
 
 def test_draft_state_rollout_ban_vs_pick():
-    """Verify rollout returns 0.0 for ban states without calling the model."""
+    """Verify rollout calls the model for both ban and pick states."""
     mock_model = MagicMock()
     mock_model.predict_proba.return_value = torch.tensor([0.75])
 
@@ -595,10 +596,10 @@ def test_draft_state_rollout_ban_vs_pick():
         active_team=0,
     )
 
-    # Ban state should return 0.0 without calling the model
+    # Ban state should call the model and return win probability
     mock_model.reset_mock()
-    assert ban_state.rollout() == 0.0
-    mock_model.predict_proba.assert_not_called()
+    assert ban_state.rollout() == 0.75
+    mock_model.predict_proba.assert_called()
 
     # Pick state should call the model and return win probability
     assert pick_state.rollout() == 0.75
@@ -608,8 +609,8 @@ def test_draft_state_rollout_ban_vs_pick():
     assert root_state.rollout() == 0.75
 
 
-def test_draft_state_evaluate_batch_filtering():
-    """Verify evaluate_batch excludes ban states from neural network forward pass."""
+def test_draft_state_evaluate_batch_unified():
+    """Verify evaluate_batch processes all states in a unified batch."""
 
     class _RecordingMock:
         def __init__(self):
@@ -654,7 +655,7 @@ def test_draft_state_evaluate_batch_filtering():
         initial_actions=[ban_move],
     )
 
-    # Root state: no actions (should be treated as pick state)
+    # Root state: no actions (should be treated as non-terminal)
     root_state = DraftState(
         model=mock_model,
         comfort_matrix=comfort_matrix,
@@ -665,24 +666,24 @@ def test_draft_state_evaluate_batch_filtering():
     mock_model.forward_calls.clear()
     results = pick_state.evaluate_batch(states)
 
-    # Neural network forward pass called exactly once with batch size 2
-    # (pick_state + root_state, NOT ban_state)
+    # Neural network forward pass called exactly once with batch size 3
+    # (all non-terminal states processed together)
     assert len(mock_model.forward_calls) == 1
-    assert mock_model.forward_calls[0] == 2
+    assert mock_model.forward_calls[0] == 3
 
     # Results length matches input length
     assert len(results) == 3
 
-    # Ban state returns value 0.0
-    assert results[1][0] == 0.0
+    # Ban state returns win probability from the neural network (not 0.0)
+    val_rad = torch.sigmoid(torch.tensor(0.5)).item()
+    assert pytest.approx(results[1][0], 1e-6) == val_rad
 
-    # Ban state priors are uniform over valid moves
+    # Ban state priors are derived from mlm_logits (not uniform)
     ban_valid_moves = ban_state.actions_to_try()
     ban_priors = results[1][1]
     assert len(ban_priors) == len(ban_valid_moves)
-    expected_prior = 1.0 / len(ban_valid_moves)
-    for p in ban_priors:
-        assert pytest.approx(p, 1e-10) == expected_prior
+    # Priors should have some variation (not all equal like uniform)
+    assert len(set(ban_priors)) > 1
 
 
 def test_zero_step_padding_value():

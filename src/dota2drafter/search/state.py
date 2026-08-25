@@ -295,10 +295,6 @@ class DraftState(pymcts.MCTS_state):
         Returns:
             Float win probability in [0, 1].
         """
-        # Exclude ban states from neural network evaluation (return neutral 0.0)
-        if len(self.actions) > 0 and not self.actions[-1].is_pick:
-            return 0.0
-
         tensor = _build_tensor_from_moves(self.actions, self._num_heroes)
 
         # Pad to 24 steps if needed
@@ -366,31 +362,47 @@ class DraftState(pymcts.MCTS_state):
         device = self._resolve_model_device()
         self.model.eval()
 
-        # Partition states into pick states (root or last action is pick) and ban states
-        pick_indices = []
-        ban_indices = []
-        for i, s in enumerate(states):
-            if len(s.actions) > 0 and not s.actions[-1].is_pick:
-                ban_indices.append(i)
-            else:
-                pick_indices.append(i)
-
         # Initialize results container
         results = [None] * M
 
-        # 1. Evaluate Pick States using the Neural Network
-        if pick_indices:
-            pick_states = [states[idx] for idx in pick_indices]
-            num_picks = len(pick_states)
+        # Separate terminal and non-terminal states
+        non_terminal_indices = []
+        terminal_indices = []
+        for i, s in enumerate(states):
+            if s.is_terminal():
+                terminal_indices.append(i)
+            else:
+                non_terminal_indices.append(i)
 
-            draft_tensors = [_build_tensor_from_moves(s.actions, K) for s in pick_states]
+        # Handle terminal states: compute win probability directly
+        for idx in terminal_indices:
+            s = states[idx]
+            tensor = _build_tensor_from_moves(s.actions, K)
+            if tensor.shape[0] < 24:
+                padding = torch.stack([_ZERO_STEP.clone() for _ in range(24 - tensor.shape[0])])
+                tensor = torch.cat([tensor, padding], dim=0)
+            tensor = tensor.unsqueeze(0).to(device)
+            comfort = self.comfort_matrix.unsqueeze(0).to(device)
+            with torch.no_grad():
+                win_prob = self.model.predict_proba(tensor, comfort)
+            radiant = win_prob.item()
+            value = radiant if s.active_team == 0 else 1.0 - radiant
+            s._cached_priors = []
+            results[idx] = (value, [])
+
+        # Process all non-terminal states in a unified batch
+        if non_terminal_indices:
+            non_terminal_states = [states[idx] for idx in non_terminal_indices]
+            num_states = len(non_terminal_states)
+
+            draft_tensors = [_build_tensor_from_moves(s.actions, K) for s in non_terminal_states]
             base_batch = torch.stack(draft_tensors, dim=0).to(device)
-            comfort_base = self.comfort_matrix.unsqueeze(0).expand(num_picks, -1, -1).to(device)
+            comfort_base = self.comfort_matrix.unsqueeze(0).expand(num_states, -1, -1).to(device)
 
-            valid_mask = torch.ones((num_picks, K), dtype=torch.bool, device=device)
-            step_indices = [len(s.actions) for s in pick_states]
+            valid_mask = torch.ones((num_states, K), dtype=torch.bool, device=device)
+            step_indices = [len(s.actions) for s in non_terminal_states]
 
-            for i, s in enumerate(pick_states):
+            for i, s in enumerate(non_terminal_states):
                 step_idx = step_indices[i]
                 if step_idx >= 24:
                     valid_mask[i, :] = False
@@ -404,8 +416,8 @@ class DraftState(pymcts.MCTS_state):
                 logits, mlm_logits = self.model(base_batch, comfort_base)
                 win_probs = torch.sigmoid(logits)
 
-                policy_logits = torch.zeros(num_picks, K, device=device)
-                for i, s in enumerate(pick_states):
+                policy_logits = torch.zeros(num_states, K, device=device)
+                for i, s in enumerate(non_terminal_states):
                     step_idx = step_indices[i]
                     if step_idx < 24:
                         policy_logits[i] = mlm_logits[i, step_idx, 1:K+1]
@@ -414,11 +426,11 @@ class DraftState(pymcts.MCTS_state):
             sort_scores = sort_scores.masked_fill(~valid_mask, float('-inf'))
             active_scores = sort_scores.clone()
 
-            max_c = min(s.max_candidates for s in pick_states) if pick_states else 20
+            max_c = min(s.max_candidates for s in non_terminal_states) if non_terminal_states else 20
             max_c = min(max_c, K)
 
             _, top_indices = torch.topk(sort_scores, k=max_c, dim=1)
-            topk_mask = torch.zeros((num_picks, K), dtype=torch.bool, device=device)
+            topk_mask = torch.zeros((num_states, K), dtype=torch.bool, device=device)
             topk_mask.scatter_(1, top_indices, True)
 
             active_scores = active_scores.masked_fill(~topk_mask, float('-inf'))
@@ -435,16 +447,10 @@ class DraftState(pymcts.MCTS_state):
             win_probs_cpu = win_probs.cpu().tolist()
             priors_cpu = priors_tensor.cpu().tolist()
 
-            for i, idx in enumerate(pick_indices):
+            for i, idx in enumerate(non_terminal_indices):
                 s = states[idx]
                 radiant = win_probs_cpu[i]
                 value = radiant if s.active_team == 0 else 1.0 - radiant
-
-                step_idx = step_indices[i]
-                if step_idx >= 24:
-                    s._cached_priors = []
-                    results[idx] = (value, [])
-                    continue
 
                 valid_priors = []
                 valid_moves = s.actions_to_try()
@@ -455,27 +461,6 @@ class DraftState(pymcts.MCTS_state):
 
                 s._cached_priors = valid_priors
                 results[idx] = (value, valid_priors)
-
-        # 2. Assign Neutral Values and Uniform Priors to Ban States
-        for idx in ban_indices:
-            s = states[idx]
-            value = 0.0
-
-            step_idx = len(s.actions)
-            if step_idx >= 24:
-                s._cached_priors = []
-                results[idx] = (value, [])
-                continue
-
-            valid_moves = s.actions_to_try()
-            if not valid_moves:
-                valid_priors = []
-            else:
-                p = 1.0 / len(valid_moves)
-                valid_priors = [p] * len(valid_moves)
-
-            s._cached_priors = valid_priors
-            results[idx] = (value, valid_priors)
 
         return results
 

@@ -456,10 +456,8 @@ class HierarchicalTransformer(nn.Module):
         causal_mask = causal_mask.bool()
 
         # Create a pad mask where True indicates padded/ignored tokens.
-        # A token is padded if its step_index is 0.0, except for step 0.
-        pad_mask = (x_draft[:, :, 3] == 0.0)
-        if pad_mask.size(1) > 0:
-            pad_mask[:, 0] = False
+        # A token is padded if its hero index is -1.0 (no hero selected).
+        pad_mask = (x_draft[:, :, 2] == -1.0)
         pad_mask = pad_mask.to(tgt.device)
 
         # Run through transformer decoder

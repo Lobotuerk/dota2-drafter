@@ -275,8 +275,9 @@ def test_hierarchical_transformer_tgt_key_padding_mask():
         x_draft[:, t, 3] = float(t)
 
     # 2. Truncate sample 0 at step 12
-    # In sample 0, steps 12..23 are set to 0.0
+    # In sample 0, steps 12..23 are set to 0.0, and hero_val (column 2) is set to -1.0
     x_draft[0, 12:, :] = 0.0
+    x_draft[0, 12:, 2] = -1.0
 
     player_pref_vectors = torch.randn(batch_size, 10, d_model)
 
@@ -314,4 +315,65 @@ def test_hierarchical_transformer_tgt_key_padding_mask():
 
     # Sample 1 (non-truncated) should have all steps unmasked (False)
     assert torch.all(pad_mask[1, :] == False)
+
+
+def test_hierarchical_transformer_step0_unmasking():
+    """Test that step 0 is correctly masked/unmasked based on hero index sentinel."""
+    d_model = 64
+    nhead = 4
+    num_layers = 2
+    num_heroes = 120
+    batch_size = 2
+
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    model = HierarchicalTransformer(
+        d_model=d_model,
+        nhead=nhead,
+        num_layers=num_layers,
+        dim_feedforward=128,
+        dropout=0.0,
+        num_heroes=num_heroes,
+        h_gnn=h_gnn,
+    )
+
+    # Case A: Genuinely empty draft (all hero indices are -1.0)
+    x_draft_empty = torch.zeros(1, 24, 4)
+    x_draft_empty[:, :, 2] = -1.0  # All hero indices are -1.0 (unmade)
+
+    # Case B: Valid draft starting with step 0 made (hero_val >= 0), steps 1..23 unmade
+    x_draft_step0 = torch.zeros(1, 24, 4)
+    x_draft_step0[:, 0, 2] = 5.0   # Step 0 has a valid hero
+    x_draft_step0[:, 1:, 2] = -1.0  # Steps 1..23 are unmade
+
+    # Mock the decoder call to inspect the arguments
+    class MockDecoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.called = False
+            self.call_kwargs = {}
+
+        def forward(self, tgt, memory, tgt_mask=None, tgt_key_padding_mask=None):
+            self.called = True
+            self.call_kwargs = {
+                "tgt_key_padding_mask": tgt_key_padding_mask,
+            }
+            return torch.zeros_like(tgt)
+
+    player_pref_vectors = torch.randn(1, 10, d_model)
+
+    # Test Case A: Empty draft - step 0 should be masked (True)
+    mock_decoder_a = MockDecoder()
+    model.transformer_decoder = mock_decoder_a
+    _ = model(x_draft_empty, player_pref_vectors)
+    pad_mask_a = mock_decoder_a.call_kwargs["tgt_key_padding_mask"]
+    assert torch.all(pad_mask_a == True), "Empty draft: all steps should be masked"
+
+    # Test Case B: Step 0 valid - step 0 should be unmasked (False), rest masked (True)
+    mock_decoder_b = MockDecoder()
+    model.transformer_decoder = mock_decoder_b
+    _ = model(x_draft_step0, player_pref_vectors)
+    pad_mask_b = mock_decoder_b.call_kwargs["tgt_key_padding_mask"]
+    assert pad_mask_b[0, 0] == False, "Step 0 with valid hero should be unmasked"
+    assert torch.all(pad_mask_b[0, 1:] == True), "Steps 1..23 should be masked"
 

@@ -1,12 +1,11 @@
 """Unit tests for MatchNetwork / HierarchicalTransformer."""
 
-import pytest
 import torch
 
 from dota2drafter.models.match_network import (
     HierarchicalTransformer,
-    MatchNetwork,
     JointEmbedding,
+    MatchNetwork,
     SinusoidalPositionalEncoding,
 )
 
@@ -310,11 +309,11 @@ def test_hierarchical_transformer_tgt_key_padding_mask():
     assert pad_mask.dtype == torch.bool
 
     # Sample 0 should have steps 12..23 masked (True) and 0..11 unmasked (False)
-    assert torch.all(pad_mask[0, :12] == False)
-    assert torch.all(pad_mask[0, 12:] == True)
+    assert not torch.any(pad_mask[0, :12])
+    assert torch.all(pad_mask[0, 12:])
 
     # Sample 1 (non-truncated) should have all steps unmasked (False)
-    assert torch.all(pad_mask[1, :] == False)
+    assert not torch.any(pad_mask[1, :])
 
 
 def test_hierarchical_transformer_step0_unmasking():
@@ -323,7 +322,6 @@ def test_hierarchical_transformer_step0_unmasking():
     nhead = 4
     num_layers = 2
     num_heroes = 120
-    batch_size = 2
 
     h_gnn = torch.randn(num_heroes + 1, d_model)
 
@@ -367,13 +365,13 @@ def test_hierarchical_transformer_step0_unmasking():
     model.transformer_decoder = mock_decoder_a
     _ = model(x_draft_empty, player_pref_vectors)
     pad_mask_a = mock_decoder_a.call_kwargs["tgt_key_padding_mask"]
-    assert torch.all(pad_mask_a == True), "Empty draft: all steps should be masked"
+    assert torch.all(pad_mask_a), "Empty draft: all steps should be masked"
 
     # Test Case B: Step 0 valid - step 0 should be unmasked (False), rest masked (True)
     mock_decoder_b = MockDecoder()
     model.transformer_decoder = mock_decoder_b
     _ = model(x_draft_step0, player_pref_vectors)
     pad_mask_b = mock_decoder_b.call_kwargs["tgt_key_padding_mask"]
-    assert pad_mask_b[0, 0] == False, "Step 0 with valid hero should be unmasked"
-    assert torch.all(pad_mask_b[0, 1:] == True), "Steps 1..23 should be masked"
+    assert not pad_mask_b[0, 0], "Step 0 with valid hero should be unmasked"
+    assert torch.all(pad_mask_b[0, 1:]), "Steps 1..23 should be masked"
 

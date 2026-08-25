@@ -64,6 +64,10 @@ class SetTransformerHead(nn.Module):
         # SAB: intra-team synergy attention
         self.sab = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
 
+        # Dedicated PMA modules for Radiant and Dire sets
+        self.pma_r = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
+        self.pma_d = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
+
         # Cross-set attention (both directions)
         self.r2d_attn = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
         self.d2r_attn = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
@@ -156,8 +160,8 @@ class SetTransformerHead(nn.Module):
         seed_r = self.seed_r.expand(batch_size, 1, self.d_model)
         seed_d = self.seed_d.expand(batch_size, 1, self.d_model)
 
-        v_r, _ = self.sab(seed_r, r_cross, r_cross, key_padding_mask=safe_r_pad_mask)
-        v_d, _ = self.sab(seed_d, d_cross, d_cross, key_padding_mask=safe_d_pad_mask)
+        v_r, _ = self.pma_r(seed_r, r_cross, r_cross, key_padding_mask=safe_r_pad_mask)
+        v_d, _ = self.pma_d(seed_d, d_cross, d_cross, key_padding_mask=safe_d_pad_mask)
 
         v_r = v_r.squeeze(1)  # (B, d_model)
         v_d = v_d.squeeze(1)  # (B, d_model)
@@ -218,19 +222,6 @@ class JointEmbedding(nn.Module):
 
         # Positional encoding
         self.pos_enc = SinusoidalPositionalEncoding(d_model, max_len=24)
-
-    def set_attention_block(self, x: torch.Tensor, key_padding_mask: torch.Tensor | None = None) -> torch.Tensor:
-        """Set Attention Block (SAB) - permutation-equivariant self-attention without positional encodings.
-
-        Args:
-            x: Input tensor of shape (B, N, d_model).
-            key_padding_mask: Boolean tensor of shape (B, N), True for padded positions.
-
-        Returns:
-            Attention output of shape (B, N, d_model).
-        """
-        attn = nn.MultiheadAttention(self.d_model, num_heads=4, batch_first=True, dropout=0.1)
-        return attn(x, x, x, key_padding_mask=key_padding_mask)[0]
 
     def get_pure_hero_embeddings(
         self, hero_indices: torch.Tensor, patch_ids: torch.Tensor | None = None

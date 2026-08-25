@@ -638,7 +638,7 @@ class HierarchicalTransformer(nn.Module):
         v_inhibit = self.w_inhibit(v_active)  # (B, 24, d_model)
         all_hero_indices = torch.arange(
             self.num_heroes + 1, device=x_draft.device
-        ).unsqueeze(0).expand(batch_size, -1)
+        ).unsqueeze(0).expand(x_draft.size(0), -1)
         e_hero = self.joint_embedding.get_pure_hero_embeddings(
             all_hero_indices, patch_ids
         )  # (B, K+1, d_model)

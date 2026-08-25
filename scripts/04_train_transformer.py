@@ -420,7 +420,11 @@ def main() -> None:
                     comfort_rows.append(torch.zeros(player_input_dim))
             player_comfort = torch.stack(comfort_rows).unsqueeze(0).to(device)
 
-            prob = model.predict_proba(x_draft, player_comfort)
+            match_patch_id = None
+            if patch_ids is not None:
+                match_patch_id = torch.tensor([patch_ids[i]], dtype=torch.long, device=device)
+
+            prob = model.predict_proba(x_draft, player_comfort, patch_ids=match_patch_id)
             console.print(f"  Match {i}: win probability = {prob.item():.4f}")
 
 

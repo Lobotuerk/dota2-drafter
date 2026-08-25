@@ -483,7 +483,7 @@ class HierarchicalTransformer(nn.Module):
 
         # 1. Causal Active Team Masking (B, 24, 24)
         step_indices = torch.arange(seq_len, device=x_draft.device)
-        causal_mask = step_indices.unsqueeze(0) > step_indices.unsqueeze(1)  # s < t
+        causal_mask = step_indices.unsqueeze(0) < step_indices.unsqueeze(1)  # s < t
 
         is_pick_s = (x_draft[:, :, 0] == 1.0).unsqueeze(1)       # (B, 1, 24)
         valid_hero_s = (x_draft[:, :, 2] >= 0.0).unsqueeze(1)    # (B, 1, 24)
@@ -508,10 +508,10 @@ class HierarchicalTransformer(nn.Module):
         all_hero_indices = torch.arange(
             self.num_heroes + 1, device=x_draft.device
         ).unsqueeze(0).expand(batch_size, -1)
-        E_hero = self.joint_embedding.get_pure_hero_embeddings(
+        e_hero = self.joint_embedding.get_pure_hero_embeddings(
             all_hero_indices, patch_ids
         )  # (B, K+1, d_model)
-        penalty_logits = torch.bmm(v_inhibit, E_hero.transpose(1, 2))  # (B, 24, K+1)
+        penalty_logits = torch.bmm(v_inhibit, e_hero.transpose(1, 2))  # (B, 24, K+1)
 
         # 4. Apply Subtractive Penalty to Policy Logits
         inhibition_enabled = (num_picks > 0).float()

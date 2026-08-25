@@ -380,30 +380,29 @@ def test_subtractive_inhibition_penalty_monotonicity():
     )
     model.eval()
 
-    # Set w_inhibit to identity and gamma to positive for predictable test behavior
-    model.match_network.w_inhibit.weight.data = torch.eye(d_model)
-    model.match_network.gamma.data = torch.tensor(2.0)
-
-    # Draft A: Step 0 is a ban (not a pick), so no active picks before step 1
-    x_draft_a = torch.zeros((1, 24, 4), dtype=torch.float32)
-    x_draft_a[:, :, 2] = -1.0
-    x_draft_a[:, :, 3] = torch.arange(24).float()
-    x_draft_a[0, 0] = torch.tensor([0.0, 0.0, -1.0, 0.0])  # Ban at step 0
-    x_draft_a[0, 1] = torch.tensor([1.0, 0.0, 3.0, 1.0])   # Team 0 picks hero 3 at step 1
-
-    # Draft B: Step 0 is Team 0 picking Hero 3
-    x_draft_b = x_draft_a.clone()
-    x_draft_b[0, 0] = torch.tensor([1.0, 0.0, 3.0, 0.0])   # Team 0 picks hero 3 at step 0
+    # Use a fixed draft: Team 0 picks hero 3 at step 0
+    x_draft = torch.zeros((1, 24, 4), dtype=torch.float32)
+    x_draft[:, :, 2] = -1.0
+    x_draft[:, :, 3] = torch.arange(24).float()
+    x_draft[0, 0] = torch.tensor([1.0, 0.0, 3.0, 0.0])  # Team 0 picks hero 3 at step 0
 
     player_comfort = torch.zeros((1, 10, 22), dtype=torch.float32)
 
+    # Run without inhibition (set w_inhibit to zeros so penalty is zero)
+    model.match_network.w_inhibit.weight.data = torch.zeros(d_model, d_model)
+    model.match_network.gamma.data = torch.tensor(2.0)
     with torch.no_grad():
-        _, mlm_logits_a = model(x_draft_a, player_comfort)
-        _, mlm_logits_b = model(x_draft_b, player_comfort)
+        _, mlm_logits_uninhibited = model(x_draft, player_comfort)
 
-    # At step 1 (Team 0 pick), Draft B has 1 past active pick (Hero 3), Draft A has 0
-    # Logit for Hero 3 in Draft B should be strictly less than in Draft A
-    assert mlm_logits_b[0, 1, 3] < mlm_logits_a[0, 1, 3]
+    # Run with inhibition (gamma=2, w_inhibit=identity)
+    model.match_network.w_inhibit.weight.data = torch.eye(d_model)
+    model.match_network.gamma.data = torch.tensor(2.0)
+    with torch.no_grad():
+        _, mlm_logits_inhibited = model(x_draft, player_comfort)
+
+    # At step 1 (Team 0 pick again), hero 3 has a past active pick
+    # Logit for hero 3 should be strictly less with inhibition active
+    assert mlm_logits_inhibited[0, 1, 3] < mlm_logits_uninhibited[0, 1, 3]
 
 
 def test_subtractive_inhibition_causality():

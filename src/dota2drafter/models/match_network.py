@@ -445,8 +445,13 @@ class HierarchicalTransformer(nn.Module):
         """
         batch_size = x_draft.size(0)
 
-        # Compute joint embeddings
-        z = self.joint_embedding(x_draft, patch_ids)  # (B, 24, d_model)
+        # 1. Internal Right-Shift for Causal Policy Decoder (NTP Alignment)
+        shifted_x_draft = x_draft.clone()
+        shifted_x_draft[:, 0, 2] = -1.0           # Step 0 BOS prompt
+        shifted_x_draft[:, 1:, 2] = x_draft[:, :-1, 2]  # Right-shift hero IDs
+
+        # Compute joint embeddings using shifted input for causal sequence modeling
+        z = self.joint_embedding(shifted_x_draft, patch_ids)  # (B, 24, d_model)
 
         # Prepare for transformer decoder:
         # query = draft sequence (z), key/value = player preference vectors
@@ -475,11 +480,10 @@ class HierarchicalTransformer(nn.Module):
             tgt_key_padding_mask=pad_mask,
         )  # (B, 24, d_model)
 
-        # MLM mode: return per-step hero prediction logits
+        # Policy Head: Causal Next-Token Prediction Logits
         mlm_logits = self.mlm_head(decoder_output)
 
-        # Win prediction mode: Set Transformer Head
-        # Extract pure hero embeddings (no positional/step/action/team tokens)
+        # Win prediction mode: Set Transformer Head (uses CLEAN, unshifted x_draft for exact hero/team alignment)
         hero_indices = x_draft[:, :, 2]
         pure_hero_embeds = self.joint_embedding.get_pure_hero_embeddings(hero_indices, patch_ids)
         logits = self.set_transformer_head(pure_hero_embeds, x_draft)

@@ -621,26 +621,10 @@ class TransformerTrainer:
                 if patch_batch is not None:
                     patch_batch = patch_batch.to(self.device)
 
-                # Combine tasks via masking
-                mlm_x_batch = x_batch.clone()
-                mlm_labels = torch.full((mlm_x_batch.size(0), mlm_x_batch.size(1)), -1, dtype=torch.long, device=self.device)
+                # Pass clean x_batch directly; HierarchicalTransformer right-shifts internally
+                logits, mlm_logits = self.model(x_batch, player_batch, patch_ids=patch_batch)
 
-                # Create mask (only mask valid heroes, not -1 padding)
-                rand_mask = torch.rand(mlm_x_batch.shape[:2], device=self.device) < 0.15
-                valid_mask = mlm_x_batch[:, :, 2] != -1.0
-                mask = rand_mask & valid_mask
-
-                mlm_x_batch[mask, 2] = -1.0
-
-                if mask.any():
-                    # x_draft tensor shape is (B, 24, 4)
-                    # index 2 is hero_val
-                    mlm_labels[mask] = x_batch[mask, 2].long()
-
-                # 1 & 2. Unified forward pass for both Win-Prediction & MLM
-                logits, mlm_logits = self.model(mlm_x_batch, player_batch, patch_ids=patch_batch)
-
-                # Label smoothing
+                # Label smoothing for win probability loss
                 y_smoothed = y_batch * (1.0 - eps) + (eps / 2.0)
 
                 if self.config.step_loss_gamma > 0.0:
@@ -654,14 +638,18 @@ class TransformerTrainer:
                 else:
                     loss = self.criterion(logits, y_smoothed)
                 
+                # NTP loss: targets are the true heroes at all 24 sequence positions
+                ntp_labels = x_batch[:, :, 2].long()
+                
                 mlm_loss = torch.nn.functional.cross_entropy(
                     mlm_logits.view(-1, mlm_logits.size(-1)), 
-                    mlm_labels.view(-1), 
-                    ignore_index=-1
+                    ntp_labels.view(-1), 
+                    ignore_index=-1,
+                    label_smoothing=0.10
                 )
                 
                 # Combine losses (AlphaZero-style dual objective)
-                total_loss = loss + (1.0 * mlm_loss)
+                total_loss = loss + 1.0 * mlm_loss
 
                 self.optimizer.zero_grad()
                 total_loss.backward()
@@ -741,29 +729,8 @@ class TransformerTrainer:
                 if patch_batch is not None:
                     patch_batch = patch_batch.to(self.device)
 
-                # Apply same 15% random masking rate as training
-                mlm_x_batch = x_batch.clone()
-                mlm_labels = torch.full(
-                    (mlm_x_batch.size(0), mlm_x_batch.size(1)),
-                    -1,
-                    dtype=torch.long,
-                    device=self.device
-                )
-                
-                rand_mask = torch.rand(mlm_x_batch.size(0), mlm_x_batch.size(1), device=self.device) < 0.15
-                # Feature index 2 is hero_val
-                valid_mask = mlm_x_batch[:, :, 2] != -1.0
-                mask = rand_mask & valid_mask
-                
-                mlm_x_batch[mask, 2] = -1.0
-
-                # Only evaluate if there is at least one masked token
-                if mask.any():
-                    # The true label is the hero ID (index 2 in features)
-                    mlm_labels[mask] = x_batch[mask, 2].long()
-
-                # Unified forward pass
-                logits, mlm_logits = self.model(mlm_x_batch, player_batch, patch_ids=patch_batch)
+                # Pass clean x_batch directly; HierarchicalTransformer right-shifts internally
+                logits, mlm_logits = self.model(x_batch, player_batch, patch_ids=patch_batch)
 
                 if self.config.step_loss_gamma > 0.0:
                     loss_elements = F.binary_cross_entropy_with_logits(
@@ -781,18 +748,22 @@ class TransformerTrainer:
                 all_targets.append(y_batch.cpu())
                 val_batches += 1
                 
-                # 2. Forward pass for MLM head (Policy accuracy evaluation)
-                if mask.any():
-                    # Compute Top-1 accuracy
+                # NTP Policy accuracy evaluation
+                # NTP target labels: all 24 heroes (h_0 ... h_23)
+                ntp_labels = x_batch[:, :, 2].long()
+                valid_mask = ntp_labels != -1  # evaluates real picks/bans
+                
+                if valid_mask.any():
+                    # Compute Top-1 accuracy over valid steps
                     preds = mlm_logits.argmax(dim=-1)
-                    mlm_correct += (preds[mask] == mlm_labels[mask]).sum().item()
+                    mlm_correct += (preds[valid_mask] == ntp_labels[valid_mask]).sum().item()
                     
-                    # Compute Top-5 accuracy
+                    # Compute Top-5 accuracy over valid steps
                     top5_preds = mlm_logits.topk(k=5, dim=-1).indices
-                    mlm_labels_expanded = mlm_labels[mask].unsqueeze(-1)
-                    mlm_top5_correct += (top5_preds[mask] == mlm_labels_expanded).any(dim=-1).sum().item()
+                    expanded_labels = ntp_labels[valid_mask].unsqueeze(-1)
+                    mlm_top5_correct += (top5_preds[valid_mask] == expanded_labels).any(dim=-1).sum().item()
                     
-                    mlm_total += mask.sum().item()
+                    mlm_total += valid_mask.sum().item()
 
         avg_val_loss = val_loss / max(val_batches, 1)
         mlm_accuracy = (mlm_correct / mlm_total) if mlm_total > 0 else 0.0

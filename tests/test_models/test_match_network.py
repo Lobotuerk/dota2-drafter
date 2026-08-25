@@ -84,8 +84,9 @@ def test_hierarchical_transformer_forward():
 
     player_pref_vectors = torch.randn(batch_size, 10, d_model)
 
-    logits = model(x_draft, player_pref_vectors)
+    logits, mlm_logits = model(x_draft, player_pref_vectors)
     assert logits.shape == (batch_size,)
+    assert mlm_logits.shape == (batch_size, 24, num_heroes + 1)
     assert logits.dtype == torch.float32
 
 
@@ -151,8 +152,9 @@ def test_match_network_forward():
 
     player_comfort = torch.randn(batch_size, 10, player_input_dim)
 
-    logits = model(x_draft, player_comfort)
+    logits, mlm_logits = model(x_draft, player_comfort)
     assert logits.shape == (batch_size,)
+    assert mlm_logits.shape == (batch_size, 24, num_heroes + 1)
 
 
 def test_match_network_predict_proba():
@@ -239,8 +241,9 @@ def test_match_network_default_h_gnn():
     x_draft = torch.zeros(batch_size, 24, 4)
     player_comfort = torch.randn(batch_size, 10, 10)
 
-    logits = model(x_draft, player_comfort)
+    logits, mlm_logits = model(x_draft, player_comfort)
     assert logits.shape == (batch_size,)
+    assert mlm_logits.shape == (batch_size, 24, 120 + 1)
 
 
 def test_hierarchical_transformer_tgt_key_padding_mask():

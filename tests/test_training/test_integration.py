@@ -47,11 +47,12 @@ def test_end_to_end_tensor_flow():
     player_comfort = torch.randn(batch_size, 10, player_input_dim)
 
     # Forward pass through the full pipeline
-    logits = model(x_draft, player_comfort)  # (B,)
+    logits, mlm_logits = model(x_draft, player_comfort)  # (B,), (B, 24, num_heroes + 1)
     proba = model.predict_proba(x_draft, player_comfort)  # (B,)
 
     # Verify shapes
     assert logits.shape == (batch_size,)
+    assert mlm_logits.shape == (batch_size, 24, num_heroes + 1)
     assert proba.shape == (batch_size,)
     assert (proba >= 0).all()
     assert (proba <= 1).all()
@@ -99,8 +100,9 @@ def test_player_network_to_match_network_interface():
         x_draft[:, t, 3] = float(t)
 
     # Match Network forward: (B, 24, d_model) + (B, 10, d_model) -> (B,)
-    logits = match_net(x_draft, player_pref_vectors)
+    logits, mlm_logits = match_net(x_draft, player_pref_vectors)
     assert logits.shape == (batch_size,)
+    assert mlm_logits.shape == (batch_size, 24, num_heroes + 1)
 
 
 def test_trainer_dataset():
@@ -124,10 +126,11 @@ def test_trainer_dataset():
     assert len(dataset) == batch_size
 
     # Sample a single item
-    x, player_comfort, y = dataset[0]
+    x, player_comfort, y, patch_id = dataset[0]
     assert x.shape == (24, 4)
     assert player_comfort.shape == (10, 10)
     assert y.shape == (1,)
+    assert isinstance(patch_id, torch.Tensor)
 
 
 def test_trainer_small_training_step():
@@ -183,7 +186,7 @@ def test_trainer_small_training_step():
     player_comfort = torch.randn(batch_size, 10, player_input_dim)
     y_batch = torch.stack(y_labels).squeeze(-1)
 
-    logits = model(x_batch, player_comfort)
+    logits, mlm_logits = model(x_batch, player_comfort)
     loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, y_batch)
     loss.backward()
 
@@ -265,4 +268,4 @@ def test_full_training_loop_small():
     assert len(metrics.train_losses) > 0
     assert len(metrics.val_losses) > 0
     assert metrics.best_epoch >= 0
-    assert metrics.best_roc_auc < float("inf")
+    assert metrics.best_mlm_top5_acc > float("-inf")

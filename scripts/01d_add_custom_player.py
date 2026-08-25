@@ -7,6 +7,7 @@ Usage:
 
 import torch
 import json
+import math
 from pathlib import Path
 from dota2drafter.config import load_config
 from rich.console import Console

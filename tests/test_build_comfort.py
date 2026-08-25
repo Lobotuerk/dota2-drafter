@@ -4,13 +4,24 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import math
 from pathlib import Path
 import pytest
 import torch
 
 
+def wilson_score(wins: int, n: int, z: float = 1.96) -> float:
+    if n == 0:
+        return 0.5
+    p = wins / n
+    denominator = 1 + z**2 / n
+    center = p + z**2 / (2 * n)
+    spread = z * math.sqrt((p * (1 - p) / n) + z**2 / (4 * n**2))
+    return (center - spread) / denominator
+
+
 def test_build_comfort_functional(tmp_path: Path) -> None:
-    """Verify that 01c_build_comfort.py correctly builds and L2-normalizes the comfort matrix."""
+    """Verify that 01c_build_comfort.py correctly builds the Hybrid Player Comfort Matrix."""
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     output_file = tmp_path / "player_comfort.pt"
@@ -23,17 +34,6 @@ def test_build_comfort_functional(tmp_path: Path) -> None:
     # Match 2: Radiant loses (y = 0.0) -> Dire wins
     # Radiant players: 101 (hero 5), 103 (hero 1), 104 (hero 20), 105 (hero 3), 106 (hero 14)
     # Dire players: 201 (hero 8), 202 (hero 15), 203 (hero 45), 204 (hero 6), 205 (hero 77)
-    #
-    # Expected outcomes:
-    # Player 101:
-    # - Hero 5: Played in match 1 (radiant win -> +1) and match 2 (radiant loss -> -1) -> Net score = 0.
-    # Player 102:
-    # - Hero 12: Played in match 1 (radiant win -> +1) -> Net score = 1. L2 norm = 1. Normalized = 1.
-    # Player 202:
-    # - Hero -1: Unmapped, should be ignored.
-    # - Hero 15: Played in match 2 (dire win -> +1) -> Net score = 1. L2 norm = 1. Normalized = 1.
-    # Player 203:
-    # - Hero 45: Played in match 1 (dire loss -> -1) and match 2 (dire win -> +1) -> Net score = 0.
 
     x_dummy = torch.randn(2, 24, 4)
     y_dummy = torch.tensor([1.0, 0.0])
@@ -79,8 +79,6 @@ def test_build_comfort_functional(tmp_path: Path) -> None:
             str(data_dir),
             "--output",
             str(output_file),
-            "--vocab_size",
-            "127",
         ],
         capture_output=True,
         text=True,
@@ -92,30 +90,44 @@ def test_build_comfort_functional(tmp_path: Path) -> None:
     assert output_file.exists()
     comfort_map = torch.load(output_file, weights_only=True)
 
-    # Player 102: only hero 12, radiant win (+1). Normalized vector should have 1.0 at index 12.
+    vocab_size = 127  # default
+
+    # Player 102: only hero 12, radiant win (+1). Total games = 1.
     assert 102 in comfort_map
     vec_102 = comfort_map[102]
-    assert vec_102.shape == (127,)
-    assert torch.isclose(vec_102[12], torch.tensor(1.0))
-    # All other values for player 102 should be 0.0
-    vec_102_other = vec_102.clone()
-    vec_102_other[12] = 0.0
-    assert torch.all(vec_102_other == 0.0)
+    assert vec_102.shape == (vocab_size * 2,)
+    # hero 12 -> 0-indexed as index 11
+    assert torch.isclose(vec_102[11], torch.tensor(1.0))
+    assert torch.isclose(vec_102[vocab_size + 11], torch.tensor(wilson_score(1, 1)))
+    # Other affinities should be 0.0, other Wilson scores should be 0.5
+    for i in range(vocab_size):
+        if i != 11:
+            assert vec_102[i] == 0.0
+            assert vec_102[vocab_size + i] == 0.5
 
-    # Player 202: in match 1 hero -1 (ignored). In match 2 hero 15, dire win (+1).
+    # Player 202: in match 1 hero -1 (ignored). In match 2 hero 15, dire win (+1). Total games = 1.
     assert 202 in comfort_map
     vec_202 = comfort_map[202]
-    assert vec_202.shape == (127,)
-    assert torch.isclose(vec_202[15], torch.tensor(1.0))
-    vec_202_other = vec_202.clone()
-    vec_202_other[15] = 0.0
-    assert torch.all(vec_202_other == 0.0)
+    assert vec_202.shape == (vocab_size * 2,)
+    # hero 15 -> 0-indexed as index 14
+    assert torch.isclose(vec_202[14], torch.tensor(1.0))
+    assert torch.isclose(vec_202[vocab_size + 14], torch.tensor(wilson_score(1, 1)))
+    for i in range(vocab_size):
+        if i != 14:
+            assert vec_202[i] == 0.0
+            assert vec_202[vocab_size + i] == 0.5
 
-    # Player 101: hero 5 played in win (+1) and loss (-1). Net = 0.
-    # Player 101 also played: in Match 1 (win) but it was hero 5. In Match 2 (loss) hero 5.
+    # Player 101: hero 5 played in win (+1) and loss (-1). Total games = 2.
     assert 101 in comfort_map
     vec_101 = comfort_map[101]
-    assert torch.all(vec_101 == 0.0)
+    assert vec_101.shape == (vocab_size * 2,)
+    # hero 5 -> index 4. Affinity = 2/2 = 1.0. Wins = 1. Wilson score = wilson_score(1, 2)
+    assert torch.isclose(vec_101[4], torch.tensor(1.0))
+    assert torch.isclose(vec_101[vocab_size + 4], torch.tensor(wilson_score(1, 2)))
+    for i in range(vocab_size):
+        if i != 4:
+            assert vec_101[i] == 0.0
+            assert vec_101[vocab_size + i] == 0.5
 
     # Anonymous player 0 should NOT be in the map
     assert 0 not in comfort_map

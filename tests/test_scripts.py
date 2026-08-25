@@ -40,6 +40,15 @@ def test_script_syntax_and_help(script_name: str) -> None:
         )
         assert result.returncode == 1
         assert "Error" in result.stdout or "Error" in result.stderr
+    elif script_name == "01d_add_custom_player.py":
+        # Interactive script, just check that it parses without syntax errors
+        result = subprocess.run(
+            [sys.executable, str(script_path), "--help"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "player_comfort.pt not found!" in result.stdout or "player_comfort.pt not found!" in result.stderr
     else:
         # Other scripts support --help
         result = subprocess.run(
@@ -166,134 +175,74 @@ def test_train_transformer_augment_arg_parsing():
 
 
 def test_add_custom_player_functional(tmp_path: Path) -> None:
-    """Verify that 01d_add_custom_player.py correctly adds and overwrites custom player vectors."""
+    """Verify that 01d_add_custom_player.py correctly adds custom player vectors via interactive prompting."""
     import importlib
     import json
     import sys
+    from unittest.mock import patch, mock_open, MagicMock
+
     add_custom_player = importlib.import_module("scripts.01d_add_custom_player")
 
-    # 1. Create a mock hero mapping
-    hero_mapping_file = tmp_path / "hero_mapping.json"
-    hero_mapping_data = {
-        "1": "Anti-Mage",
-        "2": "Axe",
-        "3": "Bane",
-        "4": "Bloodseeker",
-    }
-    with open(hero_mapping_file, "w") as f:
-        json.dump(hero_mapping_data, f)
-
-    # 2. Create a mock hero indexer file
-    hero_indexer_file = tmp_path / "hero_indexer.json"
+    # Mock hero indexer json
     hero_indexer_data = {
-        "1": {},
-        "2": {},
-        "3": {},
-        "4": {},
+        "1": "anti-mage",
+        "2": "axe",
+        "3": "bane",
+        "4": "bloodseeker",
     }
-    with open(hero_indexer_file, "w") as f:
-        json.dump(hero_indexer_data, f)
 
-    # 3. Create a mock comfort file
+    # Mock player comfort pt file
     comfort_file = tmp_path / "player_comfort.pt"
-    # Empty comfort map initially
-    torch.save({}, comfort_file)
+    torch.save({54321: torch.ones(8, dtype=torch.float32)}, comfort_file)
 
-    # 4. Test resolve_hero_indices
-    indexer = add_custom_player.build_hero_indexer(str(hero_indexer_file))
-    name_to_api_id = add_custom_player.load_hero_name_to_api_id(str(hero_mapping_file))
+    # Patch Paths and torch.load/save inside the module
+    with patch.object(add_custom_player, "Path") as mock_path_class, \
+         patch("builtins.open", mock_open(read_data=json.dumps(hero_indexer_data))), \
+         patch.object(add_custom_player.torch, "load") as mock_load, \
+         patch.object(add_custom_player.torch, "save") as mock_save, \
+         patch.object(add_custom_player.IntPrompt, "ask") as mock_int_ask, \
+         patch.object(add_custom_player.Prompt, "ask") as mock_prompt_ask:
 
-    # Test valid name resolution
-    # Sorted by API ID inside build_mapping, so Anti-Mage (id 1) -> 1, Axe (id 2) -> 2
-    indices = add_custom_player.resolve_hero_indices("Anti-Mage, Axe", name_to_api_id, indexer)
-    assert indices == [1, 2]
+        # Set up path mock to return a mock Path object
+        mock_path_inst = MagicMock()
+        mock_path_inst.exists.return_value = True
+        mock_path_class.return_value = mock_path_inst
 
-    # Test whitespace stripping
-    indices_ws = add_custom_player.resolve_hero_indices(
-        " Anti-Mage ,   Axe  ", name_to_api_id, indexer
-    )
-    assert indices_ws == [1, 2]
+        # Mock torch.load to return our dict
+        mock_comfort_map = {}
+        mock_load.return_value = mock_comfort_map
 
-    # Test error on invalid hero name
-    with pytest.raises(ValueError, match="Hero not found in mapping"):
-        add_custom_player.resolve_hero_indices("Anti-Mage, Pudge", name_to_api_id, indexer)
+        # IntPrompt.ask calls:
+        # 1. Account ID: 12345
+        # 2. Total games: 10
+        # 3. Games played on Axe: 5
+        # 4. Wins on Axe: 4
+        mock_int_ask.side_effect = [12345, 10, 5, 4]
 
-    # 5. Run main() via subprocess to check command line interface
-    script_path = Path("scripts") / "01d_add_custom_player.py"
+        # Prompt.ask calls:
+        # 1. Hero Name: "axe"
+        # 2. Hero Name: "done"
+        mock_prompt_ask.side_effect = ["axe", "done"]
 
-    # Initially comfort file has NO entries, so vocab_size fallback
-    # defaults to indexer.get_contiguous_count() = 4
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(script_path),
-            "--id", "12345",
-            "--heroes", "Anti-Mage,Axe",
-            "--comfort", str(comfort_file),
-            "--hero_mapping", str(hero_mapping_file),
-            "--hero_indexer", str(hero_indexer_file),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, f"Script failed: {result.stderr}"
+        # Run main
+        add_custom_player.main()
 
-    # Verify vector was created correctly
-    comfort_map = torch.load(comfort_file, weights_only=True)
-    assert 12345 in comfort_map
-    vec = comfort_map[12345]
-    assert vec.shape == (4,)
-    # Indicies 1 and 2 should be set to 1.0, normalized
-    # L2 norm of [0, 1, 1, 0] is sqrt(2) = 1.4142. Normalized is [0, 1/sqrt(2), 1/sqrt(2), 0]
-    expected_val = 1.0 / (2.0 ** 0.5)
-    assert pytest.approx(vec[1].item()) == expected_val
-    assert pytest.approx(vec[2].item()) == expected_val
-    assert vec[0].item() == 0.0
-    assert vec[3].item() == 0.0
+        # Check mock_comfort_map was populated
+        assert 12345 in mock_comfort_map
+        vec = mock_comfort_map[12345]
+        # Vocab size = 4
+        assert vec.shape == (8,)  # vocab_size * 2
+        # Axe is ID 2, so 0-based index 1
+        assert vec[1].item() == 5 / 10  # affinity
+        assert vec[4 + 1].item() == pytest.approx(add_custom_player.wilson_score(4, 5))  # wilson score
+        # Other affinities should be 0, other wilsons should be 0.5
+        for i in range(4):
+            if i != 1:
+                assert vec[i] == 0.0
+                assert vec[4 + i] == 0.5
 
-    # 6. Run again without --force on existing ID -> should fail
-    result_fail = subprocess.run(
-        [
-            sys.executable,
-            str(script_path),
-            "--id", "12345",
-            "--heroes", "Bane",
-            "--comfort", str(comfort_file),
-            "--hero_mapping", str(hero_mapping_file),
-            "--hero_indexer", str(hero_indexer_file),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    assert result_fail.returncode != 0
-    assert "already exists" in result_fail.stderr or "already exists" in result_fail.stdout
-
-    # 7. Run with --force -> should succeed and overwrite
-    result_force = subprocess.run(
-        [
-            sys.executable,
-            str(script_path),
-            "--id", "12345",
-            "--heroes", "Bane",
-            "--comfort", str(comfort_file),
-            "--hero_mapping", str(hero_mapping_file),
-            "--hero_indexer", str(hero_indexer_file),
-            "--force",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    assert result_force.returncode == 0
-
-    # Verify vector was updated: Bane (api id 3) -> contiguous index 3
-    comfort_map_updated = torch.load(comfort_file, weights_only=True)
-    vec_updated = comfort_map_updated[12345]
-    assert vec_updated.shape == (4,)
-    # Bane at index 3. L2 norm of [0, 0, 1, 0] is 1.0. So index 3 is 1.0, others 0.0.
-    assert pytest.approx(vec_updated[3].item()) == 1.0
-    assert vec_updated[0].item() == 0.0
-    assert vec_updated[1].item() == 0.0
-    assert vec_updated[2].item() == 0.0
+        # Verify torch.save was called
+        mock_save.assert_called_with(mock_comfort_map, mock_path_inst)
 def test_interactive_draft_checkpoint_loading_formats() -> None:
     """Verify that interactive_draft.py loads checkpoints in both 'model_state' and 'model_state_dict' formats."""
     import importlib

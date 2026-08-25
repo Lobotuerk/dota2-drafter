@@ -96,9 +96,9 @@ class SetTransformerHead(nn.Module):
         """
         batch_size = x_draft.size(0)
 
-        # --- Set Construction ---
+        # --- Vectorized Set Construction ---
         action_mask = x_draft[:, :, 0] == 1.0
-        hero_valid = x_draft[:, :, 2] != -1.0
+        hero_valid = x_draft[:, :, 2] >= 0.0
         pick_mask = action_mask & hero_valid
         team_mask = x_draft[:, :, 1] == 0.0
 
@@ -107,40 +107,64 @@ class SetTransformerHead(nn.Module):
 
         # Zero-pad to max 5 heroes per team
         max_heroes = 5
-        r_embeds = torch.zeros(batch_size, max_heroes, self.d_model, device=hero_embeddings.device)
-        d_embeds = torch.zeros(batch_size, max_heroes, self.d_model, device=hero_embeddings.device)
-        r_pad_mask = torch.ones(batch_size, max_heroes, dtype=torch.bool, device=hero_embeddings.device)
-        d_pad_mask = torch.ones(batch_size, max_heroes, dtype=torch.bool, device=hero_embeddings.device)
 
-        for i in range(batch_size):
-            r_indices = torch.where(r_mask[i])[0]
-            d_indices = torch.where(d_mask[i])[0]
-            r_count = min(len(r_indices), max_heroes)
-            d_count = min(len(d_indices), max_heroes)
-            if r_count > 0:
-                r_embeds[i, :r_count] = hero_embeddings[i, r_indices[:r_count]]
-                r_pad_mask[i, :r_count] = False
-            if d_count > 0:
-                d_embeds[i, :d_count] = hero_embeddings[i, d_indices[:d_count]]
-                d_pad_mask[i, :d_count] = False
+        # Radiant team set (Vectorized)
+        r_cumsum = torch.cumsum(r_mask.long(), dim=-1)
+        r_pick_idx = torch.where(r_mask, r_cumsum, torch.tensor(0, device=r_mask.device))
+        r_valid_pick = (r_pick_idx >= 1) & (r_pick_idx <= max_heroes)
+        rb_coords, rt_coords = torch.where(r_valid_pick)
+        rdest_coords = r_pick_idx[rb_coords, rt_coords] - 1
+
+        r_embeds = torch.zeros(batch_size, max_heroes, self.d_model, device=hero_embeddings.device)
+        r_embeds[rb_coords, rdest_coords] = hero_embeddings[rb_coords, rt_coords]
+
+        r_pad_mask = torch.ones(batch_size, max_heroes, dtype=torch.bool, device=hero_embeddings.device)
+        r_pad_mask[rb_coords, rdest_coords] = False
+
+        # Dire team set (Vectorized)
+        d_cumsum = torch.cumsum(d_mask.long(), dim=-1)
+        d_pick_idx = torch.where(d_mask, d_cumsum, torch.tensor(0, device=d_mask.device))
+        d_valid_pick = (d_pick_idx >= 1) & (d_pick_idx <= max_heroes)
+        db_coords, dt_coords = torch.where(d_valid_pick)
+        ddest_coords = d_pick_idx[db_coords, dt_coords] - 1
+
+        d_embeds = torch.zeros(batch_size, max_heroes, self.d_model, device=hero_embeddings.device)
+        d_embeds[db_coords, ddest_coords] = hero_embeddings[db_coords, dt_coords]
+
+        d_pad_mask = torch.ones(batch_size, max_heroes, dtype=torch.bool, device=hero_embeddings.device)
+        d_pad_mask[db_coords, ddest_coords] = False
+
+        # --- NaN Guard for empty team sets ---
+        empty_r = r_pad_mask.all(dim=-1, keepdim=True)  # (B, 1)
+        empty_d = d_pad_mask.all(dim=-1, keepdim=True)  # (B, 1)
+
+        safe_r_pad_mask = r_pad_mask.clone()
+        safe_r_pad_mask[empty_r.squeeze(-1), 0] = False
+
+        safe_d_pad_mask = d_pad_mask.clone()
+        safe_d_pad_mask[empty_d.squeeze(-1), 0] = False
 
         # --- Set Attention Block (SAB) ---
-        r_syn, _ = self.sab(r_embeds, r_embeds, r_embeds, key_padding_mask=r_pad_mask)
-        d_syn, _ = self.sab(d_embeds, d_embeds, d_embeds, key_padding_mask=d_pad_mask)
+        r_syn, _ = self.sab(r_embeds, r_embeds, r_embeds, key_padding_mask=safe_r_pad_mask)
+        d_syn, _ = self.sab(d_embeds, d_embeds, d_embeds, key_padding_mask=safe_d_pad_mask)
 
         # --- Cross-Set Attention (symmetric) ---
-        r_cross, _ = self.r2d_attn(r_syn, d_syn, d_syn, key_padding_mask=d_pad_mask)
-        d_cross, _ = self.d2r_attn(d_syn, r_syn, r_syn, key_padding_mask=r_pad_mask)
+        r_cross, _ = self.r2d_attn(r_syn, d_syn, d_syn, key_padding_mask=safe_d_pad_mask)
+        d_cross, _ = self.d2r_attn(d_syn, r_syn, r_syn, key_padding_mask=safe_r_pad_mask)
 
         # --- Pooling by Multihead Attention (PMA) ---
         seed_r = self.seed_r.expand(batch_size, 1, self.d_model)
         seed_d = self.seed_d.expand(batch_size, 1, self.d_model)
 
-        v_r, _ = self.sab(seed_r, r_cross, r_cross, key_padding_mask=r_pad_mask)
-        v_d, _ = self.sab(seed_d, d_cross, d_cross, key_padding_mask=d_pad_mask)
+        v_r, _ = self.sab(seed_r, r_cross, r_cross, key_padding_mask=safe_r_pad_mask)
+        v_d, _ = self.sab(seed_d, d_cross, d_cross, key_padding_mask=safe_d_pad_mask)
 
         v_r = v_r.squeeze(1)  # (B, d_model)
         v_d = v_d.squeeze(1)  # (B, d_model)
+
+        # Zero-out the pooled representations for empty teams to avoid gradients/noise from safe-masked slot
+        v_r = v_r * (~empty_r).float()
+        v_d = v_d * (~empty_d).float()
 
         # --- Value MLP ---
         concat = torch.cat([v_r, v_d], dim=-1)  # (B, 2 * d_model)
@@ -220,7 +244,10 @@ class JointEmbedding(nn.Module):
         Returns:
             Pure hero embeddings of shape (B, seq_len, d_model).
         """
-        hero_embeds = self.h_gnn[hero_indices.long()]  # (B, seq_len, d_model)
+        valid_heroes = (hero_indices >= 0)
+        clamped_indices = hero_indices.clamp(min=0).long()
+        hero_embeds = self.h_gnn[clamped_indices]  # (B, seq_len, d_model)
+        hero_embeds = hero_embeds * valid_heroes.unsqueeze(-1).float() # Zero-out invalid slots
         hero_projected = self.project(hero_embeds)  # (B, seq_len, d_model)
 
         if patch_ids is not None:
@@ -278,7 +305,10 @@ class JointEmbedding(nn.Module):
         # Hero embeddings: lookup H_GNN[hero_val], then project
         # hero_indices: (B, 24) -> (B, 24, d_model)
         # self.h_gnn is a registered buffer, natively aligned with module device
-        hero_embeds = self.h_gnn[hero_indices]  # (B, 24, d_model)
+        valid_heroes = (hero_indices >= 0)
+        clamped_indices = hero_indices.clamp(min=0)
+        hero_embeds = self.h_gnn[clamped_indices]  # (B, 24, d_model)
+        hero_embeds = hero_embeds * valid_heroes.unsqueeze(-1).float() # Zero-out invalid slots
         hero_projected = self.project(hero_embeds)  # (B, 24, d_model)
 
         # Action type embeddings

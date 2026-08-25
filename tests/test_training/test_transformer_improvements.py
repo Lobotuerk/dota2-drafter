@@ -48,13 +48,10 @@ def test_mlm_mode_forward_pass():
 
     player_pref_vectors = torch.randn(batch_size, 10, d_model)
 
-    # MLM mode forward: should return (B, 24, num_heroes + 1)
-    mlm_logits_ht = model_ht(x_draft, player_pref_vectors, mlm_mode=True)
-    assert mlm_logits_ht.shape == (batch_size, 24, num_heroes + 1)
-
-    # Win prediction mode forward: should return (B,)
-    win_logits_ht = model_ht(x_draft, player_pref_vectors, mlm_mode=False)
+    # Unified forward: should return (win_logits, mlm_logits)
+    win_logits_ht, mlm_logits_ht = model_ht(x_draft, player_pref_vectors)
     assert win_logits_ht.shape == (batch_size,)
+    assert mlm_logits_ht.shape == (batch_size, 24, num_heroes + 1)
 
     # 2. Test MatchNetwork
     model_mn = MatchNetwork(
@@ -70,13 +67,10 @@ def test_mlm_mode_forward_pass():
 
     player_comfort = torch.randn(batch_size, 10, player_input_dim)
 
-    # MLM mode forward
-    mlm_logits_mn = model_mn(x_draft, player_comfort, mlm_mode=True)
-    assert mlm_logits_mn.shape == (batch_size, 24, num_heroes + 1)
-
-    # Win prediction mode forward
-    win_logits_mn = model_mn(x_draft, player_comfort, mlm_mode=False)
+    # Unified forward
+    win_logits_mn, mlm_logits_mn = model_mn(x_draft, player_comfort)
     assert win_logits_mn.shape == (batch_size,)
+    assert mlm_logits_mn.shape == (batch_size, 24, num_heroes + 1)
 
 
 def test_apply_prefix_truncation():
@@ -194,7 +188,7 @@ def test_player_comfort_dataset_augmentation():
         augment=False,
     )
     assert len(dataset_no_aug) == num_samples
-    x, comfort, y = dataset_no_aug[0]
+    x, comfort, y, *extra = dataset_no_aug[0]
     assert x.shape == (24, 4)
     assert comfort.shape == (10, player_input_dim)
 
@@ -211,7 +205,7 @@ def test_player_comfort_dataset_augmentation():
 
     # Test retrieving various indices
     for i in range(len(dataset_with_aug)):
-        x_item, comfort_item, y_item = dataset_with_aug[i]
+        x_item, comfort_item, y_item, *extra = dataset_with_aug[i]
         assert x_item.shape == (24, 4)
         assert comfort_item.shape == (10, player_input_dim)
         assert y_item.dim() == 1
@@ -230,7 +224,7 @@ def test_player_comfort_dataset_augmentation():
 
     # Check that all items retrieved are valid
     for i in range(len(dataset_limited_aug)):
-        x_item, comfort_item, y_item = dataset_limited_aug[i]
+        x_item, comfort_item, y_item, *extra = dataset_limited_aug[i]
         assert x_item.shape == (24, 4)
         assert comfort_item.shape == (10, player_input_dim)
         assert y_item.dim() == 1
@@ -299,19 +293,17 @@ def test_mlm_pre_training_loop():
         radiant_players.append([1000 + i * 10 + j for j in range(5)])
         dire_players.append([2000 + i * 10 + j for j in range(5)])
 
-    # Execute MLM pre-training (1 epoch)
-    mlm_metrics = trainer.mlm_train(
+    # Execute training (1 epoch)
+    metrics = trainer.train(
         x_drafts=x_drafts,
         y_labels=y_labels,
         radiant_players=radiant_players,
         dire_players=dire_players,
-        num_epochs=1,
-        mlm_probability=0.15,
     )
 
-    assert len(mlm_metrics.train_losses) == 1
-    assert mlm_metrics.train_losses[0] > 0
-    assert os.path.exists(os.path.join(checkpoint_dir, "mlm_pretrained.pt"))
+    assert len(metrics.train_losses) == 1
+    assert metrics.train_losses[0] > 0
+    assert os.path.exists(os.path.join(checkpoint_dir, "best_model.pt"))
 
     # Cleanup test checkpoint dir
     shutil.rmtree(checkpoint_dir, ignore_errors=True)
@@ -510,7 +502,7 @@ def test_step_weighted_loss():
     player_batch = torch.zeros(2, 10, 10)
     y_batch = torch.tensor([1.0, 0.0])
 
-    logits = model(x_batch, player_batch)
+    logits, mlm_logits = model(x_batch, player_batch)
     eps = config_std.label_smoothing_eps
     y_smoothed = y_batch * (1.0 - eps) + (eps / 2.0)
 

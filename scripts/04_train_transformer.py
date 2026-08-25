@@ -131,8 +131,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--augment",
-        type=float,
-        default="0.0",
+        type=str,
+        default="true",
         help="Augmentation setting: 'true' (all 448), 'false' (none), or an integer representing the maximum number of variations allowed per original match (e.g. 5, 10, 20). (default: 'true')",
     )
     parser.add_argument(

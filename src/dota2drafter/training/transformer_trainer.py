@@ -256,6 +256,7 @@ class PlayerComfortDataset(Dataset):
                 y = y_labels[base_idx]
                 radiant = radiant_players[base_idx]
                 dire = dire_players[base_idx]
+                patch_id = self.patch_ids[base_idx] if self.patch_ids else torch.tensor(0, dtype=torch.long)
 
                 perm_samples = augment_draft_permutations(
                     x_draft, y, radiant, dire,
@@ -266,12 +267,12 @@ class PlayerComfortDataset(Dataset):
                 for perm_idx in range(len(perm_samples)):
                     x_permuted, player_comfort, y_label = perm_samples[perm_idx]
 
-                    match_augmentations.append((x_permuted, player_comfort, y_label))
+                    match_augmentations.append((x_permuted, player_comfort, y_label, patch_id))
 
                     for t in truncation_points:
                         x_truncated = x_permuted.clone()
                         x_truncated[t:, :] = 0.0
-                        match_augmentations.append((x_truncated, player_comfort, y_label))
+                        match_augmentations.append((x_truncated, player_comfort, y_label, patch_id))
                 
                 self.all_augmented_samples.append(match_augmentations)
 
@@ -467,7 +468,7 @@ class TransformerTrainer:
             backbone_params = []
             head_params = []
             for name, param in self.model.named_parameters():
-                if "output_head" in name or "mlm_head" in name:
+                if "set_transformer_head" in name or "mlm_head" in name:
                     head_params.append(param)
                 else:
                     backbone_params.append(param)
@@ -660,7 +661,7 @@ class TransformerTrainer:
                 )
                 
                 # Combine losses (AlphaZero-style dual objective)
-                total_loss = loss + (0.5 * mlm_loss)
+                total_loss = loss + (1.0 * mlm_loss)
 
                 self.optimizer.zero_grad()
                 total_loss.backward()

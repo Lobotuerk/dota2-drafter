@@ -14,17 +14,20 @@ def test_dataset_builder(tmp_path):
     match1 = ProcessedMatch(
         x_tensor=torch.randn(24, 3),
         y_tensor=torch.tensor([1.0]),
-        match_id="101"
+        match_id="101",
+        patch_id=21
     )
     match2 = ProcessedMatch(
         x_tensor=torch.randn(24, 3),
         y_tensor=torch.tensor([0.0]),
-        match_id="102"
+        match_id="102",
+        patch_id=21
     )
     match3 = ProcessedMatch(
         x_tensor=torch.randn(24, 3),
         y_tensor=torch.tensor([1.0]),
-        match_id="103"
+        match_id="103",
+        patch_id=21
     )
     
     # Add first match (chunk_size is 2, shouldn't flush yet)

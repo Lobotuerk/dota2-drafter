@@ -415,6 +415,10 @@ class HierarchicalTransformer(nn.Module):
         # MLM head for Masked Language Modeling pre-training
         self.mlm_head = nn.Linear(d_model, num_heroes + 1)
 
+        # Subtractive Role-Inhibition components
+        self.w_inhibit = nn.Linear(d_model, d_model, bias=False)
+        self.gamma = nn.Parameter(torch.tensor(1.0))
+
     def forward(
         self,
         x_draft: torch.Tensor,
@@ -473,6 +477,47 @@ class HierarchicalTransformer(nn.Module):
 
         # Policy Head: Causal Next-Token Prediction Logits
         mlm_logits = self.mlm_head(decoder_output)
+
+        # Subtractive Role-Inhibition: compute penalty from active team's past picks
+        seq_len = x_draft.size(1)
+
+        # 1. Causal Active Team Masking (B, 24, 24)
+        step_indices = torch.arange(seq_len, device=x_draft.device)
+        causal_mask = step_indices.unsqueeze(0) < step_indices.unsqueeze(1)  # s < t
+
+        is_pick_s = (x_draft[:, :, 0] == 1.0).unsqueeze(1)       # (B, 1, 24)
+        valid_hero_s = (x_draft[:, :, 2] >= 0.0).unsqueeze(1)    # (B, 1, 24)
+
+        team_t = x_draft[:, :, 1].unsqueeze(2)  # (B, 24, 1)
+        team_s = x_draft[:, :, 1].unsqueeze(1)  # (B, 1, 24)
+        same_team = (team_t == team_s)           # (B, 24, 24)
+
+        past_active_picks_mask = causal_mask.unsqueeze(0) & same_team & is_pick_s & valid_hero_s
+        mask_weight = past_active_picks_mask.float()  # (B, 24, 24)
+
+        # 2. Extract and Average Active Pick Embeddings (v_active)
+        draft_hero_embeds = self.joint_embedding.get_pure_hero_embeddings(
+            x_draft[:, :, 2].long(), patch_ids
+        )  # (B, 24, d_model)
+        sum_embeds = torch.bmm(mask_weight, draft_hero_embeds)     # (B, 24, d_model)
+        num_picks = mask_weight.sum(dim=2, keepdim=True)            # (B, 24, 1)
+        v_active = sum_embeds / torch.clamp(num_picks, min=1.0)     # (B, 24, d_model)
+
+        # 3. Generate Candidate Inhibition Penalties
+        v_inhibit = self.w_inhibit(v_active)  # (B, 24, d_model)
+        all_hero_indices = torch.arange(
+            self.num_heroes + 1, device=x_draft.device
+        ).unsqueeze(0).expand(batch_size, -1)
+        e_hero = self.joint_embedding.get_pure_hero_embeddings(
+            all_hero_indices, patch_ids
+        )  # (B, K+1, d_model)
+        penalty_logits = torch.bmm(v_inhibit, e_hero.transpose(1, 2))  # (B, 24, K+1)
+
+        # 4. Apply Subtractive Penalty to Policy Logits
+        inhibition_enabled = (num_picks > 0).float()
+        effective_gamma = F.softplus(self.gamma)
+        inhibition_penalty = effective_gamma * torch.relu(penalty_logits) * inhibition_enabled
+        mlm_logits = mlm_logits - inhibition_penalty
 
         # Win prediction mode: Set Transformer Head (uses CLEAN, unshifted x_draft for exact hero/team alignment)
         hero_indices = x_draft[:, :, 2]

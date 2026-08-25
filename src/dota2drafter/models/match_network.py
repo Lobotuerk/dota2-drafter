@@ -347,6 +347,133 @@ class JointEmbedding(nn.Module):
         return z
 
 
+class SlotAttentionMLMProjection(nn.Module):
+    """Custom Slot-Attentive Policy Head for positional constraint modeling in drafting."""
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heroes: int,
+        joint_embedding: nn.Module,
+        entropy_lambda: float = 0.01,
+        dropout: float = 0.1,
+        temperature: float = 1.0,
+    ) -> None:
+        """Initialize the Slot-Attentive Policy Head.
+
+        Args:
+            d_model: Dimension of the transformer embeddings.
+            num_heroes: Number of heroes in the vocabulary (num_heroes + 1 total size).
+            joint_embedding: Reference to the JointEmbedding module to
+                query candidate/pick embeddings.
+            entropy_lambda: Scaling coefficient for the slot occupancy entropy regularization.
+            dropout: Dropout rate applied to slot assignment attention maps.
+            temperature: Scaling temperature for softmax inside slot assignment.
+        """
+        super().__init__()
+        self.d_model = d_model
+        self.num_heroes = num_heroes
+        self.joint_embedding = joint_embedding
+        self.entropy_lambda = entropy_lambda
+        self.temperature = temperature
+
+        # 5 learnable slot vectors representing Pos 1-5
+        self.slots = nn.Parameter(torch.randn(5, d_model) * 0.02)
+
+        # Key projection for active team picks
+        self.w_k = nn.Linear(d_model, d_model, bias=False)
+
+        # Output projection and normalization
+        self.w_policy = nn.Linear(d_model, d_model)
+        self.layer_norm = nn.LayerNorm(d_model)
+        self.attn_dropout = nn.Dropout(p=dropout)
+
+        # Entropy loss buffer
+        self.register_buffer("_entropy_loss", torch.tensor(0.0))
+
+    def forward(
+        self,
+        decoder_output: torch.Tensor,
+        x_draft: torch.Tensor,
+        patch_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Compute next-action policy logits using slot attention over unfilled slots.
+
+        Args:
+            decoder_output: Output from the transformer decoder (h_t), shape (B, 24, d_model).
+            x_draft: Draft sequence tensor of shape (B, 24, 4).
+            patch_ids: Optional patch ID tensor of shape (B,).
+
+        Returns:
+            Policy logits of shape (B, 24, num_heroes + 1).
+        """
+        batch_size, seq_len, _ = x_draft.shape
+        device = x_draft.device
+
+        # 1. Causal Active Team Masking (B, 24, 24)
+        step_indices = torch.arange(seq_len, device=device)
+        causal_mask = step_indices.unsqueeze(0) > step_indices.unsqueeze(1)  # s < t
+
+        is_pick_s = (x_draft[:, :, 0] == 1.0).unsqueeze(1)
+        valid_hero_s = (x_draft[:, :, 2] >= 0.0).unsqueeze(1)
+
+        team_t = x_draft[:, :, 1].unsqueeze(2)
+        team_s = x_draft[:, :, 1].unsqueeze(1)
+        same_team = (team_t == team_s)
+
+        past_active_picks_mask = causal_mask.unsqueeze(0) & same_team & is_pick_s & valid_hero_s
+
+        # 2. Key Projection & Cross-Attention (B, 24, 5, 24)
+        E = self.joint_embedding.get_pure_hero_embeddings(x_draft[:, :, 2].long(), patch_ids)
+        K = self.w_k(E)  # (B, 24, d_model)
+
+        attn_logits = (
+            torch.matmul(self.slots, K.transpose(1, 2)) / math.sqrt(self.d_model)
+        )  # (B, 5, 24)
+        attn_logits = attn_logits.unsqueeze(1).expand(-1, seq_len, -1, -1)  # (B, 24, 5, 24)
+
+        mask = past_active_picks_mask.unsqueeze(2)  # (B, 24, 1, 24)
+        masked_logits = attn_logits.masked_fill(~mask, -1e9)
+
+        attn_weights = F.softmax(masked_logits / self.temperature, dim=2)
+        attn_weights = self.attn_dropout(attn_weights)
+
+        # 3. Smooth Differentiable Occupancy & Unfilled Weight
+        raw_occupancy = (attn_weights * mask.float()).sum(dim=-1)  # (B, 24, 5)
+        unfilled_weight = torch.exp(-raw_occupancy)  # (1 - alpha) in (0, 1]
+
+        # 4. Entropy Regularization
+        alpha = 1.0 - unfilled_weight
+        eps = 1e-6
+        entropy = -(
+            alpha * torch.log(alpha + eps) + (1.0 - alpha) * torch.log(1.0 - alpha + eps)
+        )
+        self._entropy_loss = self.entropy_lambda * entropy.mean()
+
+        # 5. Query Vector Construction & Logit Projection
+        h_query = torch.matmul(unfilled_weight, self.slots)  # (B, 24, d_model)
+        h_combined = self.layer_norm(decoder_output + h_query)
+        h_projected = self.w_policy(h_combined)  # (B, 24, d_model)
+
+        all_hero_indices = (
+            torch.arange(self.num_heroes + 1, device=device).unsqueeze(0).expand(batch_size, -1)
+        )
+        E_hero = self.joint_embedding.get_pure_hero_embeddings(all_hero_indices, patch_ids)
+
+        logits = torch.bmm(h_projected, E_hero.transpose(1, 2))  # (B, 24, num_heroes + 1)
+        return logits
+
+    def get_entropy_loss(self) -> torch.Tensor:
+        """Retrieve and reset the accumulated slot assignment entropy loss.
+
+        Returns:
+            Scalar tensor representing the entropy penalty for this batch.
+        """
+        loss = self._entropy_loss.clone()
+        self._entropy_loss.zero_()
+        return loss
+
+
 class HierarchicalTransformer(nn.Module):
     """Hierarchical Transformer (Match Network) for draft sequence modeling.
 
@@ -412,8 +539,13 @@ class HierarchicalTransformer(nn.Module):
             dropout=dropout,
         )
 
-        # MLM head for Masked Language Modeling pre-training
-        self.mlm_head = nn.Linear(d_model, num_heroes + 1)
+        # Slot-Attentive MLM head for positional constraint modeling
+        self.mlm_head = SlotAttentionMLMProjection(
+            d_model=d_model,
+            num_heroes=num_heroes,
+            joint_embedding=self.joint_embedding,
+            dropout=dropout,
+        )
 
         # Subtractive Role-Inhibition components
         self.w_inhibit = nn.Linear(d_model, d_model, bias=False)
@@ -438,7 +570,6 @@ class HierarchicalTransformer(nn.Module):
                 - Win probability scalar per sample, shape (B,).
                 - MLM logits per step, shape (B, 24, num_heroes + 1).
         """
-        batch_size = x_draft.size(0)
 
         # 1. Internal Right-Shift for Causal Policy Decoder (NTP Alignment)
         shifted_x_draft = x_draft.clone()
@@ -475,8 +606,8 @@ class HierarchicalTransformer(nn.Module):
             tgt_key_padding_mask=pad_mask,
         )  # (B, 24, d_model)
 
-        # Policy Head: Causal Next-Token Prediction Logits
-        mlm_logits = self.mlm_head(decoder_output)
+        # Policy Head: Causal Next-Token Prediction Logits via Slot Attention
+        mlm_logits = self.mlm_head(decoder_output, x_draft, patch_ids)
 
         # Subtractive Role-Inhibition: compute penalty from active team's past picks
         seq_len = x_draft.size(1)

@@ -412,7 +412,7 @@ class SlotAttentionMLMProjection(nn.Module):
 
         # 1. Causal Active Team Masking (B, 24, 24)
         step_indices = torch.arange(seq_len, device=device)
-        causal_mask = step_indices.unsqueeze(0) > step_indices.unsqueeze(1)  # s < t
+        causal_mask = step_indices.unsqueeze(0) < step_indices.unsqueeze(1)  # s < t
 
         is_pick_s = (x_draft[:, :, 0] == 1.0).unsqueeze(1)
         valid_hero_s = (x_draft[:, :, 2] >= 0.0).unsqueeze(1)

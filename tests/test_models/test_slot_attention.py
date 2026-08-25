@@ -100,7 +100,7 @@ def test_causality():
         logits_2 = head(decoder_output, x_draft_2)
 
     # Steps 0..10 should be identical (causal mask excludes step 10 for queries at step <= 10)
-    assert torch.allclose(logits_1[:, :11, :], logits_2[:, :11, :], atol=1e-3)
+    assert torch.allclose(logits_1[:, :11, :], logits_2[:, :11, :], atol=1e-7)
 
 
 def test_bans_and_padding_ignored():

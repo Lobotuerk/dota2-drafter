@@ -295,6 +295,10 @@ class DraftState(pymcts.MCTS_state):
         Returns:
             Float win probability in [0, 1].
         """
+        # Exclude ban states from neural network evaluation (return neutral 0.0)
+        if len(self.actions) > 0 and not self.actions[-1].is_pick:
+            return 0.0
+
         tensor = _build_tensor_from_moves(self.actions, self._num_heroes)
 
         # Pad to 24 steps if needed
@@ -362,107 +366,117 @@ class DraftState(pymcts.MCTS_state):
         device = self._resolve_model_device()
         self.model.eval()
 
-        # 1. Base batch
-        draft_tensors = [_build_tensor_from_moves(s.actions, K) for s in states]
-        base_batch = torch.stack(draft_tensors, dim=0).to(device)
-        comfort_base = self.comfort_matrix.unsqueeze(0).expand(M, -1, -1).to(device)
-
-        # 2. Vectorized child setup
-        valid_mask = torch.ones((M, K), dtype=torch.bool, device=device)
-        
-        step_indices = [len(s.actions) for s in states]
-        
+        # Partition states into pick states (root or last action is pick) and ban states
+        pick_indices = []
+        ban_indices = []
         for i, s in enumerate(states):
-            step_idx = step_indices[i]
-            if step_idx >= 24:
-                valid_mask[i, :] = False
-                continue
-                
-            used_heroes = {m.hero_id for m in s.actions if m.hero_id > 0}
-            for hero_id in used_heroes:
-                valid_mask[i, hero_id - 1] = False
+            if len(s.actions) > 0 and not s.actions[-1].is_pick:
+                ban_indices.append(i)
+            else:
+                pick_indices.append(i)
 
+        # Initialize results container
+        results = [None] * M
 
-        
-        # 3. AlphaZero-Style MCTS Evaluation
-        # We evaluate both the Win Probability (Value) and the MLM head (Policy) 
-        # instantly in a single batched forward pass!
-        with torch.no_grad():
-            # Run the base states through the network
-            # mlm_logits shape: (M, 24, num_heroes + 1)
-            # The model internally right-shifts hero_val for causal NTP alignment,
-            # so mlm_logits[i, step_idx] predicts the hero at step_idx given steps 0..step_idx-1.
+        # 1. Evaluate Pick States using the Neural Network
+        if pick_indices:
+            pick_states = [states[idx] for idx in pick_indices]
+            num_picks = len(pick_states)
 
-            logits, mlm_logits = self.model(base_batch, comfort_base)
-            win_probs = torch.sigmoid(logits)
-            
-            # Extract the specific logits for the exact step we are trying to predict
-            # Since right-shifting is encapsulated inside the model's forward pass,
-            # extracting the prior simplifies directly to querying step_idx position
-            policy_logits = torch.zeros(M, K, device=device)
-            for i, s in enumerate(states):
+            draft_tensors = [_build_tensor_from_moves(s.actions, K) for s in pick_states]
+            base_batch = torch.stack(draft_tensors, dim=0).to(device)
+            comfort_base = self.comfort_matrix.unsqueeze(0).expand(num_picks, -1, -1).to(device)
+
+            valid_mask = torch.ones((num_picks, K), dtype=torch.bool, device=device)
+            step_indices = [len(s.actions) for s in pick_states]
+
+            for i, s in enumerate(pick_states):
                 step_idx = step_indices[i]
-                if step_idx < 24:
-                    # We slice 1:K+1 because index 0 is reserved/padding in the MLM vocabulary
-                    policy_logits[i] = mlm_logits[i, step_idx, 1:K+1]
+                if step_idx >= 24:
+                    valid_mask[i, :] = False
+                    continue
 
-        # The Policy Logits represent P(a|s).
-        # Because we passed comfort_base into the model above, the network's internal cross-attention
-        # ALREADY dynamically adjusts policy_logits based on the Affinity and Wilson Scores of the players!
-        sort_scores = policy_logits.clone()
-        sort_scores = sort_scores.masked_fill(~valid_mask, float('-inf'))
-        
-        # Since we use the Policy for the Prior directly, we don't need perspective_mult 
-        # (the MLM naturally predicts the correct hero for the team whose turn it is).
-        active_scores = sort_scores.clone()
+                used_heroes = {m.hero_id for m in s.actions if m.hero_id > 0}
+                for hero_id in used_heroes:
+                    valid_mask[i, hero_id - 1] = False
 
-        # To slice to max_candidates, we set all non-topk to -inf
-        max_c = min(s.max_candidates for s in states) if states else 20
-        max_c = min(max_c, K)
-        
-        _, top_indices = torch.topk(sort_scores, k=max_c, dim=1)
-        topk_mask = torch.zeros((M, K), dtype=torch.bool, device=device)
-        topk_mask.scatter_(1, top_indices, True)
-        
-        active_scores = active_scores.masked_fill(~topk_mask, float('-inf'))
-        
-        log_probs = active_scores - active_scores.max(dim=1, keepdim=True).values
-        is_invalid = active_scores == float('-inf')
-        log_probs = log_probs.masked_fill(is_invalid, float('-inf'))
-        
-        priors_tensor = torch.exp(log_probs)
-        priors_sum = priors_tensor.sum(dim=1, keepdim=True)
-        priors_tensor = priors_tensor / priors_sum.clamp(min=1e-9)
-        
-        # CRITICAL FIX: PyMCTS explores nodes with P=0.0 because of the PUCT formula.
-        # We MUST assign a massive negative prior to completely block exploration of non-top-k branches!
-        priors_tensor = priors_tensor.masked_fill(is_invalid, -1e9)
-        
-        # 4. Write back to states and return
-        results = []
-        win_probs_cpu = win_probs.cpu().tolist()
-        priors_cpu = priors_tensor.cpu().tolist()
-        
-        for i, s in enumerate(states):
-            radiant = win_probs_cpu[i]
-            value = radiant if s.active_team == 0 else 1.0 - radiant
-            
-            step_idx = step_indices[i]
+            with torch.no_grad():
+                logits, mlm_logits = self.model(base_batch, comfort_base)
+                win_probs = torch.sigmoid(logits)
+
+                policy_logits = torch.zeros(num_picks, K, device=device)
+                for i, s in enumerate(pick_states):
+                    step_idx = step_indices[i]
+                    if step_idx < 24:
+                        policy_logits[i] = mlm_logits[i, step_idx, 1:K+1]
+
+            sort_scores = policy_logits.clone()
+            sort_scores = sort_scores.masked_fill(~valid_mask, float('-inf'))
+            active_scores = sort_scores.clone()
+
+            max_c = min(s.max_candidates for s in pick_states) if pick_states else 20
+            max_c = min(max_c, K)
+
+            _, top_indices = torch.topk(sort_scores, k=max_c, dim=1)
+            topk_mask = torch.zeros((num_picks, K), dtype=torch.bool, device=device)
+            topk_mask.scatter_(1, top_indices, True)
+
+            active_scores = active_scores.masked_fill(~topk_mask, float('-inf'))
+
+            log_probs = active_scores - active_scores.max(dim=1, keepdim=True).values
+            is_invalid = active_scores == float('-inf')
+            log_probs = log_probs.masked_fill(is_invalid, float('-inf'))
+
+            priors_tensor = torch.exp(log_probs)
+            priors_sum = priors_tensor.sum(dim=1, keepdim=True)
+            priors_tensor = priors_tensor / priors_sum.clamp(min=1e-9)
+            priors_tensor = priors_tensor.masked_fill(is_invalid, -1e9)
+
+            win_probs_cpu = win_probs.cpu().tolist()
+            priors_cpu = priors_tensor.cpu().tolist()
+
+            for i, idx in enumerate(pick_indices):
+                s = states[idx]
+                radiant = win_probs_cpu[i]
+                value = radiant if s.active_team == 0 else 1.0 - radiant
+
+                step_idx = step_indices[i]
+                if step_idx >= 24:
+                    s._cached_priors = []
+                    results[idx] = (value, [])
+                    continue
+
+                valid_priors = []
+                valid_moves = s.actions_to_try()
+                priors_list = priors_cpu[i]
+                for m in valid_moves:
+                    hero_idx = m.hero_id - 1
+                    valid_priors.append(priors_list[hero_idx])
+
+                s._cached_priors = valid_priors
+                results[idx] = (value, valid_priors)
+
+        # 2. Assign Neutral Values and Uniform Priors to Ban States
+        for idx in ban_indices:
+            s = states[idx]
+            value = 0.0
+
+            step_idx = len(s.actions)
             if step_idx >= 24:
                 s._cached_priors = []
-                results.append((value, []))
+                results[idx] = (value, [])
                 continue
-                
-            valid_priors = []
+
             valid_moves = s.actions_to_try()
-            priors_list = priors_cpu[i]
-            for m in valid_moves:
-                hero_idx = m.hero_id - 1
-                valid_priors.append(priors_list[hero_idx])
-                
+            if not valid_moves:
+                valid_priors = []
+            else:
+                p = 1.0 / len(valid_moves)
+                valid_priors = [p] * len(valid_moves)
+
             s._cached_priors = valid_priors
-            results.append((value, valid_priors))
-            
+            results[idx] = (value, valid_priors)
+
         return results
 
     def _get_player_index_for_step(self, step_index: int, team: int) -> int | None:

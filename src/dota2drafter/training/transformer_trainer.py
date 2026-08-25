@@ -648,8 +648,11 @@ class TransformerTrainer:
                     label_smoothing=0.10
                 )
                 
+                # Slot attention entropy regularization
+                entropy_loss = self.model.match_network.mlm_head.get_entropy_loss()
+
                 # Combine losses (AlphaZero-style dual objective)
-                total_loss = loss + 1.0 * mlm_loss
+                total_loss = loss + 1.0 * mlm_loss + entropy_loss
 
                 self.optimizer.zero_grad()
                 total_loss.backward()
@@ -743,7 +746,9 @@ class TransformerTrainer:
                 else:
                     loss = self.criterion(logits, y_batch)
 
-                val_loss += loss.item()
+                # Slot attention entropy regularization
+                entropy_loss = self.model.match_network.mlm_head.get_entropy_loss()
+                val_loss += (loss + entropy_loss).item()
                 all_preds.append(logits.cpu())
                 all_targets.append(y_batch.cpu())
                 val_batches += 1

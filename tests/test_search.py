@@ -324,37 +324,46 @@ def test_draft_state_evaluate_and_prune_moves_perspectives_and_caching():
     valid_moves = [m for m, p in zip(moves, state._cached_priors) if p > 0]
     assert set([m.hero_id for m in valid_moves]) == {120, 119, 118}
 
-    # Let's test with schedule team 0 (Radiant) at Step 2
-    move0 = DraftMove(hero_id=1, is_pick=False, team=1, step_index=0)
-    move1 = DraftMove(hero_id=2, is_pick=False, team=1, step_index=1)
-    state_step2 = DraftState(
+    # Let's test with schedule team 0 (Radiant) at Step 8 (after Dire pick at step 7)
+    # Build actions ending with a pick so the state is treated as a pick state
+    # (ban states are excluded from neural network evaluation per AUT-27)
+    moves_before_pick = []
+    for idx in range(7):  # steps 0-6 are all bans
+        action_type, team = DRAFT_SCHEDULE[idx]
+        moves_before_pick.append(
+            DraftMove(hero_id=idx + 1, is_pick=False, team=team, step_index=idx)
+        )
+    # Step 7 is Dire's first pick
+    moves_before_pick.append(
+        DraftMove(hero_id=8, is_pick=True, team=1, step_index=7)
+    )
+    state_after_pick = DraftState(
         model=mock_model,
         comfort_matrix=comfort_matrix,
         active_team=0,
         max_candidates=3,
-        initial_actions=[move0, move1]
+        initial_actions=moves_before_pick
     )
 
-    # Step 2 is Radiant's turn. We want to maximize win probability.
+    # Step 8 is Radiant's turn. We want to maximize win probability.
     # Descending sort of [0.0, 1.0, 2.0, ...] means larger logits are selected.
-    # Available heroes start from 3 onwards (since 1 and 2 are used).
+    # Available heroes start from 9 onwards (since 1..8 are used).
     # The last 3 available heroes should be selected because they have the highest index.
-    # Max hero index is 120 by default. Used: 1, 2. Available: 3..120 (118 total).
-    # Corresponding logits for index 0..117 of available list are 0.0..117.0.
-    # The top 3 logits are 117 (hero 120), 116 (hero 119), 115 (hero 118).
+    # Max hero index is 120 by default. Used: 1..8. Available: 9..120 (112 total).
+    # The top 3 logits are 111 (hero 120), 110 (hero 119), 109 (hero 118).
     # So descending sort of these should select hero_ids [120, 119, 118].
-    moves_step2 = state_step2.actions_to_try()
-    state_step2.get_action_probabilities()
-    valid_moves_step2 = [m for m, p in zip(moves_step2, state_step2._cached_priors) if p > 0]
-    assert set([m.hero_id for m in valid_moves_step2]) == {120, 119, 118}
+    moves_after_pick = state_after_pick.actions_to_try()
+    state_after_pick.get_action_probabilities()
+    valid_moves_after_pick = [m for m, p in zip(moves_after_pick, state_after_pick._cached_priors) if p > 0]
+    assert set([m.hero_id for m in valid_moves_after_pick]) == {120, 119, 118}
 
     # Test cloning passes max_candidates
-    cloned = state_step2.clone()
+    cloned = state_after_pick.clone()
     assert cloned.max_candidates == 3
     assert cloned._cached_valid_moves is None  # Cache should not be cloned
 
     # Test next_state passes max_candidates
-    next_s = state_step2.next_state(moves_step2[0])
+    next_s = state_after_pick.next_state(moves_after_pick[0])
     assert next_s.max_candidates == 3
     assert next_s._cached_valid_moves is None  # Cache should not be copied
 
@@ -552,5 +561,127 @@ def test_draft_state_evaluate_batch():
 
     # Terminal state: priors == []
     assert results[2][1] == []
+
+
+def test_draft_state_rollout_ban_vs_pick():
+    """Verify rollout returns 0.0 for ban states without calling the model."""
+    mock_model = MagicMock()
+    mock_model.predict_proba.return_value = torch.tensor([0.75])
+
+    comfort_matrix = torch.zeros(10, 64)
+
+    # Ban state: last action is a ban (step 0 is Dire ban)
+    ban_move = DraftMove(hero_id=1, is_pick=False, team=1, step_index=0)
+    ban_state = DraftState(
+        model=mock_model,
+        comfort_matrix=comfort_matrix,
+        active_team=0,
+        initial_actions=[ban_move],
+    )
+
+    # Pick state: last action is a pick (step 7 is Dire pick)
+    pick_move = DraftMove(hero_id=1, is_pick=True, team=1, step_index=7)
+    pick_state = DraftState(
+        model=mock_model,
+        comfort_matrix=comfort_matrix,
+        active_team=0,
+        initial_actions=[pick_move],
+    )
+
+    # Root state (no actions) should call the model
+    root_state = DraftState(
+        model=mock_model,
+        comfort_matrix=comfort_matrix,
+        active_team=0,
+    )
+
+    # Ban state should return 0.0 without calling the model
+    mock_model.reset_mock()
+    assert ban_state.rollout() == 0.0
+    mock_model.predict_proba.assert_not_called()
+
+    # Pick state should call the model and return win probability
+    assert pick_state.rollout() == 0.75
+    mock_model.predict_proba.assert_called()
+
+    # Root state should call the model
+    assert root_state.rollout() == 0.75
+
+
+def test_draft_state_evaluate_batch_filtering():
+    """Verify evaluate_batch excludes ban states from neural network forward pass."""
+
+    class _RecordingMock:
+        def __init__(self):
+            self.forward_calls: list[int] = []
+
+        def predict_proba(self, batch, comfort):
+            return torch.full((batch.shape[0],), 0.7)
+
+        def forward(self, batch, comfort, mlm_mode=False):
+            n = batch.shape[0]
+            self.forward_calls.append(n)
+            logits = torch.full((n,), 0.5)
+            mlm_logits = torch.zeros(n, 24, 128)
+            for hero_id in range(1, 121):
+                mlm_logits[:, :, hero_id] = hero_id
+            return logits, mlm_logits
+
+        def __call__(self, batch, comfort, **kwargs):
+            return self.forward(batch, comfort, **kwargs)
+
+        def eval(self):
+            return self
+
+    mock_model = _RecordingMock()
+    comfort_matrix = torch.zeros(10, 64)
+
+    # Pick state: last action is a pick
+    pick_move = DraftMove(hero_id=1, is_pick=True, team=0, step_index=8)
+    pick_state = DraftState(
+        model=mock_model,
+        comfort_matrix=comfort_matrix,
+        active_team=0,
+        initial_actions=[pick_move],
+    )
+
+    # Ban state: last action is a ban
+    ban_move = DraftMove(hero_id=2, is_pick=False, team=1, step_index=0)
+    ban_state = DraftState(
+        model=mock_model,
+        comfort_matrix=comfort_matrix,
+        active_team=0,
+        initial_actions=[ban_move],
+    )
+
+    # Root state: no actions (should be treated as pick state)
+    root_state = DraftState(
+        model=mock_model,
+        comfort_matrix=comfort_matrix,
+        active_team=0,
+    )
+
+    states = [pick_state, ban_state, root_state]
+    mock_model.forward_calls.clear()
+    results = pick_state.evaluate_batch(states)
+
+    # Neural network forward pass called exactly once with batch size 2
+    # (pick_state + root_state, NOT ban_state)
+    assert len(mock_model.forward_calls) == 1
+    assert mock_model.forward_calls[0] == 2
+
+    # Results length matches input length
+    assert len(results) == 3
+
+    # Ban state returns value 0.0
+    assert results[1][0] == 0.0
+
+    # Ban state priors are uniform over valid moves
+    ban_valid_moves = ban_state.actions_to_try()
+    ban_priors = results[1][1]
+    assert len(ban_priors) == len(ban_valid_moves)
+    expected_prior = 1.0 / len(ban_valid_moves)
+    for p in ban_priors:
+        assert pytest.approx(p, 1e-10) == expected_prior
 
 

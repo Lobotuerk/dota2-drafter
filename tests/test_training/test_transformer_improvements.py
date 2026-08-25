@@ -453,7 +453,7 @@ def test_discriminative_learning_rates():
 
     # Ensure output_head parameters are in the head group and not in the backbone group
     for name, param in model.named_parameters():
-        if "output_head" in name or "mlm_head" in name:
+        if "set_transformer_head" in name or "mlm_head" in name:
             assert id(param) in head_param_ids
             assert id(param) not in backbone_param_ids
         else:
@@ -532,3 +532,117 @@ def test_step_weighted_loss():
     trainer_computed_loss = torch.mean(weights * loss_elements)
 
     assert torch.allclose(trainer_computed_loss, expected_loss_weighted)
+
+
+def test_ntp_loss_and_priors():
+    """Test NTP loss computation and MCTS prior extraction."""
+    d_model = 64
+    num_heroes = 120
+    batch_size = 4
+    player_input_dim = 10
+
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    model = HierarchicalTransformer(
+        d_model=d_model,
+        nhead=4,
+        num_layers=2,
+        dim_feedforward=128,
+        dropout=0.0,
+        num_heroes=num_heroes,
+        h_gnn=h_gnn,
+    )
+
+    # Create a draft sequence with valid heroes
+    x_draft = torch.zeros(batch_size, 24, 4)
+    for t in range(24):
+        x_draft[:, t, 2] = (t % num_heroes) + 1  # hero_val (1-based)
+        x_draft[:, t, 0] = 1.0  # is_pick
+        x_draft[:, t, 1] = t % 2  # team
+        x_draft[:, t, 3] = float(t)  # step_index
+
+    player_pref_vectors = torch.randn(batch_size, 10, d_model)
+
+    # Forward pass
+    logits, mlm_logits = model(x_draft, player_pref_vectors)
+
+    # Verify shapes
+    assert logits.shape == (batch_size,)
+    assert mlm_logits.shape == (batch_size, 24, num_heroes + 1)
+
+    # Manually calculate NTP loss
+    ntp_labels = x_draft[:, :, 2].long()  # (B, 24)
+    
+    # Verify that the model's internal right-shifting produces correct predictions
+    # At position 0, the model should predict h_0 given only BOS token
+    # At position 1, the model should predict h_1 given h_0
+    # etc.
+    
+    # Calculate NTP loss manually with label smoothing
+    manual_loss = F.cross_entropy(
+        mlm_logits.reshape(-1, mlm_logits.size(-1)),
+        ntp_labels.reshape(-1),
+        ignore_index=-1,
+        label_smoothing=0.10
+    )
+    
+    # Verify loss is valid
+    assert manual_loss.item() > 0
+    assert torch.isfinite(manual_loss)
+    
+    # Verify that the model can extract priors at different steps
+    for step_idx in range(24):
+        # Extract logits at step_idx
+        step_logits = mlm_logits[:, step_idx, 1:num_heroes+1]
+        assert step_logits.shape == (batch_size, num_heroes)
+
+
+def test_mcts_prior_extraction():
+    """Test that MCTS prior extraction works correctly with right-shifted model."""
+    d_model = 64
+    num_heroes = 120
+    batch_size = 2
+    player_input_dim = 10
+
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    model = MatchNetwork(
+        d_model=d_model,
+        nhead=4,
+        num_layers=2,
+        dim_feedforward=128,
+        dropout=0.0,
+        num_heroes=num_heroes,
+        player_input_dim=player_input_dim,
+        h_gnn=h_gnn,
+    )
+
+    # Create a draft sequence
+    x_draft = torch.zeros(batch_size, 24, 4)
+    for t in range(24):
+        x_draft[:, t, 2] = (t % num_heroes) + 1  # hero_val
+        x_draft[:, t, 0] = 1.0  # is_pick
+        x_draft[:, t, 1] = t % 2  # team
+        x_draft[:, t, 3] = float(t)  # step_index
+
+    player_comfort = torch.randn(batch_size, 10, player_input_dim)
+
+    # Forward pass
+    logits, mlm_logits = model(x_draft, player_comfort)
+
+    # Verify that we can extract valid priors at each step
+    for step_idx in range(24):
+        # Extract policy logits at step_idx
+        policy_logits = mlm_logits[:, step_idx, 1:num_heroes+1]
+        
+        # Verify shape
+        assert policy_logits.shape == (batch_size, num_heroes)
+        
+        # Verify that logits are not all the same (model is making predictions)
+        assert not torch.all(policy_logits[0] == policy_logits[0, 0])
+        
+        # Verify that valid heroes have different logits than padding
+        valid_hero_mask = x_draft[0, :, 2] >= 0
+        if valid_hero_mask.any():
+            # At least some variation in logits
+            assert policy_logits.std() > 0

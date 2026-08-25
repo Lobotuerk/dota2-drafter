@@ -390,13 +390,15 @@ class DraftState(pymcts.MCTS_state):
         with torch.no_grad():
             # Run the base states through the network
             # mlm_logits shape: (M, 24, num_heroes + 1)
-            # The base_batch at step_idx contains our padding token (-1.0), so the MLM
-            # will explicitly try to predict which hero belongs in that empty slot!
+            # The model internally right-shifts hero_val for causal NTP alignment,
+            # so mlm_logits[i, step_idx] predicts the hero at step_idx given steps 0..step_idx-1.
 
             logits, mlm_logits = self.model(base_batch, comfort_base)
             win_probs = torch.sigmoid(logits)
             
             # Extract the specific logits for the exact step we are trying to predict
+            # Since right-shifting is encapsulated inside the model's forward pass,
+            # extracting the prior simplifies directly to querying step_idx position
             policy_logits = torch.zeros(M, K, device=device)
             for i, s in enumerate(states):
                 step_idx = step_indices[i]

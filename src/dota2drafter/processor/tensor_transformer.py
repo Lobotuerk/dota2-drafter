@@ -21,7 +21,7 @@ class ProcessedMatch:
     x_tensor: torch.Tensor  # (24, 4) - draft sequence: [hero_val, is_pick, team, step_index]
     y_tensor: torch.Tensor  # (1,) - radiant_win label
     match_id: str
-    patch_id: int  # Added: ID representing the game patch version
+    patch_id: int = 0  # Added: ID representing the game patch version
     radiant_players: list[int] = field(default_factory=list)
     dire_players: list[int] = field(default_factory=list)
     radiant_heroes: list[int] = field(default_factory=list)

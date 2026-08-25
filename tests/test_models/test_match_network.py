@@ -500,3 +500,41 @@ def test_subtractive_inhibition_causality():
     torch.testing.assert_close(mlm_logits_1[0, 0], mlm_logits_2[0, 0])
     torch.testing.assert_close(mlm_logits_1[0, 1], mlm_logits_2[0, 1])
 
+
+def test_match_network_predict_proba_with_patch_ids():
+    """Test MatchNetwork predict_proba accepts patch_ids and returns valid probabilities."""
+    d_model = 64
+    num_heroes = 120
+    player_input_dim = 10
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    model = MatchNetwork(
+        d_model=d_model,
+        nhead=4,
+        num_layers=2,
+        dim_feedforward=128,
+        dropout=0.0,
+        num_heroes=num_heroes,
+        player_input_dim=player_input_dim,
+        h_gnn=h_gnn,
+        num_patches=10,
+    )
+
+    x_draft = torch.zeros(1, 24, 4)
+    x_draft[0, :, 2] = torch.arange(24) + 1
+    x_draft[0, :, 0] = 1.0
+    x_draft[0, :, 3] = torch.arange(24).float()
+
+    player_comfort = torch.randn(1, 10, player_input_dim)
+
+    patch_1 = torch.tensor([1], dtype=torch.long)
+    proba_1 = model.predict_proba(x_draft, player_comfort, patch_ids=patch_1)
+
+    patch_2 = torch.tensor([2], dtype=torch.long)
+    proba_2 = model.predict_proba(x_draft, player_comfort, patch_ids=patch_2)
+
+    assert proba_1.shape == (1,)
+    assert proba_2.shape == (1,)
+    assert 0 <= proba_1.item() <= 1
+    assert 0 <= proba_2.item() <= 1
+

@@ -570,6 +570,7 @@ class HierarchicalTransformer(nn.Module):
                 - Win probability scalar per sample, shape (B,).
                 - MLM logits per step, shape (B, 24, num_heroes + 1).
         """
+        batch_size = x_draft.shape[0]
 
         # 1. Internal Right-Shift for Causal Policy Decoder (NTP Alignment)
         shifted_x_draft = x_draft.clone()

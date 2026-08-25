@@ -451,9 +451,9 @@ def test_discriminative_learning_rates():
     backbone_param_ids = {id(p) for p in backbone_group["params"]}
     head_param_ids = {id(p) for p in head_group["params"]}
 
-    # Ensure output_head parameters are in the head group and not in the backbone group
+    # Ensure set_transformer_head parameters are in the head group and not in the backbone group
     for name, param in model.named_parameters():
-        if "output_head" in name or "mlm_head" in name:
+        if "set_transformer_head" in name or "mlm_head" in name:
             assert id(param) in head_param_ids
             assert id(param) not in backbone_param_ids
         else:

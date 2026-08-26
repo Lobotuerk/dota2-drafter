@@ -45,6 +45,12 @@ class StateConfig:
 
 
 @dataclass
+class GraphConfig:
+    wilson_threshold: float = 0.50
+    gamma: float = 0.80
+
+
+@dataclass
 class PipelineConfig:
     cutoff_date: str = "2026-06-04"
     tiers: list[int] = field(default_factory=lambda: [1, 2])
@@ -53,6 +59,7 @@ class PipelineConfig:
     concurrency: ConcurrencyConfig = field(default_factory=lambda: ConcurrencyConfig())
     output: OutputConfig = field(default_factory=lambda: OutputConfig())
     state: StateConfig = field(default_factory=lambda: StateConfig())
+    graph: GraphConfig = field(default_factory=lambda: GraphConfig())
 
 
 def _resolve_env_vars(value: str) -> str:
@@ -104,6 +111,13 @@ def _load_state(data: dict[str, Any], config: PipelineConfig) -> StateConfig:
     )
 
 
+def _load_graph(data: dict[str, Any], config: PipelineConfig) -> GraphConfig:
+    return GraphConfig(
+        wilson_threshold=data.get("wilson_threshold", config.graph.wilson_threshold),
+        gamma=data.get("gamma", config.graph.gamma),
+    )
+
+
 def load_config(path: str | Path = "config.yaml") -> PipelineConfig:
     """Load pipeline configuration from a YAML file."""
     load_dotenv()
@@ -123,5 +137,6 @@ def load_config(path: str | Path = "config.yaml") -> PipelineConfig:
         concurrency=_load_concurrency(raw.get("concurrency", {}), base),
         output=_load_output(raw.get("output", {}), base),
         state=_load_state(raw.get("state", {}), base),
+        graph=_load_graph(raw.get("graph", {}), base),
     )
     return resolved

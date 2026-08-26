@@ -57,7 +57,6 @@ def test_parameter_registration():
     assert head.slots.requires_grad
     assert hasattr(head, "w_k")
     assert hasattr(head, "w_policy")
-    assert hasattr(head, "layer_norm")
 
 
 def test_forward_shape():
@@ -173,19 +172,6 @@ def test_smooth_gradient_flow():
     # Slots should have non-zero gradients
     assert head.slots.grad is not None
     assert head.slots.grad.abs().sum() > 0
-
-
-def test_layer_norm_residual():
-    """Verify layer norm is applied to decoder_output + h_query."""
-    d_model = 64
-    num_heroes = 120
-    batch_size = 2
-
-    head = _build_slot_head(d_model=d_model, num_heroes=num_heroes)
-
-    # Check that layer_norm is in the module
-    assert hasattr(head, "layer_norm")
-    assert isinstance(head.layer_norm, torch.nn.LayerNorm)
 
 
 def test_inference_fusion():

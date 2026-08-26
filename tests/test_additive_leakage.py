@@ -86,7 +86,7 @@ def test_additive_leakage(model, x_draft, patch_id, hero_indexer):
     _ = mlm_head(h_t, x_draft, patch_id)
     # Measure candidate scores
     logits_from_ht = torch.matmul(
-        mlm_head.w_policy(mlm_head.layer_norm(h_t_step)),
+        mlm_head.w_policy(h_t_step),
         e_hero.transpose(1, 2)
     ).squeeze()
 

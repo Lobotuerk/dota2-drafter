@@ -37,6 +37,14 @@ import torch
 from rich.console import Console
 from rich.logging import RichHandler
 
+# Disable optimized Scaled Dot Product Attention (SDPA) backends (FlashAttention, Memory-Efficient)
+# and force stable 'math_sdp' fallback. This prevents CUDA crashes (e.g. CUDA error: unknown error)
+# on newer GPU architectures and virtualized environments like WSL2, with zero impact on small sequence lengths.
+if torch.cuda.is_available():
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    torch.backends.cuda.enable_math_sdp(True)
+
 from dota2drafter.models.match_network import MatchNetwork
 from dota2drafter.training.transformer_trainer import TransformerTrainer, TrainingConfig
 from dota2drafter.processor.hero_indexer import HeroIndexer
@@ -135,8 +143,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--augment",
         type=str,
-        default="true",
-        help="Augmentation setting: 'true' (all 448), 'false' (none), or an integer representing the maximum number of variations allowed per original match (e.g. 5, 10, 20). (default: 'true')",
+        default="false",
+        help="Augmentation setting: 'true' (all 448), 'false' (none), or an integer representing the maximum number of variations allowed per original match (e.g. 5, 10, 20). (default: 'false')",
     )
     parser.add_argument(
         "--frozen_embeddings_path",

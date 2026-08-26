@@ -34,6 +34,14 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+# Disable optimized Scaled Dot Product Attention (SDPA) backends (FlashAttention, Memory-Efficient)
+# and force stable 'math_sdp' fallback. This prevents CUDA crashes (e.g. CUDA error: unknown error)
+# on newer GPU architectures and virtualized environments like WSL2, with zero impact on small sequence lengths.
+if torch.cuda.is_available():
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    torch.backends.cuda.enable_math_sdp(True)
+
 from dota2drafter.models.match_network import MatchNetwork
 from dota2drafter.processor.hero_indexer import HeroIndexer
 from dota2drafter.search.mcts_agent import Dota2DraftAgent

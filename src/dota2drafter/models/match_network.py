@@ -9,6 +9,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Disable optimized Scaled Dot Product Attention (SDPA) backends (FlashAttention, Memory-Efficient)
+# and force stable 'math_sdp' fallback. This prevents CUDA crashes (e.g. CUDA error: unknown error)
+# on newer GPU architectures and virtualized environments like WSL2, with zero impact on small sequence lengths.
+if torch.cuda.is_available():
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    torch.backends.cuda.enable_math_sdp(True)
+
 
 class SinusoidalPositionalEncoding(nn.Module):
     """Sinusoidal positional encoding for absolute draft positions (0-23)."""
@@ -43,12 +51,7 @@ class SinusoidalPositionalEncoding(nn.Module):
 
 
 class SetTransformerHead(nn.Module):
-    """Set Transformer Head for permutation-invariant win probability estimation.
-
-    Replaces the pooled output_head with a Set Transformer that models
-    team synergies (SAB), cross-team counters (cross-set attention), and
-    variable-length set pooling (PMA).
-    """
+    """Set Transformer Head for permutation-invariant win probability estimation."""
 
     def __init__(self, d_model: int = 128, dim_feedforward: int = 256, dropout: float = 0.1) -> None:
         """Initialize the Set Transformer Head.
@@ -61,22 +64,16 @@ class SetTransformerHead(nn.Module):
         super().__init__()
         self.d_model = d_model
 
-        # SAB: intra-team synergy attention
         self.sab = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
-
-        # Dedicated PMA modules for Radiant and Dire sets
         self.pma_r = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
         self.pma_d = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
 
-        # Cross-set attention (both directions)
         self.r2d_attn = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
         self.d2r_attn = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
 
-        # PMA seeds (k=1 per team)
         self.seed_r = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
         self.seed_d = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
 
-        # Value MLP
         self.value_mlp = nn.Sequential(
             nn.Linear(2 * d_model, dim_feedforward),
             nn.ReLU(),
@@ -100,7 +97,6 @@ class SetTransformerHead(nn.Module):
         """
         batch_size = x_draft.size(0)
 
-        # --- Vectorized Set Construction ---
         action_mask = x_draft[:, :, 0] == 1.0
         hero_valid = x_draft[:, :, 2] >= 0.0
         pick_mask = action_mask & hero_valid
@@ -109,10 +105,8 @@ class SetTransformerHead(nn.Module):
         r_mask = pick_mask & team_mask
         d_mask = pick_mask & (~team_mask)
 
-        # Zero-pad to max 5 heroes per team
         max_heroes = 5
 
-        # Radiant team set (Vectorized)
         r_cumsum = torch.cumsum(r_mask.long(), dim=-1)
         r_pick_idx = torch.where(r_mask, r_cumsum, torch.tensor(0, device=r_mask.device))
         r_valid_pick = (r_pick_idx >= 1) & (r_pick_idx <= max_heroes)
@@ -125,7 +119,6 @@ class SetTransformerHead(nn.Module):
         r_pad_mask = torch.ones(batch_size, max_heroes, dtype=torch.bool, device=hero_embeddings.device)
         r_pad_mask[rb_coords, rdest_coords] = False
 
-        # Dire team set (Vectorized)
         d_cumsum = torch.cumsum(d_mask.long(), dim=-1)
         d_pick_idx = torch.where(d_mask, d_cumsum, torch.tensor(0, device=d_mask.device))
         d_valid_pick = (d_pick_idx >= 1) & (d_pick_idx <= max_heroes)
@@ -138,9 +131,8 @@ class SetTransformerHead(nn.Module):
         d_pad_mask = torch.ones(batch_size, max_heroes, dtype=torch.bool, device=hero_embeddings.device)
         d_pad_mask[db_coords, ddest_coords] = False
 
-        # --- NaN Guard for empty team sets ---
-        empty_r = r_pad_mask.all(dim=-1, keepdim=True)  # (B, 1)
-        empty_d = d_pad_mask.all(dim=-1, keepdim=True)  # (B, 1)
+        empty_r = r_pad_mask.all(dim=-1, keepdim=True)
+        empty_d = d_pad_mask.all(dim=-1, keepdim=True)
 
         safe_r_pad_mask = r_pad_mask.clone()
         safe_r_pad_mask[empty_r.squeeze(-1), 0] = False
@@ -148,40 +140,32 @@ class SetTransformerHead(nn.Module):
         safe_d_pad_mask = d_pad_mask.clone()
         safe_d_pad_mask[empty_d.squeeze(-1), 0] = False
 
-        # --- Set Attention Block (SAB) ---
         r_syn, _ = self.sab(r_embeds, r_embeds, r_embeds, key_padding_mask=safe_r_pad_mask)
         d_syn, _ = self.sab(d_embeds, d_embeds, d_embeds, key_padding_mask=safe_d_pad_mask)
 
-        # --- Cross-Set Attention (symmetric) ---
         r_cross, _ = self.r2d_attn(r_syn, d_syn, d_syn, key_padding_mask=safe_d_pad_mask)
         d_cross, _ = self.d2r_attn(d_syn, r_syn, r_syn, key_padding_mask=safe_r_pad_mask)
 
-        # --- Pooling by Multihead Attention (PMA) ---
         seed_r = self.seed_r.expand(batch_size, 1, self.d_model)
         seed_d = self.seed_d.expand(batch_size, 1, self.d_model)
 
         v_r, _ = self.pma_r(seed_r, r_cross, r_cross, key_padding_mask=safe_r_pad_mask)
         v_d, _ = self.pma_d(seed_d, d_cross, d_cross, key_padding_mask=safe_d_pad_mask)
 
-        v_r = v_r.squeeze(1)  # (B, d_model)
-        v_d = v_d.squeeze(1)  # (B, d_model)
+        v_r = v_r.squeeze(1)
+        v_d = v_d.squeeze(1)
 
-        # Zero-out the pooled representations for empty teams to avoid gradients/noise from safe-masked slot
         v_r = v_r * (~empty_r).float()
         v_d = v_d * (~empty_d).float()
 
-        # --- Value MLP ---
-        concat = torch.cat([v_r, v_d], dim=-1)  # (B, 2 * d_model)
-        logits = self.value_mlp(concat).squeeze(-1)  # (B,)
+        concat = torch.cat([v_r, v_d], dim=-1)
+        logits = self.value_mlp(concat).squeeze(-1)
 
         return logits
 
 
 class JointEmbedding(nn.Module):
-    """Computes the joint embedding z_t for each draft action a_t = (h_t, p_t, c_t, o_t).
-
-    z_t = Project(H_GNN[h_t]) + W_type e(p_t) + W_team e(c_t) + PE(o_t)
-    """
+    """Computes joint embedding z_t for each draft action."""
 
     def __init__(self, d_model: int, num_heroes: int, h_gnn: torch.Tensor, num_patches: int = 30) -> None:
         """Initialize JointEmbedding.
@@ -194,33 +178,21 @@ class JointEmbedding(nn.Module):
         """
         super().__init__()
         self.d_model = d_model
-
-        # Frozen hero embeddings from RGCN
         self.register_buffer("h_gnn", h_gnn)
 
-        # Project: linear layer for hero embeddings
         self.project = nn.Linear(d_model, d_model)
-
-        # Action type embedding (Ban=0, Pick=1)
         self.w_type = nn.Embedding(2, d_model)
-
-        # Team side embedding (Radiant=0, Dire=1)
         self.w_team = nn.Embedding(2, d_model)
-
-        # Patch embedding
         self.w_patch = nn.Embedding(num_patches, d_model)
 
-        # FiLM parameters: Linear layers to generate gamma (scale) and beta (shift)
         self.film_gamma = nn.Linear(d_model, d_model)
         self.film_beta = nn.Linear(d_model, d_model)
 
-        # Initialize gamma near 1 and beta near 0 for identity transformation start
         nn.init.ones_(self.film_gamma.weight)
         nn.init.zeros_(self.film_gamma.bias)
         nn.init.zeros_(self.film_beta.weight)
         nn.init.zeros_(self.film_beta.bias)
 
-        # Positional encoding
         self.pos_enc = SinusoidalPositionalEncoding(d_model, max_len=24)
 
     def get_pure_hero_embeddings(
@@ -237,15 +209,15 @@ class JointEmbedding(nn.Module):
         """
         valid_heroes = (hero_indices >= 0)
         clamped_indices = hero_indices.clamp(min=0).long()
-        hero_embeds = self.h_gnn[clamped_indices]  # (B, seq_len, d_model)
-        hero_embeds = hero_embeds * valid_heroes.unsqueeze(-1).float() # Zero-out invalid slots
-        hero_projected = self.project(hero_embeds)  # (B, seq_len, d_model)
+        hero_embeds = self.h_gnn[clamped_indices]
+        hero_embeds = hero_embeds * valid_heroes.unsqueeze(-1).float()
+        hero_projected = self.project(hero_embeds)
 
         if patch_ids is not None:
             patch_ids_clamped = torch.clamp(patch_ids, 0, self.w_patch.num_embeddings - 1)
-            e_patch = self.w_patch(patch_ids_clamped)  # (B, d_model)
-            gamma = self.film_gamma(e_patch).unsqueeze(1)  # (B, 1, d_model)
-            beta = self.film_beta(e_patch).unsqueeze(1)  # (B, 1, d_model)
+            e_patch = self.w_patch(patch_ids_clamped)
+            gamma = self.film_gamma(e_patch).unsqueeze(1)
+            beta = self.film_beta(e_patch).unsqueeze(1)
             hero_projected = gamma * hero_projected + beta
 
         return hero_projected
@@ -258,16 +230,10 @@ class JointEmbedding(nn.Module):
         pre-multiplies the h_gnn buffer. Call this once before starting MCTS.
         """
         if isinstance(self.project, nn.Identity):
-            return  # Already fused
-            
-        # Compute projection once for all K heroes and replace the raw h_gnn buffer
+            return
         fused_h_gnn = self.project(self.h_gnn)
-        
-        # We must delete the old buffer first before re-registering it with new shape/data
         del self.h_gnn
         self.register_buffer("h_gnn", fused_h_gnn)
-        
-        # Replace the linear layer with an Identity function to make it a no-op
         self.project = nn.Identity()
 
     def forward(
@@ -287,77 +253,54 @@ class JointEmbedding(nn.Module):
         """
         batch_size, seq_len, _ = x_draft.shape
 
-        # Extract components from x_draft
-        hero_indices = x_draft[:, :, 2].long()  # hero_val -> hero indices
-        action_types = x_draft[:, :, 0].long()  # is_pick -> action type
-        teams = x_draft[:, :, 1].long()  # team -> team side
-        step_indices = x_draft[:, :, 3].long()  # step_index -> absolute position
+        hero_indices = x_draft[:, :, 2].long()
+        action_types = x_draft[:, :, 0].long()
+        teams = x_draft[:, :, 1].long()
+        step_indices = x_draft[:, :, 3].long()
 
-        # Hero embeddings: lookup H_GNN[hero_val], then project
-        # hero_indices: (B, 24) -> (B, 24, d_model)
-        # self.h_gnn is a registered buffer, natively aligned with module device
         valid_heroes = (hero_indices >= 0)
         clamped_indices = hero_indices.clamp(min=0)
-        hero_embeds = self.h_gnn[clamped_indices]  # (B, 24, d_model)
-        hero_embeds = hero_embeds * valid_heroes.unsqueeze(-1).float() # Zero-out invalid slots
-        hero_projected = self.project(hero_embeds)  # (B, 24, d_model)
+        hero_embeds = self.h_gnn[clamped_indices]
+        hero_embeds = hero_embeds * valid_heroes.unsqueeze(-1).float()
+        hero_projected = self.project(hero_embeds)
 
-        # Action type embeddings
-        # Clamp to valid range in case of -1 (ban/invalid)
         action_types_clamped = torch.clamp(action_types, 0, 1)
-        type_embeds = self.w_type(action_types_clamped)  # (B, 24, d_model)
+        type_embeds = self.w_type(action_types_clamped)
 
-        # Team side embeddings
         teams_clamped = torch.clamp(teams, 0, 1)
-        team_embeds = self.w_team(teams_clamped)  # (B, 24, d_model)
+        team_embeds = self.w_team(teams_clamped)
 
-        # Positional encoding using step index dynamically mapping to actual steps
         step_indices_clamped = torch.clamp(step_indices, 0, 23)
-        
-        # self.pos_enc.pe has shape (1, 24, d_model)
-        # We need to gather the correct PE for each step_index in the batch
-        # step_indices_clamped has shape (B, 24)
-        
-        # Expand PE to match batch size: (B, 24, d_model)
         pe_expanded = self.pos_enc.pe[:, :24, :].expand(batch_size, -1, -1)
-        
-        # Gather the specific PEs along the sequence dimension based on step_indices
         pos_embeds = torch.gather(
-            pe_expanded, 
-            dim=1, 
+            pe_expanded,
+            dim=1,
             index=step_indices_clamped.unsqueeze(-1).expand(-1, -1, self.d_model)
         )
 
-        # Joint embedding: sum of all components
         z = hero_projected + type_embeds + team_embeds + pos_embeds
-        
-        # Apply FiLM conditioning if patch_ids is provided
+
         if patch_ids is not None:
-            # 1. Get base patch embedding (e_patch)
             patch_ids_clamped = torch.clamp(patch_ids, 0, self.w_patch.num_embeddings - 1)
-            e_patch = self.w_patch(patch_ids_clamped)  # (B, d_model)
-            
-            # 2. Compute affine parameters and unsqueeze for sequence broadcasting
-            gamma = self.film_gamma(e_patch).unsqueeze(1)  # (B, 1, d_model)
-            beta = self.film_beta(e_patch).unsqueeze(1)    # (B, 1, d_model)
-            
-            # 3. Apply FiLM modulation: gamma * z + beta
+            e_patch = self.w_patch(patch_ids_clamped)
+            gamma = self.film_gamma(e_patch).unsqueeze(1)
+            beta = self.film_beta(e_patch).unsqueeze(1)
             z = gamma * z + beta
 
         return z
 
 
 class SlotAttentionMLMProjection(nn.Module):
-    """Custom Slot-Attentive Policy Head for positional constraint modeling in drafting."""
+    """Custom Slot-Attentive Policy Head with Multiplicative Candidate Role Gating."""
 
     def __init__(
         self,
         d_model: int,
         num_heroes: int,
         joint_embedding: nn.Module,
-        entropy_lambda: float = 0.01,
+        entropy_lambda: float = 0.05,
         dropout: float = 0.1,
-        temperature: float = 1.0,
+        temperature: float = 0.5,
     ) -> None:
         """Initialize the Slot-Attentive Policy Head.
 
@@ -377,18 +320,15 @@ class SlotAttentionMLMProjection(nn.Module):
         self.entropy_lambda = entropy_lambda
         self.temperature = temperature
 
-        # 5 learnable slot vectors representing Pos 1-5
-        self.slots = nn.Parameter(torch.randn(5, d_model) * 0.02)
+        # Initialize orthogonal slots
+        slots = torch.randn(5, d_model)
+        slots = F.normalize(slots, p=2, dim=-1) * 0.5
+        self.slots = nn.Parameter(slots)
 
-        # Key projection for active team picks
         self.w_k = nn.Linear(d_model, d_model, bias=False)
-
-        # Output projection and normalization
         self.w_policy = nn.Linear(d_model, d_model)
-        self.layer_norm = nn.LayerNorm(d_model)
         self.attn_dropout = nn.Dropout(p=dropout)
 
-        # Entropy loss buffer
         self.register_buffer("_entropy_loss", torch.tensor(0.0))
         self.raw_occupancy: torch.Tensor | None = None
 
@@ -452,17 +392,20 @@ class SlotAttentionMLMProjection(nn.Module):
         )
         self._entropy_loss = self.entropy_lambda * entropy.mean()
 
-        # 5. Query Vector Construction & Logit Projection
+        # 5. Multiplicative Candidate Role Gating
         h_query = torch.matmul(unfilled_weight, self.slots)  # (B, 24, d_model)
-        h_combined = self.layer_norm(decoder_output + h_query)
-        h_projected = self.w_policy(h_combined)  # (B, 24, d_model)
 
         all_hero_indices = (
             torch.arange(self.num_heroes + 1, device=device).unsqueeze(0).expand(batch_size, -1)
         )
         E_hero = self.joint_embedding.get_pure_hero_embeddings(all_hero_indices, patch_ids)
 
-        logits = torch.bmm(h_projected, E_hero.transpose(1, 2))  # (B, 24, num_heroes + 1)
+        gate_logits = torch.bmm(h_query, E_hero.transpose(1, 2)) / math.sqrt(self.d_model)
+        g = torch.sigmoid(gate_logits)  # (B, 24, num_heroes + 1)
+
+        base_logits = torch.bmm(self.w_policy(decoder_output), E_hero.transpose(1, 2))
+        logits = base_logits + torch.log(g + eps)
+
         return logits
 
     def get_entropy_loss(self) -> torch.Tensor:
@@ -516,15 +459,12 @@ class HierarchicalTransformer(nn.Module):
         self.d_model = d_model
         self.num_heroes = num_heroes
 
-        # Hero embeddings if not provided
         if h_gnn is None:
             h_gnn = torch.randn(num_heroes + 1, d_model)
         self.register_buffer("h_gnn", h_gnn)
 
-        # Joint embedding layer
         self.joint_embedding = JointEmbedding(d_model, num_heroes, self.h_gnn)
 
-        # Transformer decoder layers
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -534,14 +474,12 @@ class HierarchicalTransformer(nn.Module):
         )
         self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
 
-        # Set Transformer head for permutation-invariant value estimation
         self.set_transformer_head = SetTransformerHead(
             d_model=d_model,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
         )
 
-        # Slot-Attentive MLM head for positional constraint modeling
         self.mlm_head = SlotAttentionMLMProjection(
             d_model=d_model,
             num_heroes=num_heroes,
@@ -549,8 +487,9 @@ class HierarchicalTransformer(nn.Module):
             dropout=dropout,
         )
 
-        # Subtractive Role-Inhibition components
+        # Subtractive Role-Inhibition components initialized near identity
         self.w_inhibit = nn.Linear(d_model, d_model, bias=False)
+        nn.init.eye_(self.w_inhibit.weight)
         self.gamma = nn.Parameter(torch.tensor(1.0))
 
     def forward(
@@ -574,85 +513,70 @@ class HierarchicalTransformer(nn.Module):
         """
         batch_size = x_draft.shape[0]
 
-        # 1. Internal Right-Shift for Causal Policy Decoder (NTP Alignment)
+        # 1. Internal Right-Shift for Causal Policy Decoder
         shifted_x_draft = x_draft.clone()
-        shifted_x_draft[:, 0, 2] = -1.0           # Step 0 BOS prompt
-        shifted_x_draft[:, 1:, 2] = x_draft[:, :-1, 2]  # Right-shift hero IDs
+        shifted_x_draft[:, 0, 2] = -1.0
+        shifted_x_draft[:, 1:, 2] = x_draft[:, :-1, 2]
 
-        # Compute joint embeddings using shifted input for causal sequence modeling
-        z = self.joint_embedding(shifted_x_draft, patch_ids)  # (B, 24, d_model)
+        z = self.joint_embedding(shifted_x_draft, patch_ids)
 
-        # Prepare for transformer decoder:
-        # query = draft sequence (z), key/value = player preference vectors
-        # TransformerDecoder expects (batch, seq, feature) with batch_first=True
-        tgt = z  # (B, 24, d_model)
-        memory = player_pref_vectors  # (B, 10, d_model)
+        tgt = z
+        memory = player_pref_vectors
 
-        # Create a causal mask for the draft sequence to preserve ordering
         seq_len = z.size(1)
-        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=z.device), diagonal=1)
-        causal_mask = causal_mask.bool()
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=z.device), diagonal=1).bool()
 
-        # Create a pad mask where True indicates padded/ignored tokens.
-        # A token is padded if its hero index is -1.0 (no hero selected).
-        pad_mask = (x_draft[:, :, 2] == -1.0)
-        pad_mask = pad_mask.to(tgt.device)
+        pad_mask = (x_draft[:, :, 2] == -1.0).to(tgt.device)
 
-        # Run through transformer decoder
-        # tgt_mask: (seq_len, seq_len) for self-attention within target
         decoder_output = self.transformer_decoder(
             tgt=tgt,
             memory=memory,
             tgt_mask=causal_mask,
             tgt_key_padding_mask=pad_mask,
-        )  # (B, 24, d_model)
+        )
 
-        # Policy Head: Causal Next-Token Prediction Logits via Slot Attention
+        # 2. Policy Head Logits via Multiplicative Slot Attention
         mlm_logits = self.mlm_head(decoder_output, x_draft, patch_ids)
 
-        # Subtractive Role-Inhibition: compute penalty from active team's past picks
-        seq_len = x_draft.size(1)
-
-        # 1. Causal Active Team Masking (B, 24, 24)
+        # 3. Subtractive Role-Inhibition via Softplus
         step_indices = torch.arange(seq_len, device=x_draft.device)
-        causal_mask = step_indices.unsqueeze(0) < step_indices.unsqueeze(1)  # s < t
+        causal_mask = step_indices.unsqueeze(0) < step_indices.unsqueeze(1)
 
-        is_pick_s = (x_draft[:, :, 0] == 1.0).unsqueeze(1)       # (B, 1, 24)
-        valid_hero_s = (x_draft[:, :, 2] >= 0.0).unsqueeze(1)    # (B, 1, 24)
+        is_pick_s = (x_draft[:, :, 0] == 1.0).unsqueeze(1)
+        valid_hero_s = (x_draft[:, :, 2] >= 0.0).unsqueeze(1)
 
-        team_t = x_draft[:, :, 1].unsqueeze(2)  # (B, 24, 1)
-        team_s = x_draft[:, :, 1].unsqueeze(1)  # (B, 1, 24)
-        same_team = (team_t == team_s)           # (B, 24, 24)
+        team_t = x_draft[:, :, 1].unsqueeze(2)
+        team_s = x_draft[:, :, 1].unsqueeze(1)
+        same_team = (team_t == team_s)
 
         past_active_picks_mask = causal_mask.unsqueeze(0) & same_team & is_pick_s & valid_hero_s
-        mask_weight = past_active_picks_mask.float()  # (B, 24, 24)
+        mask_weight = past_active_picks_mask.float()
 
-        # 2. Extract and Average Active Pick Embeddings (v_active)
         draft_hero_embeds = self.joint_embedding.get_pure_hero_embeddings(
             x_draft[:, :, 2].long(), patch_ids
-        )  # (B, 24, d_model)
-        sum_embeds = torch.bmm(mask_weight, draft_hero_embeds)     # (B, 24, d_model)
-        num_picks = mask_weight.sum(dim=2, keepdim=True)            # (B, 24, 1)
-        v_active = sum_embeds / torch.clamp(num_picks, min=1.0)     # (B, 24, d_model)
+        )
+        sum_embeds = torch.bmm(mask_weight, draft_hero_embeds)
+        num_picks = mask_weight.sum(dim=2, keepdim=True)
+        v_active = sum_embeds / torch.clamp(num_picks, min=1.0)
 
-        # 3. Generate Candidate Inhibition Penalties
-        v_inhibit = self.w_inhibit(v_active)  # (B, 24, d_model)
+        v_inhibit = self.w_inhibit(v_active)
         all_hero_indices = torch.arange(
             self.num_heroes + 1, device=x_draft.device
         ).unsqueeze(0).expand(x_draft.size(0), -1)
         e_hero = self.joint_embedding.get_pure_hero_embeddings(
             all_hero_indices, patch_ids
-        )  # (B, K+1, d_model)
-        penalty_logits = torch.bmm(v_inhibit, e_hero.transpose(1, 2))  # (B, 24, K+1)
+        )
+        penalty_logits = torch.bmm(v_inhibit, e_hero.transpose(1, 2))
 
-        # 4. Apply Subtractive Penalty to Policy Logits
         inhibition_enabled = (num_picks > 0).float()
         effective_gamma = F.softplus(self.gamma)
-        inhibition_penalty = effective_gamma * torch.relu(penalty_logits) * inhibition_enabled
+
+        # Softplus prevents dead zero gradients
+        inhibition_penalty = effective_gamma * F.softplus(penalty_logits) * inhibition_enabled
         self.inhibition_penalty = inhibition_penalty
         mlm_logits = mlm_logits - inhibition_penalty
 
-        # Win prediction mode: Set Transformer Head (uses CLEAN, unshifted x_draft for exact hero/team alignment)
+        # Win prediction mode: Set Transformer Head
         hero_indices = x_draft[:, :, 2]
         pure_hero_embeds = self.joint_embedding.get_pure_hero_embeddings(hero_indices, patch_ids)
         logits = self.set_transformer_head(pure_hero_embeds, x_draft)
@@ -680,10 +604,7 @@ class HierarchicalTransformer(nn.Module):
 
 
 class MatchNetwork(nn.Module):
-    """Top-level Match Network that wraps PlayerComfortNetwork + HierarchicalTransformer.
-
-    Provides a unified interface: forward(draft_seq, player_matrices, h_gnn) -> probability.
-    """
+    """Top-level Match Network."""
 
     def __init__(
         self,
@@ -713,7 +634,6 @@ class MatchNetwork(nn.Module):
         self.d_model = d_model
         self.player_input_dim = player_input_dim
 
-        # Player Network
         from dota2drafter.models.player_network import PlayerComfortNetwork as _PCN
 
         self.player_network = _PCN(
@@ -721,7 +641,6 @@ class MatchNetwork(nn.Module):
             d_model=d_model,
         )
 
-        # Match Network (Hierarchical Transformer)
         self.match_network = HierarchicalTransformer(
             d_model=d_model,
             nhead=nhead,

@@ -13,7 +13,7 @@ Usage::
         --comfort_path data/player_comfort.pt \\
         --data_dir data \\
         --d_model 64 \\
-        --num_heroes 124 \\
+        --num_heroes 127 \\
         --max_iterations 1000 \\
         --max_seconds 30
 
@@ -92,7 +92,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate (default: 0.1)")
     parser.add_argument(
-        "--num_heroes", type=int, default=124, help="Number of heroes (default: 124)"
+        "--num_heroes", type=int, default=127, help="Number of heroes (default: 127)"
     )
     parser.add_argument(
         "--max_iterations", type=int, default=1000, help="Max MCTS iterations (default: 1000)"
@@ -539,6 +539,10 @@ def main() -> None:
         def forward(self, x_draft, player_comfort, *args, **kwargs):
             expanded_patch = self.p.expand(x_draft.size(0))
             return self.model(x_draft, player_comfort, patch_ids=expanded_patch, *args, **kwargs)
+        def fuse_embeddings_for_inference(self):
+            """Forward embedding fusion to underlying MatchNetwork for MCTS acceleration."""
+            if hasattr(self.model, "fuse_embeddings_for_inference"):
+                self.model.fuse_embeddings_for_inference()
             
     wrapped_model = PatchWrappedModel(model, patch_tensor)
     

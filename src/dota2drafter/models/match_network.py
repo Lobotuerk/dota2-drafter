@@ -390,6 +390,7 @@ class SlotAttentionMLMProjection(nn.Module):
 
         # Entropy loss buffer
         self.register_buffer("_entropy_loss", torch.tensor(0.0))
+        self.raw_occupancy: torch.Tensor | None = None
 
     def forward(
         self,
@@ -440,6 +441,7 @@ class SlotAttentionMLMProjection(nn.Module):
 
         # 3. Smooth Differentiable Occupancy & Unfilled Weight
         raw_occupancy = (attn_weights * mask.float()).sum(dim=-1)  # (B, 24, 5)
+        self.raw_occupancy = raw_occupancy
         unfilled_weight = torch.exp(-raw_occupancy)  # (1 - alpha) in (0, 1]
 
         # 4. Entropy Regularization
@@ -647,6 +649,7 @@ class HierarchicalTransformer(nn.Module):
         inhibition_enabled = (num_picks > 0).float()
         effective_gamma = F.softplus(self.gamma)
         inhibition_penalty = effective_gamma * torch.relu(penalty_logits) * inhibition_enabled
+        self.inhibition_penalty = inhibition_penalty
         mlm_logits = mlm_logits - inhibition_penalty
 
         # Win prediction mode: Set Transformer Head (uses CLEAN, unshifted x_draft for exact hero/team alignment)

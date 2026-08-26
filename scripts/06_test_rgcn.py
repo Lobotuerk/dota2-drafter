@@ -59,10 +59,16 @@ def parse_args() -> argparse.Namespace:
         "--num_heroes", type=int, default=128, help="Number of heroes (default: 128)"
     )
     parser.add_argument(
-        "--percentile_keep",
+        "--wilson_threshold",
+        type=float,
+        default=0.50,
+        help="Wilson Score threshold for pruning edges (default: 0.50)",
+    )
+    parser.add_argument(
+        "--gamma",
         type=float,
         default=0.80,
-        help="Percentile threshold to keep only top-N strongest edges (default: 0.80)",
+        help="Decay factor per major patch (default: 0.80)",
     )
     return parser.parse_args()
 
@@ -215,7 +221,11 @@ def main() -> None:
     # Build and prune graph
     extractor = DataExtractor(num_heroes=args.num_heroes)
     batches = extractor.load_batches(data_dir)
-    hero_graph = extractor.build_pruned_hero_graph(batches, percentile_keep=args.percentile_keep)
+    hero_graph = extractor.build_pruned_hero_graph(
+        batches,
+        wilson_threshold=args.wilson_threshold,
+        gamma=args.gamma,
+    )
 
     console.print(
         f"[bold blue]Graph built: {hero_graph.num_nodes} nodes, "

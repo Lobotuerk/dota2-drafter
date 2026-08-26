@@ -54,6 +54,8 @@ def train_embeddings(
     dgi_lr: float = 1e-2,
     batch_size: int = 256,
     device: str | None = None,
+    wilson_threshold: float = 0.50,
+    gamma: float = 0.80,
 ) -> Path:
     """End-to-end embedding pre-training pipeline.
 
@@ -96,7 +98,11 @@ def train_embeddings(
     num_heroes = extractor._num_heroes
     logger.info("Extracting Skip-Gram pairs and building hero graph...")
     pairs = extractor.extract_skip_gram_pairs(batches)
-    hero_graph = extractor.build_pruned_hero_graph(batches)
+    hero_graph = extractor.build_pruned_hero_graph(
+        batches,
+        wilson_threshold=wilson_threshold,
+        gamma=gamma,
+    )
 
     if len(pairs) == 0:
         raise ValueError("No Skip-Gram pairs extracted. Check input data.")

@@ -35,3 +35,8 @@ output:
 # State database
 state:
   database_path: "./state.db"
+
+# Graph construction settings
+graph:
+  wilson_threshold: 0.50
+  gamma: 0.80

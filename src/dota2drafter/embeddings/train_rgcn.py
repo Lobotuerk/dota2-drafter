@@ -124,7 +124,8 @@ def train_rgcn(
     device: str | None = None,
     hidden_dim: int | None = None,
     num_layers: int = 2,
-    percentile_keep: float = 0.80,
+    wilson_threshold: float = 0.50,
+    gamma: float = 0.80,
 ) -> Path:
     """Train the HeroRGCN model on the multi-relational hero graph.
 
@@ -143,7 +144,8 @@ def train_rgcn(
         device: Device to train on (auto-detected if None).
         hidden_dim: Hidden dimension for RGCN layers. Defaults to d_model.
         num_layers: Number of RGCN layers (1-2 recommended).
-        percentile_keep: Percentile threshold to keep only top-N strongest edges (default 0.80).
+        wilson_threshold: Wilson Score threshold for pruning edges (default 0.50).
+        gamma: Decay factor per major patch (default 0.80).
 
     Returns:
         Path to the saved RGCN model weights.
@@ -159,8 +161,12 @@ def train_rgcn(
     num_heroes = extractor._num_heroes
 
     # Step 2: Build and prune multi-relational graph
-    logger.info("Step 2: Building and pruning multi-relational hero graph (percentile_keep=%.2f)...", percentile_keep)
-    full_hero_graph = extractor.build_pruned_hero_graph(batches, percentile_keep=percentile_keep)
+    logger.info("Step 2: Building and pruning multi-relational hero graph (wilson_threshold=%.2f, gamma=%.2f)...", wilson_threshold, gamma)
+    full_hero_graph = extractor.build_pruned_hero_graph(
+        batches,
+        wilson_threshold=wilson_threshold,
+        gamma=gamma,
+    )
     
     # --- Edge Splitting for Validation ---
     num_edges = full_hero_graph.edge_index.shape[1]

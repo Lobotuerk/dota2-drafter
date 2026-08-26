@@ -118,7 +118,10 @@ def parse_args() -> argparse.Namespace:
         "--num_heroes", type=int, default=127, help="Number of heroes (default: 127)"
     )
     parser.add_argument(
-        "--percentile_keep", type=float, default=0.80, help="Percentile threshold to keep only top-N strongest edges (default: 0.80)"
+        "--wilson_threshold", type=float, default=0.50, help="Wilson Score threshold for pruning edges (default: 0.50)"
+    )
+    parser.add_argument(
+        "--gamma", type=float, default=0.80, help="Decay factor per major patch (default: 0.80)"
     )
     parser.add_argument(
         "--label_smoothing_eps", type=float, default=0.15, help="Label smoothing epsilon value (default: 0.15)"
@@ -193,7 +196,8 @@ def load_h_gnn(
         max_hero_idx: int,
         d_model: int,
         data_dir: Path,
-        percentile_keep: float = 0.80,
+        wilson_threshold: float = 0.50,
+        gamma: float = 0.80,
     ) -> torch.Tensor:
         """Load RGCN embeddings, dynamically extracting them if a state_dict is provided."""
         h_gnn_loaded = torch.load(rgcn_path, weights_only=True)
@@ -211,7 +215,11 @@ def load_h_gnn(
 
             extractor = DataExtractor(num_heroes=max_hero_idx)
             batches = extractor.load_batches(data_dir)
-            hero_graph = extractor.build_pruned_hero_graph(batches, percentile_keep=percentile_keep)
+            hero_graph = extractor.build_pruned_hero_graph(
+                batches,
+                wilson_threshold=wilson_threshold,
+                gamma=gamma,
+            )
 
             h_gnn = rgcn_model.get_embeddings(hero_graph)
             console.print(f"[bold green]Extracted raw H_GNN embeddings of shape {tuple(h_gnn.shape)} from loaded model state_dict.[/bold green]")
@@ -259,7 +267,8 @@ def main() -> None:
             max_hero_idx,
             args.d_model,
             Path(args.data_dir),
-            percentile_keep=args.percentile_keep,
+            wilson_threshold=args.wilson_threshold,
+            gamma=args.gamma,
         )
 
         console.print("[bold blue]Loading comfort map...[/bold blue]")

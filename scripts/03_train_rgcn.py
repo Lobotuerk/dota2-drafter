@@ -87,7 +87,10 @@ def parse_args() -> argparse.Namespace:
         "--num_layers", type=int, default=2, help="Number of RGCN layers (default: 2)"
     )
     parser.add_argument(
-        "--percentile_keep", type=float, default=0.80, help="Percentile threshold to keep only top-N strongest edges (default: 0.80)"
+        "--wilson_threshold", type=float, default=0.50, help="Wilson Score threshold for pruning edges (default: 0.50)"
+    )
+    parser.add_argument(
+        "--gamma", type=float, default=0.80, help="Decay factor per major patch (default: 0.80)"
     )
     parser.add_argument(
         "--device", type=str, default=None, help='Device: "cpu" or "cuda" (auto-detect if None)'
@@ -133,7 +136,8 @@ def main() -> None:
             learning_rate=args.learning_rate,
             device=args.device,
             num_layers=args.num_layers,
-            percentile_keep=args.percentile_keep,
+            wilson_threshold=args.wilson_threshold,
+            gamma=args.gamma,
         )
         console.print(f"[bold green]Saved RGCN model to: {result}[/bold green]")
 
@@ -162,7 +166,11 @@ def main() -> None:
         data_dir = Path(args.data_dir)
         extractor = DataExtractor(num_heroes=args.num_heroes)
         batches = extractor.load_batches(data_dir)
-        hero_graph = extractor.build_hero_graph(batches)
+        hero_graph = extractor.build_pruned_hero_graph(
+            batches,
+            wilson_threshold=args.wilson_threshold,
+            gamma=args.gamma,
+        )
 
         with torch.no_grad():
             h_gnn = model.get_embeddings(hero_graph)

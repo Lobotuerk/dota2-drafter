@@ -87,9 +87,6 @@ def parse_args() -> argparse.Namespace:
         "--num_layers", type=int, default=2, help="Number of RGCN layers (default: 2)"
     )
     parser.add_argument(
-        "--percentile_keep", type=float, default=None, help="(Deprecated) Percentile threshold to keep only top-N strongest edges"
-    )
-    parser.add_argument(
         "--wilson_threshold", type=float, default=0.50, help="Wilson Score threshold for pruning edges (default: 0.50)"
     )
     parser.add_argument(
@@ -141,7 +138,6 @@ def main() -> None:
             num_layers=args.num_layers,
             wilson_threshold=args.wilson_threshold,
             gamma=args.gamma,
-            percentile_keep=args.percentile_keep,
         )
         console.print(f"[bold green]Saved RGCN model to: {result}[/bold green]")
 

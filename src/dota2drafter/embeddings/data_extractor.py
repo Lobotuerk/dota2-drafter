@@ -146,7 +146,6 @@ class DataExtractor:
         batches: list[dict[str, Any]],
         wilson_threshold: float = 0.50,
         gamma: float = 0.80,
-        percentile_keep: float | None = None,
     ) -> Data:
         """Build a multi-relational hero graph using Patch-Weighted Wilson Score.
         
@@ -157,7 +156,6 @@ class DataExtractor:
             batches: List of batch dictionaries containing match data
             wilson_threshold: Minimum Wilson Score to keep an edge (default 0.50)
             gamma: Decay factor per major patch (default 0.80)
-            percentile_keep: Deprecated parameter, kept for backward compatibility
             
         Returns:
             PyG Data object with edge_index, edge_type, and edge_weight

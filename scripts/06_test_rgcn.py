@@ -59,12 +59,6 @@ def parse_args() -> argparse.Namespace:
         "--num_heroes", type=int, default=128, help="Number of heroes (default: 128)"
     )
     parser.add_argument(
-        "--percentile_keep",
-        type=float,
-        default=None,
-        help="(Deprecated) Percentile threshold to keep only top-N strongest edges",
-    )
-    parser.add_argument(
         "--wilson_threshold",
         type=float,
         default=0.50,
@@ -231,7 +225,6 @@ def main() -> None:
         batches,
         wilson_threshold=args.wilson_threshold,
         gamma=args.gamma,
-        percentile_keep=args.percentile_keep,
     )
 
     console.print(

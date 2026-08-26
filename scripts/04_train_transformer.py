@@ -118,9 +118,6 @@ def parse_args() -> argparse.Namespace:
         "--num_heroes", type=int, default=127, help="Number of heroes (default: 127)"
     )
     parser.add_argument(
-        "--percentile_keep", type=float, default=None, help="(Deprecated) Percentile threshold to keep only top-N strongest edges"
-    )
-    parser.add_argument(
         "--wilson_threshold", type=float, default=0.50, help="Wilson Score threshold for pruning edges (default: 0.50)"
     )
     parser.add_argument(
@@ -201,7 +198,6 @@ def load_h_gnn(
         data_dir: Path,
         wilson_threshold: float = 0.50,
         gamma: float = 0.80,
-        percentile_keep: float | None = None,
     ) -> torch.Tensor:
         """Load RGCN embeddings, dynamically extracting them if a state_dict is provided."""
         h_gnn_loaded = torch.load(rgcn_path, weights_only=True)
@@ -223,7 +219,6 @@ def load_h_gnn(
                 batches,
                 wilson_threshold=wilson_threshold,
                 gamma=gamma,
-                percentile_keep=percentile_keep,
             )
 
             h_gnn = rgcn_model.get_embeddings(hero_graph)
@@ -274,7 +269,6 @@ def main() -> None:
             Path(args.data_dir),
             wilson_threshold=args.wilson_threshold,
             gamma=args.gamma,
-            percentile_keep=args.percentile_keep,
         )
 
         console.print("[bold blue]Loading comfort map...[/bold blue]")

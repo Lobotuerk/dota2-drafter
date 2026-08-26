@@ -126,7 +126,6 @@ def train_rgcn(
     num_layers: int = 2,
     wilson_threshold: float = 0.50,
     gamma: float = 0.80,
-    percentile_keep: float | None = None,
 ) -> Path:
     """Train the HeroRGCN model on the multi-relational hero graph.
 
@@ -145,7 +144,8 @@ def train_rgcn(
         device: Device to train on (auto-detected if None).
         hidden_dim: Hidden dimension for RGCN layers. Defaults to d_model.
         num_layers: Number of RGCN layers (1-2 recommended).
-        percentile_keep: Percentile threshold to keep only top-N strongest edges (default 0.80).
+        wilson_threshold: Wilson Score threshold for pruning edges (default 0.50).
+        gamma: Decay factor per major patch (default 0.80).
 
     Returns:
         Path to the saved RGCN model weights.
@@ -166,7 +166,6 @@ def train_rgcn(
         batches,
         wilson_threshold=wilson_threshold,
         gamma=gamma,
-        percentile_keep=percentile_keep,
     )
     
     # --- Edge Splitting for Validation ---

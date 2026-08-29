@@ -108,3 +108,48 @@ def test_subtractive_role_inhibition(model, x_draft_slark_sf, patch_id, hero_ind
         f"Role suppression failed: Net logit ({net_logit_lina:.2f}) is not reduced "
         f"relative to base logit ({base_logit_lina:.2f}) by penalty ({penalty_lina:.2f})"
     )
+
+
+@torch.no_grad()
+def test_puck_invoker_role_repulsion(model, patch_id, hero_indexer):
+    """Verify that picking Invoker (Pos 2) penalizes recommending Puck (Pos 2) on the same team."""
+    device = next(model.parameters()).device
+    patch_id = patch_id.to(device)
+
+    invoker_idx = hero_indexer.map_hero_id(74)  # Invoker ID = 74
+    puck_idx = hero_indexer.map_hero_id(13)     # Puck ID = 13
+    cm_idx = hero_indexer.map_hero_id(5)        # Crystal Maiden ID = 5
+
+    x_draft = torch.zeros(1, 24, 4, device=device)
+    x_draft[:, :, 2] = -1.0  # Default padding
+    x_draft[0, 0] = torch.tensor([1.0, 0.0, float(invoker_idx), 0.0], device=device)  # Team 0 picks Invoker
+    x_draft[0, 1] = torch.tensor([1.0, 1.0, 1.0, 1.0], device=device)                  # Team 1 picks dummy
+
+    dummy_comfort = torch.zeros((1, 10, model.player_input_dim), device=device)
+    _, mlm_logits = model(x_draft, dummy_comfort, patch_ids=patch_id)
+
+    step_t = 2
+    penalty = model.match_network.inhibition_penalty.squeeze(0)
+
+    penalty_puck = penalty[step_t, puck_idx].item()
+    penalty_cm = penalty[step_t, cm_idx].item()
+    logit_puck = mlm_logits[0, step_t, puck_idx].item()
+    logit_cm = mlm_logits[0, step_t, cm_idx].item()
+
+    print("\n--- Invoker + Puck Role Repulsion Diagnostics ---")
+    print(f"Subtractive Penalty for Puck (Mid):   {penalty_puck:.3f}")
+    print(f"Subtractive Penalty for CM (Support): {penalty_cm:.3f}")
+    print(f"Net Policy Logit for Puck (Mid):      {logit_puck:.3f}")
+    print(f"Net Policy Logit for CM (Support):    {logit_cm:.3f}")
+
+    # 1. Role Penalty Assertion: Duplicate Mid (Puck) must receive a higher penalty than Support (CM)
+    assert penalty_puck > penalty_cm, (
+        f"Invoker-Puck repulsion failed: Puck penalty ({penalty_puck:.3f}) was not "
+        f"higher than CM penalty ({penalty_cm:.3f}) after Invoker pick."
+    )
+
+    # 2. Net Policy Assertion: Support (CM) should be favored over duplicate Mid (Puck)
+    assert logit_cm > logit_puck, (
+        f"Role suppression failed: Net Puck logit ({logit_puck:.2f}) remains "
+        f"higher than CM logit ({logit_cm:.2f}) after Invoker pick."
+    )

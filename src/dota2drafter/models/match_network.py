@@ -300,7 +300,8 @@ class SlotAttentionMLMProjection(nn.Module):
         joint_embedding: nn.Module,
         entropy_lambda: float = 0.05,
         dropout: float = 0.1,
-        temperature: float = 0.5,
+        temperature: float = 0.15,
+        ortho_lambda: float = 0.05,
     ) -> None:
         """Initialize the Slot-Attentive Policy Head.
 
@@ -312,6 +313,7 @@ class SlotAttentionMLMProjection(nn.Module):
             entropy_lambda: Scaling coefficient for the slot occupancy entropy regularization.
             dropout: Dropout rate applied to slot assignment attention maps.
             temperature: Scaling temperature for softmax inside slot assignment.
+            ortho_lambda: Scaling coefficient for the slot parameters cosine orthogonality penalty.
         """
         super().__init__()
         self.d_model = d_model
@@ -319,15 +321,21 @@ class SlotAttentionMLMProjection(nn.Module):
         self.joint_embedding = joint_embedding
         self.entropy_lambda = entropy_lambda
         self.temperature = temperature
+        self.ortho_lambda = ortho_lambda
 
         # Initialize orthogonal slots
         slots = torch.randn(5, d_model)
-        slots = F.normalize(slots, p=2, dim=-1) * 0.5
+        slots = F.normalize(slots, p=2, dim=-1)
         self.slots = nn.Parameter(slots)
 
         self.w_k = nn.Linear(d_model, d_model, bias=False)
+        # Orthogonal initialization ensures maximum directional diversity across hero roles
+        nn.init.orthogonal_(self.w_k.weight, gain=1.0)
         self.w_policy = nn.Linear(d_model, d_model)
         self.attn_dropout = nn.Dropout(p=dropout)
+
+        # Learnable policy projection temperature initialized at 4.0
+        self.tau = nn.Parameter(torch.tensor(4.0))
 
         self.register_buffer("_entropy_loss", torch.tensor(0.0))
         self.raw_occupancy: torch.Tensor | None = None
@@ -364,13 +372,28 @@ class SlotAttentionMLMProjection(nn.Module):
 
         past_active_picks_mask = causal_mask.unsqueeze(0) & same_team & is_pick_s & valid_hero_s
 
-        # 2. Key Projection & Cross-Attention (B, 24, 5, 24)
-        E = self.joint_embedding.get_pure_hero_embeddings(x_draft[:, :, 2].long(), patch_ids)
-        K = self.w_k(E)  # (B, 24, d_model)
+        # 2. Extract Candidate Keys for globally centered projection
+        all_hero_indices = (
+            torch.arange(self.num_heroes + 1, device=device).unsqueeze(0).expand(batch_size, -1)
+        )
+        E_hero = self.joint_embedding.get_pure_hero_embeddings(all_hero_indices, patch_ids)
 
-        attn_logits = (
-            torch.matmul(self.slots, K.transpose(1, 2)) / math.sqrt(self.d_model)
-        )  # (B, 5, 24)
+        # Project candidate heroes into Key Space and compute global mean for centering
+        K_raw_all = self.w_k(E_hero)
+        K_mean = K_raw_all.mean(dim=-2, keepdim=True)
+        K_hero = F.normalize(K_raw_all - K_mean, p=2, dim=-1)
+        self.centered_K_hero = K_hero  # Cache mean-centered keys for HierarchicalTransformer
+
+        # Extract draft sequence keys, centered using the global candidate mean
+        E = self.joint_embedding.get_pure_hero_embeddings(x_draft[:, :, 2].long(), patch_ids)
+        K_seq_raw = self.w_k(E)
+        K_norm = F.normalize(K_seq_raw - K_mean, p=2, dim=-1)
+
+        norm_slots = F.normalize(self.slots, p=2, dim=-1)
+
+        # 3. Cross-Attention (B, 24, 5, 24)
+        # Pure normalized cosine attention scaled by 10.0
+        attn_logits = 10.0 * torch.matmul(norm_slots, K_norm.transpose(1, 2))  # (B, 5, 24)
         attn_logits = attn_logits.unsqueeze(1).expand(-1, seq_len, -1, -1)  # (B, 24, 5, 24)
 
         mask = past_active_picks_mask.unsqueeze(2)  # (B, 24, 1, 24)
@@ -379,32 +402,40 @@ class SlotAttentionMLMProjection(nn.Module):
         attn_weights = F.softmax(masked_logits / self.temperature, dim=2)
         attn_weights = self.attn_dropout(attn_weights)
 
-        # 3. Smooth Differentiable Occupancy & Unfilled Weight
+        # 4. Smooth Differentiable Occupancy & Unfilled Weight
         raw_occupancy = (attn_weights * mask.float()).sum(dim=-1)  # (B, 24, 5)
         self.raw_occupancy = raw_occupancy
         unfilled_weight = torch.exp(-raw_occupancy)  # (1 - alpha) in (0, 1]
 
-        # 4. Entropy Regularization
+        # 5. Entropy & Orthogonality Regularization
         alpha = 1.0 - unfilled_weight
         eps = 1e-6
         entropy = -(
             alpha * torch.log(alpha + eps) + (1.0 - alpha) * torch.log(1.0 - alpha + eps)
         )
-        self._entropy_loss = self.entropy_lambda * entropy.mean()
 
-        # 5. Multiplicative Candidate Role Gating
+        # Cosine orthogonality penalty to stop slot vector collapse
+        cos_sim = torch.matmul(norm_slots, norm_slots.t())  # (5, 5)
+        eye = torch.eye(5, device=device)
+        ortho_loss = torch.sum((cos_sim - eye) ** 2)
+
+        self._entropy_loss = self.entropy_lambda * entropy.mean() + self.ortho_lambda * ortho_loss
+
+        # 6. Multiplicative Candidate Role Gating
         h_query = torch.matmul(unfilled_weight, self.slots)  # (B, 24, d_model)
 
-        all_hero_indices = (
-            torch.arange(self.num_heroes + 1, device=device).unsqueeze(0).expand(batch_size, -1)
-        )
-        E_hero = self.joint_embedding.get_pure_hero_embeddings(all_hero_indices, patch_ids)
-
-        gate_logits = torch.bmm(h_query, E_hero.transpose(1, 2)) / math.sqrt(self.d_model)
+        gate_logits = torch.bmm(h_query, K_hero.transpose(1, 2)) / math.sqrt(self.d_model)
         g = torch.sigmoid(gate_logits)  # (B, 24, num_heroes + 1)
 
-        base_logits = torch.bmm(self.w_policy(decoder_output), E_hero.transpose(1, 2))
-        logits = base_logits + torch.log(g + eps)
+        # Cosine-Scaled Policy Projection with learnable temperature tau capped to [0.1, 4.0]
+        norm_w_policy = F.normalize(self.w_policy(decoder_output), p=2, dim=-1)
+        norm_E_hero = F.normalize(E_hero, p=2, dim=-1)
+        cos_sim_policy = torch.bmm(norm_w_policy, norm_E_hero.transpose(1, 2))
+        tau = torch.clamp(self.tau, min=0.1, max=4.0)
+        base_logits = tau * cos_sim_policy
+
+        gate_impact = 3.0 * torch.log(g + eps)
+        logits = base_logits + gate_impact
 
         return logits
 
@@ -485,12 +516,11 @@ class HierarchicalTransformer(nn.Module):
             num_heroes=num_heroes,
             joint_embedding=self.joint_embedding,
             dropout=dropout,
+            ortho_lambda=0.25,      # Increased from 0.05 to enforce rigid slot separation
+            entropy_lambda=0.10,
         )
 
-        # Subtractive Role-Inhibition components initialized near identity
-        self.w_inhibit = nn.Linear(d_model, d_model, bias=False)
-        nn.init.eye_(self.w_inhibit.weight)
-        self.gamma = nn.Parameter(torch.tensor(1.0))
+        self.gamma = nn.Parameter(torch.tensor(3.0))
 
     def forward(
         self,
@@ -550,29 +580,36 @@ class HierarchicalTransformer(nn.Module):
         same_team = (team_t == team_s)
 
         past_active_picks_mask = causal_mask.unsqueeze(0) & same_team & is_pick_s & valid_hero_s
-        mask_weight = past_active_picks_mask.float()
-
-        draft_hero_embeds = self.joint_embedding.get_pure_hero_embeddings(
-            x_draft[:, :, 2].long(), patch_ids
-        )
-        sum_embeds = torch.bmm(mask_weight, draft_hero_embeds)
-        num_picks = mask_weight.sum(dim=2, keepdim=True)
-        v_active = sum_embeds / torch.clamp(num_picks, min=1.0)
-
-        v_inhibit = self.w_inhibit(v_active)
-        all_hero_indices = torch.arange(
-            self.num_heroes + 1, device=x_draft.device
-        ).unsqueeze(0).expand(x_draft.size(0), -1)
-        e_hero = self.joint_embedding.get_pure_hero_embeddings(
-            all_hero_indices, patch_ids
-        )
-        penalty_logits = torch.bmm(v_inhibit, e_hero.transpose(1, 2))
-
+        num_picks = past_active_picks_mask.float().sum(dim=2, keepdim=True)
         inhibition_enabled = (num_picks > 0).float()
+
+        #Query filled slot vectors (h_filled = sum alpha_k * slot_k in Key Space)
+        if self.mlm_head.raw_occupancy is not None:
+            alpha = 1.0 - torch.exp(-self.mlm_head.raw_occupancy)  # (B, 24, 5)
+            norm_slots = F.normalize(self.mlm_head.slots, p=2, dim=-1)
+            h_filled = torch.matmul(alpha, norm_slots)  # (B, 24, d_model)
+        else:
+            h_filled = torch.zeros(batch_size, seq_len, self.d_model, device=x_draft.device)
+
+        # Reuse the mean-centered candidate key projections computed by mlm_head
+        if hasattr(self.mlm_head, "centered_K_hero") and self.mlm_head.centered_K_hero is not None:
+            K_hero = self.mlm_head.centered_K_hero
+        else:
+            all_hero_indices = torch.arange(
+                self.num_heroes + 1, device=x_draft.device
+            ).unsqueeze(0).expand(x_draft.size(0), -1)
+            E_hero = self.joint_embedding.get_pure_hero_embeddings(all_hero_indices, patch_ids)
+            K_raw_all = self.mlm_head.w_k(E_hero)
+            K_mean = K_raw_all.mean(dim=-2, keepdim=True)
+            K_hero = F.normalize(K_raw_all - K_mean, p=2, dim=-1)
+
+        norm_h_filled = F.normalize(h_filled, p=2, dim=-1)
+        cos_sim = torch.bmm(norm_h_filled, K_hero.transpose(1, 2))
+
         effective_gamma = F.softplus(self.gamma)
 
-        # Softplus prevents dead zero gradients
-        inhibition_penalty = effective_gamma * F.softplus(penalty_logits) * inhibition_enabled
+        # Direct ReLU penalty ensures non-overlapping roles receive exactly 0.0 penalty
+        inhibition_penalty = effective_gamma * (2.0 * F.softplus(2.0 * cos_sim)) * inhibition_enabled
         self.inhibition_penalty = inhibition_penalty
         mlm_logits = mlm_logits - inhibition_penalty
 
@@ -692,6 +729,9 @@ class MatchNetwork(nn.Module):
         """
         logits, _ = self.forward(x_draft, player_comfort, patch_ids=patch_ids)
         return torch.sigmoid(logits)
+
+    def get_entropy_loss(self) -> torch.Tensor:
+        return self.match_network.mlm_head.get_entropy_loss()
 
     @torch.no_grad()
     def fuse_embeddings_for_inference(self):

@@ -469,8 +469,11 @@ class TransformerTrainer:
 
             backbone_params = []
             head_params = []
+            wk_params = []
             for name, param in self.model.named_parameters():
-                if "set_transformer_head" in name or "mlm_head" in name:
+                if "mlm_head.w_k" in name:
+                    wk_params.append(param)
+                elif "set_transformer_head" in name or "mlm_head" in name:
                     head_params.append(param)
                 else:
                     backbone_params.append(param)
@@ -485,6 +488,11 @@ class TransformerTrainer:
                     "params": head_params,
                     "lr": actual_lr_head,
                     "initial_lr": actual_lr_head,
+                },
+                {
+                    "params": wk_params,
+                    "lr": actual_lr_head * 2.0,  # 2x learning rate for fast key-space role separation
+                    "weight_decay": 0.0,         # Do not decay projection weights toward origin
                 },
             ]
             self.optimizer = torch.optim.AdamW(
@@ -647,14 +655,14 @@ class TransformerTrainer:
                     mlm_logits.view(-1, mlm_logits.size(-1)), 
                     ntp_labels.view(-1), 
                     ignore_index=-1,
-                    label_smoothing=0.10
+                    label_smoothing=0.0
                 )
                 
                 # Slot attention entropy regularization
-                entropy_loss = self.model.match_network.mlm_head.get_entropy_loss()
+                entropy_loss = self.model.get_entropy_loss()
 
                 # Combine losses (AlphaZero-style dual objective)
-                total_loss = loss + 1.0 * mlm_loss + entropy_loss
+                total_loss = 2.0 * loss + 1.0 * mlm_loss + entropy_loss
 
                 self.optimizer.zero_grad()
                 total_loss.backward()
@@ -749,7 +757,7 @@ class TransformerTrainer:
                     loss = self.criterion(logits, y_batch)
 
                 # Slot attention entropy regularization
-                entropy_loss = self.model.match_network.mlm_head.get_entropy_loss()
+                entropy_loss = self.model.get_entropy_loss()
                 val_loss += (loss + entropy_loss).item()
                 all_preds.append(logits.cpu())
                 all_targets.append(y_batch.cpu())

@@ -173,7 +173,7 @@ def main() -> None:
         )
 
         with torch.no_grad():
-            h_gnn = model.get_embeddings(hero_graph)
+            h_gnn = model.get_embeddings(hero_graph,device=args.device)
 
         console.print(f"[bold blue]Extracted RGCN embeddings: shape {h_gnn.shape}[/bold blue]")
         console.print(h_gnn)

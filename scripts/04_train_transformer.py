@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 """Train or predict with the Hierarchical Sequence Transformer.
 
 Wraps ``TransformerTrainer`` for training and provides a ``predict``
@@ -25,8 +29,6 @@ Usage::
         --comfort_path data/player_comfort.pt \\
         --checkpoint_dir checkpoints
 """
-
-from __future__ import annotations
 
 import argparse
 import logging
@@ -206,6 +208,7 @@ def load_h_gnn(
         data_dir: Path,
         wilson_threshold: float = 0.50,
         gamma: float = 0.80,
+        device: torch.device | str = "cpu",
     ) -> torch.Tensor:
         """Load RGCN embeddings, dynamically extracting them if a state_dict is provided."""
         h_gnn_loaded = torch.load(rgcn_path, weights_only=True)
@@ -229,7 +232,7 @@ def load_h_gnn(
                 gamma=gamma,
             )
 
-            h_gnn = rgcn_model.get_embeddings(hero_graph)
+            h_gnn = rgcn_model.get_embeddings(hero_graph, device=torch.device(device))
             console.print(f"[bold green]Extracted raw H_GNN embeddings of shape {tuple(h_gnn.shape)} from loaded model state_dict.[/bold green]")
             return h_gnn
         return h_gnn_loaded
@@ -268,6 +271,8 @@ def main() -> None:
             max_hero_idx = max(max_hero_idx, int(draft[:, 2].max().item()))
         console.print(f"[bold green]Detected actual maximum hero index in dataset: {max_hero_idx}[/bold green]")
 
+        device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+
         console.print("[bold blue]Loading RGCN embeddings...[/bold blue]")
         h_gnn = load_h_gnn(
             Path(args.rgcn_path),
@@ -277,6 +282,7 @@ def main() -> None:
             Path(args.data_dir),
             wilson_threshold=args.wilson_threshold,
             gamma=args.gamma,
+            device=device,
         )
 
         console.print("[bold blue]Loading comfort map...[/bold blue]")
@@ -293,7 +299,6 @@ def main() -> None:
         
         console.print(f"[bold green]Player input dim (vocab size * 2): {player_input_dim}[/bold green]")
 
-        device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
         num_patches_dynamic = 30
         if patch_ids is not None:
             max_p = max([p.item() if hasattr(p, 'item') else p for p in patch_ids])
@@ -382,12 +387,15 @@ def main() -> None:
             max_hero_idx = max(max_hero_idx, int(draft[:, 2].max().item()))
         console.print(f"[bold green]Detected actual maximum hero index in dataset: {max_hero_idx}[/bold green]")
 
+        device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+
         h_gnn = load_h_gnn(
             Path(args.rgcn_path),
             Path(args.frozen_embeddings_path),
             max_hero_idx,
             args.d_model,
             Path(args.data_dir),
+            device=device,
         )
         player_comfort_map = torch.load(args.comfort_path, weights_only=True)
 
@@ -402,7 +410,6 @@ def main() -> None:
         
         console.print(f"[bold green]Player input dim (vocab size * 2): {player_input_dim}[/bold green]")
 
-        device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
         num_patches_dynamic = 30
         if patch_ids is not None:
             max_p = max([p.item() if hasattr(p, 'item') else p for p in patch_ids])

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 """Interactive draft support tool with MCTS-based recommendations.
 
 Provides a terminal UI for live draft decision support. The user selects
@@ -20,8 +24,6 @@ Usage::
 Prerequisites: run the training pipeline first to produce a model
 checkpoint, RGCN embeddings, and player comfort map.
 """
-
-from __future__ import annotations
 
 import argparse
 import logging
@@ -200,6 +202,7 @@ def load_h_gnn(
     data_dir: Path,
     wilson_threshold: float = 0.50,
     gamma: float = 0.80,
+    device: torch.device | str = "cpu",
 ) -> torch.Tensor:
     """Load RGCN embeddings, dynamically extracting them if a state_dict is provided."""
     h_gnn_loaded = torch.load(rgcn_path, weights_only=True)
@@ -223,7 +226,7 @@ def load_h_gnn(
             gamma=gamma,
         )
 
-        h_gnn = rgcn_model.get_embeddings(hero_graph)
+        h_gnn = rgcn_model.get_embeddings(hero_graph, device=torch.device(device))
         console.print(f"[bold green]Extracted raw H_GNN embeddings of shape {tuple(h_gnn.shape)} from loaded model state_dict.[/bold green]")
         return h_gnn
     return h_gnn_loaded
@@ -446,6 +449,7 @@ def main() -> None:
         Path(args.data_dir),
         wilson_threshold=args.wilson_threshold,
         gamma=args.gamma,
+        device=device,
     )
 
     console.print("[bold blue]Loading comfort map...[/bold blue]")

@@ -50,27 +50,27 @@ class LinkPredictionDecoder(nn.Module):
         scores = self.decoder(cat).squeeze(-1)
         return scores
 
-
-    def get_embeddings(self, hero_graph, device):
-        # Existing method to retrieve embeddings for evaluation
-        edge_index = hero_graph.edge_index
-        edge_type = hero_graph.edge_type
-        return self(edge_index, edge_type)
-
 def evaluate_graph_quality(rgcn, decoder, hero_graph, val_edges, val_edge_types, device):
     """Evaluate link prediction on a validation edge split using Hits@10 and MRR."""
     rgcn.eval()
     decoder.eval()
     
+    # Ensure inputs are moved to target device
+    hero_graph = hero_graph.to(device)
+    val_edges = val_edges.to(device)
+    val_edge_types = val_edge_types.to(device)
+    
+    # Get full node embeddings from the entire graph structure
+    h_gnn = rgcn.get_embeddings(hero_graph, device).to(device)
+    num_nodes = h_gnn.shape[0]
+    num_val_edges = val_edges.shape[1]
+    
+    # Build 3D boolean tensor of ALL known positive edges natively on GPU
+    is_pos = torch.zeros((num_nodes, rgcn.num_relations, num_nodes), dtype=torch.bool, device=device)
+    is_pos[hero_graph.edge_index[0], hero_graph.edge_type, hero_graph.edge_index[1]] = True
+    is_pos[val_edges[0], val_edge_types, val_edges[1]] = True
+        
     with torch.no_grad():
-        # Get full node embeddings from the entire graph structure
-        # Ensure the graph passed here is properly moved to the device first
-        hero_graph = hero_graph.to(device)
-        h_gnn = rgcn.get_embeddings(hero_graph, device).to(device)
-        
-        num_nodes = h_gnn.shape[0]
-        num_val_edges = val_edges.shape[1]
-        
         # We will rank the true destination node against ALL possible destination nodes
         mrr_sum = 0.0
         hits_at_10 = 0
@@ -78,14 +78,14 @@ def evaluate_graph_quality(rgcn, decoder, hero_graph, val_edges, val_edge_types,
         for i in range(num_val_edges):
             src = val_edges[0, i]
             true_dst = val_edges[1, i]
-            edge_type = val_edge_types[i].to(device)
+            edge_type = val_edge_types[i]
             
             # (1, d_model)
-            h_src = h_gnn[src].unsqueeze(0).to(device)
+            h_src = h_gnn[src].unsqueeze(0)
             
             # Replicate src for all possible destinations (num_nodes, d_model)
             h_src_expand = h_src.expand(num_nodes, -1)
-            h_dst_all = h_gnn  # (num_nodes, d_model) already on device
+            h_dst_all = h_gnn  # (num_nodes, d_model)
             
             # Predict scores for src -> all possible nodes
             # Note: edge_type must be broadcast correctly. 
@@ -96,12 +96,18 @@ def evaluate_graph_quality(rgcn, decoder, hero_graph, val_edges, val_edge_types,
             
             # Rank scores descending
             # We want to find the rank of 'true_dst'
-            # To get rank, we can count how many nodes scored higher than the true node
             true_score = scores[true_dst].item()
+            
+            # Filter out other known positive destinations for (src, edge_type)
+            # using vector-fused GPU masking (with self-loop protection)
+            scores_filtered = scores.clone()
+            mask = is_pos[src, edge_type].clone()
+            mask[true_dst] = False
+            scores_filtered[mask] = float("-inf")
             
             # Rank = 1 + number of scores strictly greater than the true score
             # (In practice, ties should be broken randomly or averaged, but strict > is common for simplicity)
-            rank = 1 + (scores > true_score).sum().item()
+            rank = 1 + (scores_filtered > true_score).sum().item()
             
             mrr_sum += 1.0 / rank
             if rank <= 10:
@@ -179,6 +185,7 @@ def train_rgcn(
     # Train graph (used for structural message passing AND positive training samples)
     train_edge_index = full_hero_graph.edge_index[:, train_idx].to(device)
     train_edge_type = full_hero_graph.edge_type[train_idx].to(device)
+    train_edge_weight = full_hero_graph.edge_weight[train_idx].to(device).squeeze(-1)
     
     # Note: We must construct a new Data object (or similar) to pass to the RGCN if it expects `hero_graph.edge_index`
     # We'll just patch the properties on a copy or pass them directly.
@@ -186,6 +193,7 @@ def train_rgcn(
     train_hero_graph = copy.copy(full_hero_graph)
     train_hero_graph.edge_index = train_edge_index
     train_hero_graph.edge_type = train_edge_type
+    train_hero_graph.edge_weight = train_edge_weight.unsqueeze(-1)
     
     # Validation edges (to rank)
     val_edge_index = full_hero_graph.edge_index[:, val_idx].to(device)
@@ -227,7 +235,7 @@ def train_rgcn(
         weight_decay=1e-4,
     )
     # Using ReduceLROnPlateau monitoring validation MRR
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=15)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=25)
 
     best_mrr = -1.0
     best_model_state = None
@@ -242,15 +250,16 @@ def train_rgcn(
         edge_type = train_hero_graph.edge_type
 
         # Forward pass
-        h_gnn = rgcn(edge_index, edge_type)
+        h_gnn = rgcn(edge_index, edge_type, edge_weight=train_edge_weight)
 
         # 1. Positive samples: true edges in train graph
         h_src = h_gnn[edge_index[0]]
         h_dst = h_gnn[edge_index[1]]
         pos_scores = decoder(h_src, h_dst, edge_type)
-        pos_loss = F.binary_cross_entropy_with_logits(
-            pos_scores, torch.ones_like(pos_scores)
+        unweighted_pos_loss = F.binary_cross_entropy_with_logits(
+            pos_scores, torch.ones_like(pos_scores), reduction="none"
         )
+        pos_loss = (unweighted_pos_loss * train_edge_weight).mean()
 
         # 2. Negative samples: 5:1 ratio with Hard Negative Filtering
         neg_ratio = 5

@@ -10,8 +10,77 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import RGCNConv
 from torch_geometric.data import Data
+from torch_geometric.typing import Adj, OptTensor
+from torch_geometric.utils import index_sort
 
 logger = logging.getLogger(__name__)
+
+
+class WeightedRGCNConv(RGCNConv):
+    """Subclass of RGCNConv that overrides forward, propagate, and message to apply edge weights."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._temp_edge_weight = None
+        self._temp_edge_type = None
+        self._loop_idx = 0
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        edge_index: Adj,
+        edge_type: OptTensor = None,
+        edge_weight: OptTensor = None,
+    ) -> torch.Tensor:
+        if edge_weight is None:
+            return super().forward(x, edge_index, edge_type)
+
+        # Sort edges and weights by edge_type if not already sorted
+        if not self.is_sorted and edge_type is not None:
+            if (edge_type[1:] < edge_type[:-1]).any():
+                edge_type, perm = index_sort(edge_type, max_value=self.num_relations)
+                edge_index = edge_index[:, perm]
+                edge_weight = edge_weight[perm]
+
+        self._temp_edge_weight = edge_weight
+        self._temp_edge_type = edge_type
+        self._loop_idx = 0
+
+        orig_is_sorted = self.is_sorted
+        self.is_sorted = True
+
+        try:
+            out = super().forward(x, edge_index, edge_type)
+        finally:
+            self.is_sorted = orig_is_sorted
+            self._temp_edge_weight = None
+            self._temp_edge_type = None
+
+        return out
+
+    def propagate(self, edge_index: Adj, size=None, **kwargs):
+        temp_edge_weight = getattr(self, "_temp_edge_weight", None)
+        if temp_edge_weight is not None:
+            if kwargs.get("edge_type_ptr") is not None:
+                self._current_edge_weight = temp_edge_weight
+            else:
+                mask = self._temp_edge_type == self._loop_idx
+                self._current_edge_weight = temp_edge_weight[mask]
+                self._loop_idx += 1
+        else:
+            self._current_edge_weight = None
+        return super().propagate(edge_index, size, **kwargs)
+
+    def message(
+        self,
+        x_j: torch.Tensor,
+        edge_type_ptr: OptTensor = None,
+    ) -> torch.Tensor:
+        out = super().message(x_j, edge_type_ptr)
+        current_edge_weight = getattr(self, "_current_edge_weight", None)
+        if current_edge_weight is not None:
+            return current_edge_weight.view(-1, 1) * out
+        return out
 
 
 class HeroRGCN(nn.Module):
@@ -63,7 +132,7 @@ class HeroRGCN(nn.Module):
         for layer_idx in range(num_layers):
             output_dim = self.hidden_dim if layer_idx < num_layers - 1 else d_model
             layers.append(
-                RGCNConv(
+                WeightedRGCNConv(
                     input_dim,
                     output_dim,
                     num_relations=num_relations,
@@ -79,6 +148,7 @@ class HeroRGCN(nn.Module):
         self,
         edge_index: torch.Tensor,
         edge_type: torch.Tensor,
+        edge_weight: torch.Tensor | None = None,  # Pass edge_weight
     ) -> torch.Tensor:
         """Forward pass through the HeroRGCN.
 
@@ -94,7 +164,7 @@ class HeroRGCN(nn.Module):
 
         for i, rgcn_layer in enumerate(self.rgcn_layers):
             h_in = h
-            h_out = rgcn_layer(h, edge_index, edge_type)
+            h_out = rgcn_layer(h, edge_index, edge_type, edge_weight=edge_weight)
 
             # If input and output dimensions match, we can do a residual skip connection
             if h_in.shape == h_out.shape:
@@ -106,8 +176,6 @@ class HeroRGCN(nn.Module):
             if i < len(self.rgcn_layers) - 1:
                 h = self.activation(h)
 
-            # Note: Removed L2 norm to prevent gradient scaling constraints
-            # on the decoder logits
 
         return h
 
@@ -130,9 +198,14 @@ class HeroRGCN(nn.Module):
 
         edge_index = graph.edge_index.to(device)
         edge_type = graph.edge_type.to(device)
+        edge_weight = (
+            graph.edge_weight.to(device)
+            if hasattr(graph, "edge_weight") and graph.edge_weight is not None
+            else None
+        )
 
         with torch.no_grad():
-            h_gnn = self(edge_index, edge_type)
+            h_gnn = self(edge_index, edge_type, edge_weight=edge_weight)
 
         return h_gnn.cpu()
 

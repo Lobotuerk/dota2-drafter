@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -9,7 +11,14 @@ from dota2drafter.processor.hero_indexer import HeroIndexer
 def hero_indexer():
     indexer = HeroIndexer()
     # Build mapping for 120 heroes (from 1 to 120) so they map to contiguous indices 1..120
-    indexer.build_mapping([{"id": i, "playable": True} for i in range(1, 121)])
+    indexer_path = Path("data") / "hero_indexer.json"
+    if indexer_path.exists():
+        import json
+        with open(indexer_path, "r") as f:
+            hero_data = json.load(f)
+        # Reconstruct hero list from mapping
+        heroes = [{"id": int(api_id), "playable": True} for api_id in hero_data.keys()]
+        indexer.build_mapping(heroes)
     return indexer
 
 
@@ -38,9 +47,16 @@ def test_slot_confusion(model, patch_id, hero_indexer):
 
     slark_idx = hero_indexer.map_hero_id(93)  # Pos 1 Slark
     cm_idx = hero_indexer.map_hero_id(5)      # Pos 5 Crystal Maiden
+    dw_idx = hero_indexer.map_hero_id(123) # Pos 4 Dark willow
+    invoker_idx = hero_indexer.map_hero_id(74) # Pos 2 Invoker
+    centaur_idx = hero_indexer.map_hero_id(96) # Pos 3 Centaur
 
     assert slark_idx is not None
     assert cm_idx is not None
+    assert dw_idx is not None
+    assert invoker_idx is not None
+    assert centaur_idx is not None
+
 
     # Draft A: Pick Slark at step 7
     draft_a = torch.zeros((1, 24, 4), device=device)
@@ -51,6 +67,21 @@ def test_slot_confusion(model, patch_id, hero_indexer):
     draft_b = torch.zeros((1, 24, 4), device=device)
     draft_b[:, :, 2] = -1.0
     draft_b[0, 7] = torch.tensor([1.0, 0.0, float(cm_idx), 7.0])  # Pick CM at step 7
+
+    # Draft C: Pick Dark Willow at step 7
+    draft_c = torch.zeros((1, 24, 4), device=device)
+    draft_c[:, :, 2] = -1.0
+    draft_c[0, 7] = torch.tensor([1.0, 0.0, float(dw_idx), 7.0])  # Pick KOTL at step 7
+
+    # Draft D: Pick Invoker at step 7
+    draft_d = torch.zeros((1, 24, 4), device=device)
+    draft_d[:, :, 2] = -1.0
+    draft_d[0, 7] = torch.tensor([1.0, 0.0, float(invoker_idx), 7.0])  # Pick invoker at step 7
+
+    # Draft E: Pick Centaur at step 7
+    draft_e = torch.zeros((1, 24, 4), device=device)
+    draft_e[:, :, 2] = -1.0
+    draft_e[0, 7] = torch.tensor([1.0, 0.0, float(centaur_idx), 7.0])  # Pick Centaur at step 7
 
     dummy_ht = torch.zeros((1, 24, model.d_model), device=device)
 
@@ -63,12 +94,34 @@ def test_slot_confusion(model, patch_id, hero_indexer):
     assert mlm_head.raw_occupancy is not None
     alpha_cm = (1.0 - torch.exp(-mlm_head.raw_occupancy)).squeeze()
 
+    _ = mlm_head(dummy_ht, draft_c, patch_id)
+    assert mlm_head.raw_occupancy is not None
+    alpha_dw = (1.0 - torch.exp(-mlm_head.raw_occupancy)).squeeze()
+
+    _ = mlm_head(dummy_ht, draft_d, patch_id)
+    assert mlm_head.raw_occupancy is not None
+    alpha_invoker = (1.0 - torch.exp(-mlm_head.raw_occupancy)).squeeze()
+
+    _ = mlm_head(dummy_ht, draft_e, patch_id)
+    assert mlm_head.raw_occupancy is not None
+    alpha_centaur = (1.0 - torch.exp(-mlm_head.raw_occupancy)).squeeze()
+
     print("\n--- Slot Vector Confusion Diagnostics ---")
     print("Slot Occupancies (alpha) after picking Slark (Pos 1) at Step 7:")
     print(alpha_slark[8].cpu().numpy().round(3))
     print("Slot Occupancies (alpha) after picking CM (Pos 5) at Step 7:")
     print(alpha_cm[8].cpu().numpy().round(3))
+    print("Slot Occupancies (alpha) after picking DW (Pos 4) at Step 7:")
+    print(alpha_dw[8].cpu().numpy().round(3))
+    print("Slot Occupancies (alpha) after picking Invoker (Pos 2) at Step 7:")
+    print(alpha_invoker[8].cpu().numpy().round(3))
+    print("Slot Occupancies (alpha) after picking Centaur (Pos 3) at Step 7:")
+    print(alpha_centaur[8].cpu().numpy().round(3))
 
     # Assert shape is (24, 5)
     assert alpha_slark.shape == (24, 5)
     assert alpha_cm.shape == (24, 5)
+    assert alpha_dw.shape == (24, 5)
+    assert alpha_invoker.shape == (24, 5)
+    assert alpha_centaur.shape == (24, 5)
+

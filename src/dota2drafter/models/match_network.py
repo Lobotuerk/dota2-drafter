@@ -298,10 +298,10 @@ class SlotAttentionMLMProjection(nn.Module):
         d_model: int,
         num_heroes: int,
         joint_embedding: nn.Module,
-        entropy_lambda: float = 0.05,
+        entropy_lambda: float = 0.10,
         dropout: float = 0.1,
         temperature: float = 0.15,
-        ortho_lambda: float = 0.05,
+        ortho_lambda: float = 0.25,
     ) -> None:
         """Initialize the Slot-Attentive Policy Head.
 
@@ -339,6 +339,8 @@ class SlotAttentionMLMProjection(nn.Module):
 
         self.register_buffer("_entropy_loss", torch.tensor(0.0))
         self.raw_occupancy: torch.Tensor | None = None
+        self.centered_K_hero: torch.Tensor | None = None
+        self.centered_K_seq: torch.Tensor | None = None
 
     def forward(
         self,
@@ -372,7 +374,7 @@ class SlotAttentionMLMProjection(nn.Module):
 
         past_active_picks_mask = causal_mask.unsqueeze(0) & same_team & is_pick_s & valid_hero_s
 
-        # 2. Extract Candidate Keys for globally centered projection
+        # 1. Candidate Hero Keys centered over playable heroes (indices 1..num_heroes)
         all_hero_indices = (
             torch.arange(self.num_heroes + 1, device=device).unsqueeze(0).expand(batch_size, -1)
         )
@@ -380,23 +382,25 @@ class SlotAttentionMLMProjection(nn.Module):
 
         # Project candidate heroes into Key Space and compute global mean for centering
         K_raw_all = self.w_k(E_hero)
-        K_mean = K_raw_all.mean(dim=-2, keepdim=True)
+        K_raw_playable = K_raw_all[:, 1:, :]
+        K_mean = K_raw_playable.mean(dim=-2, keepdim=True)
         K_hero = F.normalize(K_raw_all - K_mean, p=2, dim=-1)
         self.centered_K_hero = K_hero  # Cache mean-centered keys for HierarchicalTransformer
 
-        # Extract draft sequence keys, centered using the global candidate mean
+        # 2. Sequence Keys centered with the same K_mean
         E = self.joint_embedding.get_pure_hero_embeddings(x_draft[:, :, 2].long(), patch_ids)
         K_seq_raw = self.w_k(E)
         K_norm = F.normalize(K_seq_raw - K_mean, p=2, dim=-1)
+        self.centered_K_seq = K_norm
 
-        norm_slots = F.normalize(self.slots, p=2, dim=-1)
+        # 3. Mean-centered slots
+        slots_centered = self.slots - self.slots.mean(dim=0, keepdim=True)
+        norm_slots = F.normalize(slots_centered, p=2, dim=-1)
 
-        # 3. Cross-Attention (B, 24, 5, 24)
-        # Pure normalized cosine attention scaled by 10.0
-        attn_logits = 10.0 * torch.matmul(norm_slots, K_norm.transpose(1, 2))  # (B, 5, 24)
-        attn_logits = attn_logits.unsqueeze(1).expand(-1, seq_len, -1, -1)  # (B, 24, 5, 24)
+        attn_logits = 10.0 * torch.matmul(norm_slots, K_norm.transpose(1, 2))
+        attn_logits = attn_logits.unsqueeze(1).expand(-1, seq_len, -1, -1)
 
-        mask = past_active_picks_mask.unsqueeze(2)  # (B, 24, 1, 24)
+        mask = past_active_picks_mask.unsqueeze(2)
         masked_logits = attn_logits.masked_fill(~mask, -1e9)
 
         attn_weights = F.softmax(masked_logits / self.temperature, dim=2)
@@ -516,7 +520,7 @@ class HierarchicalTransformer(nn.Module):
             num_heroes=num_heroes,
             joint_embedding=self.joint_embedding,
             dropout=dropout,
-            ortho_lambda=0.25,      # Increased from 0.05 to enforce rigid slot separation
+            ortho_lambda=0.25,
             entropy_lambda=0.10,
         )
 
@@ -568,7 +572,7 @@ class HierarchicalTransformer(nn.Module):
         # 2. Policy Head Logits via Multiplicative Slot Attention
         mlm_logits = self.mlm_head(decoder_output, x_draft, patch_ids)
 
-        # 3. Subtractive Role-Inhibition via Softplus
+        # 3. Subtractive Role-Inhibition via Direct Pick Key Aggregation
         step_indices = torch.arange(seq_len, device=x_draft.device)
         causal_mask = step_indices.unsqueeze(0) < step_indices.unsqueeze(1)
 
@@ -583,37 +587,21 @@ class HierarchicalTransformer(nn.Module):
         num_picks = past_active_picks_mask.float().sum(dim=2, keepdim=True)
         inhibition_enabled = (num_picks > 0).float()
 
-        #Query filled slot vectors (h_filled = sum alpha_k * slot_k in Key Space)
-        if self.mlm_head.raw_occupancy is not None:
-            alpha = 1.0 - torch.exp(-self.mlm_head.raw_occupancy)  # (B, 24, 5)
-            norm_slots = F.normalize(self.mlm_head.slots, p=2, dim=-1)
-            h_filled = torch.matmul(alpha, norm_slots)  # (B, 24, d_model)
-        else:
-            h_filled = torch.zeros(batch_size, seq_len, self.d_model, device=x_draft.device)
+        # Retrieve cached mean-centered keys
+        K_hero = self.mlm_head.centered_K_hero
+        K_seq = self.mlm_head.centered_K_seq
 
-        # Reuse the mean-centered candidate key projections computed by mlm_head
-        if hasattr(self.mlm_head, "centered_K_hero") and self.mlm_head.centered_K_hero is not None:
-            K_hero = self.mlm_head.centered_K_hero
-        else:
-            all_hero_indices = torch.arange(
-                self.num_heroes + 1, device=x_draft.device
-            ).unsqueeze(0).expand(x_draft.size(0), -1)
-            E_hero = self.joint_embedding.get_pure_hero_embeddings(all_hero_indices, patch_ids)
-            K_raw_all = self.mlm_head.w_k(E_hero)
-            K_mean = K_raw_all.mean(dim=-2, keepdim=True)
-            K_hero = F.normalize(K_raw_all - K_mean, p=2, dim=-1)
+        # Aggregate mean-centered keys of heroes already picked by the same team
+        h_picked = torch.bmm(past_active_picks_mask.float(), K_seq)
+        norm_h_filled = F.normalize(h_picked, p=2, dim=-1)
 
-        norm_h_filled = F.normalize(h_filled, p=2, dim=-1)
         cos_sim = torch.bmm(norm_h_filled, K_hero.transpose(1, 2))
 
         effective_gamma = F.softplus(self.gamma)
-
-        # Direct ReLU penalty ensures non-overlapping roles receive exactly 0.0 penalty
-        inhibition_penalty = effective_gamma * (2.0 * F.softplus(2.0 * cos_sim)) * inhibition_enabled
+        inhibition_penalty = effective_gamma * F.softplus(4.0 * cos_sim) * inhibition_enabled
         self.inhibition_penalty = inhibition_penalty
         mlm_logits = mlm_logits - inhibition_penalty
 
-        # Win prediction mode: Set Transformer Head
         hero_indices = x_draft[:, :, 2]
         pure_hero_embeds = self.joint_embedding.get_pure_hero_embeddings(hero_indices, patch_ids)
         logits = self.set_transformer_head(pure_hero_embeds, x_draft)

@@ -31,12 +31,17 @@ def test_script_syntax_and_help(script_name: str) -> None:
     script_path = Path("scripts") / script_name
     assert script_path.exists(), f"{script_name} does not exist on disk"
 
+    import os
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path("src").resolve())
+
     if script_name in ("01a_gather_leagues.py", "01b_gather_matches.py", "01e_cleanup_unapproved.py"):
         # These scripts take a positional config path, not argparse --help.
         result = subprocess.run(
             [sys.executable, str(script_path), "non_existent_config.yaml"],
             capture_output=True,
             text=True,
+            env=env,
         )
         assert result.returncode == 1
         assert "Error" in result.stdout or "Error" in result.stderr
@@ -46,6 +51,7 @@ def test_script_syntax_and_help(script_name: str) -> None:
             [sys.executable, str(script_path), "--help"],
             capture_output=True,
             text=True,
+            env=env,
         )
         assert result.returncode == 0
         assert "player_comfort.pt not found!" in result.stdout or "player_comfort.pt not found!" in result.stderr
@@ -55,6 +61,7 @@ def test_script_syntax_and_help(script_name: str) -> None:
             [sys.executable, str(script_path), "--help"],
             capture_output=True,
             text=True,
+            env=env,
         )
         assert result.returncode == 0
         assert "usage:" in result.stdout or "options:" in result.stdout

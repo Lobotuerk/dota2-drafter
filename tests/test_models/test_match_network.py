@@ -377,7 +377,7 @@ def test_hierarchical_transformer_step0_unmasking():
 
 
 def test_subtractive_inhibition_parameters():
-    """Verify registration of w_inhibit and gamma parameters."""
+    """Verify registration of gamma parameter."""
     d_model = 32
     num_heroes = 10
     h_gnn = torch.randn(num_heroes + 1, d_model)
@@ -391,9 +391,7 @@ def test_subtractive_inhibition_parameters():
         h_gnn=h_gnn,
     )
     transformer = model.match_network
-    assert hasattr(transformer, "w_inhibit")
     assert hasattr(transformer, "gamma")
-    assert isinstance(transformer.w_inhibit, torch.nn.Linear)
     assert isinstance(transformer.gamma, torch.nn.Parameter)
 
 
@@ -448,14 +446,12 @@ def test_subtractive_inhibition_penalty_monotonicity():
 
     player_comfort = torch.zeros((1, 10, 22), dtype=torch.float32)
 
-    # Run without inhibition (set w_inhibit to zeros so penalty is zero)
-    model.match_network.w_inhibit.weight.data = torch.zeros(d_model, d_model)
-    model.match_network.gamma.data = torch.tensor(2.0)
+    # Run without inhibition (set gamma to negative infinity so softplus yields 0 penalty)
+    model.match_network.gamma.data = torch.tensor(-100.0)
     with torch.no_grad():
         _, mlm_logits_uninhibited = model(x_draft, player_comfort)
 
-    # Run with inhibition (gamma=2, w_inhibit=identity)
-    model.match_network.w_inhibit.weight.data = torch.eye(d_model)
+    # Run with inhibition (gamma=2)
     model.match_network.gamma.data = torch.tensor(2.0)
     with torch.no_grad():
         _, mlm_logits_inhibited = model(x_draft, player_comfort)
@@ -540,7 +536,7 @@ def test_match_network_predict_proba_with_patch_ids():
 
 
 def test_subtractive_inhibition_parameters():
-    """Verify registration of w_inhibit and gamma parameters."""
+    """Verify registration of gamma parameter."""
     d_model = 32
     num_heroes = 10
     h_gnn = torch.randn(num_heroes + 1, d_model)
@@ -554,9 +550,7 @@ def test_subtractive_inhibition_parameters():
         h_gnn=h_gnn,
     )
     transformer = model.match_network
-    assert hasattr(transformer, "w_inhibit")
     assert hasattr(transformer, "gamma")
-    assert isinstance(transformer.w_inhibit, torch.nn.Linear)
     assert isinstance(transformer.gamma, torch.nn.Parameter)
 
 
@@ -611,14 +605,12 @@ def test_subtractive_inhibition_penalty_monotonicity():
 
     player_comfort = torch.zeros((1, 10, 22), dtype=torch.float32)
 
-    # Run without inhibition (set w_inhibit to zeros so penalty is zero)
-    model.match_network.w_inhibit.weight.data = torch.zeros(d_model, d_model)
-    model.match_network.gamma.data = torch.tensor(2.0)
+    # Run without inhibition (set gamma to negative infinity so softplus yields 0 penalty)
+    model.match_network.gamma.data = torch.tensor(-100.0)
     with torch.no_grad():
         _, mlm_logits_uninhibited = model(x_draft, player_comfort)
 
-    # Run with inhibition (gamma=2, w_inhibit=identity)
-    model.match_network.w_inhibit.weight.data = torch.eye(d_model)
+    # Run with inhibition (gamma=2)
     model.match_network.gamma.data = torch.tensor(2.0)
     with torch.no_grad():
         _, mlm_logits_inhibited = model(x_draft, player_comfort)

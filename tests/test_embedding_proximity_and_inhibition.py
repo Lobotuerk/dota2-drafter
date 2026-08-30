@@ -24,7 +24,16 @@ def model(hero_indexer):
     d_model = 64
     num_heroes = 127
     player_input_dim = 310
-    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    # Load pre-trained RGCN hero embeddings or fallback to random
+    rgcn_path = Path("models/rgcn.pt")
+    if rgcn_path.exists():
+        h_gnn = torch.load(rgcn_path, weights_only=True)
+        if isinstance(h_gnn, dict):
+            # Extract weight matrix if saved as state_dict
+            h_gnn = h_gnn.get("embedding.weight", torch.randn(num_heroes + 1, d_model))
+    else:
+        h_gnn = torch.randn(num_heroes + 1, d_model)
 
     model = MatchNetwork(
         d_model=d_model,
@@ -70,6 +79,8 @@ def test_subtractive_role_inhibition(model, x_draft_slark_sf, patch_id, hero_ind
     device = next(model.parameters()).device
     x_draft = x_draft_slark_sf.to(device)
     patch_id = patch_id.to(device)
+    model.match_network.h_gnn = model.match_network.h_gnn.to(device)
+    model.match_network.joint_embedding.h_gnn = model.match_network.joint_embedding.h_gnn.to(device)
 
     ta_idx = hero_indexer.map_hero_id(46)   # Templar Assassin (Pos 2)
     lina_idx = hero_indexer.map_hero_id(25) # Lina (Pos 2)
@@ -115,6 +126,8 @@ def test_puck_invoker_role_repulsion(model, patch_id, hero_indexer):
     """Verify that picking Invoker (Pos 2) penalizes recommending Puck (Pos 2) on the same team."""
     device = next(model.parameters()).device
     patch_id = patch_id.to(device)
+    model.match_network.h_gnn = model.match_network.h_gnn.to(device)
+    model.match_network.joint_embedding.h_gnn = model.match_network.joint_embedding.h_gnn.to(device)
 
     invoker_idx = hero_indexer.map_hero_id(74)  # Invoker ID = 74
     puck_idx = hero_indexer.map_hero_id(13)     # Puck ID = 13

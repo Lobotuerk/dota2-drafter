@@ -10,6 +10,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+try:
+    import wandb
+except ImportError:
+    wandb = None
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -693,6 +698,17 @@ class TransformerTrainer:
                 val_metrics["mlm_accuracy"],
                 val_metrics["mlm_top5_accuracy"],
             )
+
+            if wandb is not None and wandb.run is not None:
+                wandb.log(
+                    {
+                        "epoch": epoch,
+                        "train_loss": avg_train_loss,
+                        "val_loss": val_loss,
+                        "val_top5_acc": val_metrics["mlm_top5_accuracy"],
+                        "val_auc": val_metrics["roc_auc"],
+                    }
+                )
 
             if val_metrics["mlm_top5_accuracy"] > self.metrics.best_mlm_top5_acc + self.config.min_delta:
                 self.metrics.best_mlm_top5_acc = val_metrics["mlm_top5_accuracy"]

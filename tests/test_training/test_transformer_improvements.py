@@ -436,30 +436,38 @@ def test_discriminative_learning_rates():
 
     trainer = TransformerTrainer(model=model, train_config=config)
 
-    # Check optimizer has two parameter groups
-    assert len(trainer.optimizer.param_groups) == 2
+    # Check optimizer has three parameter groups
+    assert len(trainer.optimizer.param_groups) == 3
 
     # Check that backbone group has correct learning rate (1e-5)
-    # and head group has correct learning rate (1e-3)
+    # and head groups have correct learning rate (1e-3)
     backbone_group = trainer.optimizer.param_groups[0]
     head_group = trainer.optimizer.param_groups[1]
+    mlm_group = trainer.optimizer.param_groups[2]
 
     assert backbone_group["lr"] == 1e-5
     assert head_group["lr"] == 1e-3
+    assert mlm_group["lr"] == 0.002
 
     # Check parameters were assigned to the correct group
     # Let's inspect parameter names
     backbone_param_ids = {id(p) for p in backbone_group["params"]}
     head_param_ids = {id(p) for p in head_group["params"]}
+    mlm_param_ids = {id(p) for p in mlm_group["params"]}
 
-    # Ensure set_transformer_head parameters are in the head group and not in the backbone group
+    # Ensure set_transformer_head and mlm_head parameters are in the head groups and not in the backbone group
     for name, param in model.named_parameters():
-        if "set_transformer_head" in name or "mlm_head" in name:
+        if "set_transformer_head" in name:
+            assert id(param) in head_param_ids
+            assert id(param) not in backbone_param_ids
+        elif "mlm_head.w_k" in name:
+            assert id(param) in mlm_param_ids
+            assert id(param) not in backbone_param_ids
+        elif "mlm_head" in name:
             assert id(param) in head_param_ids
             assert id(param) not in backbone_param_ids
         else:
             assert id(param) in backbone_param_ids
-            assert id(param) not in head_param_ids
 
 
 def test_step_weighted_loss():

@@ -35,7 +35,7 @@ class SinusoidalPositionalEncoding(nn.Module):
 
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)  # (1, max_len, d_model)
+        pe = pe.unsqueeze(0)
         self.register_buffer("pe", pe)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -207,9 +207,14 @@ class JointEmbedding(nn.Module):
         Returns:
             Pure hero embeddings of shape (B, seq_len, d_model).
         """
+        device = hero_indices.device
+        
         valid_heroes = (hero_indices >= 0)
         clamped_indices = hero_indices.clamp(min=0).long()
-        hero_embeds = self.h_gnn[clamped_indices]
+        # Dynamically ensure self.h_gnn matches the device of hero_indices
+        h_gnn_device = self.h_gnn.to(device)
+        hero_embeds = h_gnn_device[clamped_indices]
+        
         hero_embeds = hero_embeds * valid_heroes.unsqueeze(-1).float()
         hero_projected = self.project(hero_embeds)
 
@@ -339,8 +344,8 @@ class SlotAttentionMLMProjection(nn.Module):
 
         self.register_buffer("_entropy_loss", torch.tensor(0.0))
         self.raw_occupancy: torch.Tensor | None = None
+        self.hero_role_probs: torch.Tensor | None = None
         self.centered_K_hero: torch.Tensor | None = None
-        self.centered_K_seq: torch.Tensor | None = None
 
     def forward(
         self,
@@ -361,9 +366,8 @@ class SlotAttentionMLMProjection(nn.Module):
         batch_size, seq_len, _ = x_draft.shape
         device = x_draft.device
 
-        # 1. Causal Active Team Masking (B, 24, 24)
         step_indices = torch.arange(seq_len, device=device)
-        causal_mask = step_indices.unsqueeze(0) < step_indices.unsqueeze(1)  # s < t
+        causal_mask = step_indices.unsqueeze(0) < step_indices.unsqueeze(1)
 
         is_pick_s = (x_draft[:, :, 0] == 1.0).unsqueeze(1)
         valid_hero_s = (x_draft[:, :, 2] >= 0.0).unsqueeze(1)
@@ -374,29 +378,31 @@ class SlotAttentionMLMProjection(nn.Module):
 
         past_active_picks_mask = causal_mask.unsqueeze(0) & same_team & is_pick_s & valid_hero_s
 
-        # 1. Candidate Hero Keys centered over playable heroes (indices 1..num_heroes)
+        # 1. Candidate Hero Keys & Slot Role Distribution Matrix (B, K+1, 5)
         all_hero_indices = (
             torch.arange(self.num_heroes + 1, device=device).unsqueeze(0).expand(batch_size, -1)
         )
         E_hero = self.joint_embedding.get_pure_hero_embeddings(all_hero_indices, patch_ids)
 
-        # Project candidate heroes into Key Space and compute global mean for centering
         K_raw_all = self.w_k(E_hero)
         K_raw_playable = K_raw_all[:, 1:, :]
         K_mean = K_raw_playable.mean(dim=-2, keepdim=True)
         K_hero = F.normalize(K_raw_all - K_mean, p=2, dim=-1)
-        self.centered_K_hero = K_hero  # Cache mean-centered keys for HierarchicalTransformer
+        self.centered_K_hero = K_hero
 
-        # 2. Sequence Keys centered with the same K_mean
-        E = self.joint_embedding.get_pure_hero_embeddings(x_draft[:, :, 2].long(), patch_ids)
-        K_seq_raw = self.w_k(E)
-        K_norm = F.normalize(K_seq_raw - K_mean, p=2, dim=-1)
-        self.centered_K_seq = K_norm
-
-        # 3. Mean-centered slots
         slots_centered = self.slots - self.slots.mean(dim=0, keepdim=True)
         norm_slots = F.normalize(slots_centered, p=2, dim=-1)
 
+        # 5-dimensional slot profile for every candidate hero in vocabulary
+        hero_slot_logits = torch.matmul(norm_slots, K_hero.transpose(1, 2)).permute(0, 2, 1)
+        self.hero_role_probs = F.softmax(hero_slot_logits / 0.25, dim=-1)
+
+        # 2. Sequence Keys centered with K_mean
+        E = self.joint_embedding.get_pure_hero_embeddings(x_draft[:, :, 2].long(), patch_ids)
+        K_seq_raw = self.w_k(E)
+        K_norm = F.normalize(K_seq_raw - K_mean, p=2, dim=-1)
+
+        # 3. Cross-Attention
         attn_logits = 10.0 * torch.matmul(norm_slots, K_norm.transpose(1, 2))
         attn_logits = attn_logits.unsqueeze(1).expand(-1, seq_len, -1, -1)
 
@@ -406,10 +412,10 @@ class SlotAttentionMLMProjection(nn.Module):
         attn_weights = F.softmax(masked_logits / self.temperature, dim=2)
         attn_weights = self.attn_dropout(attn_weights)
 
-        # 4. Smooth Differentiable Occupancy & Unfilled Weight
-        raw_occupancy = (attn_weights * mask.float()).sum(dim=-1)  # (B, 24, 5)
+        # 4. Filled Slot Occupancies
+        raw_occupancy = (attn_weights * mask.float()).sum(dim=-1)
         self.raw_occupancy = raw_occupancy
-        unfilled_weight = torch.exp(-raw_occupancy)  # (1 - alpha) in (0, 1]
+        unfilled_weight = torch.exp(-raw_occupancy)
 
         # 5. Entropy & Orthogonality Regularization
         alpha = 1.0 - unfilled_weight
@@ -418,18 +424,17 @@ class SlotAttentionMLMProjection(nn.Module):
             alpha * torch.log(alpha + eps) + (1.0 - alpha) * torch.log(1.0 - alpha + eps)
         )
 
-        # Cosine orthogonality penalty to stop slot vector collapse
-        cos_sim = torch.matmul(norm_slots, norm_slots.t())  # (5, 5)
+        cos_sim = torch.matmul(norm_slots, norm_slots.t())
         eye = torch.eye(5, device=device)
         ortho_loss = torch.sum((cos_sim - eye) ** 2)
 
         self._entropy_loss = self.entropy_lambda * entropy.mean() + self.ortho_lambda * ortho_loss
 
         # 6. Multiplicative Candidate Role Gating
-        h_query = torch.matmul(unfilled_weight, self.slots)  # (B, 24, d_model)
+        h_query = torch.matmul(unfilled_weight, self.slots)
 
         gate_logits = torch.bmm(h_query, K_hero.transpose(1, 2)) / math.sqrt(self.d_model)
-        g = torch.sigmoid(gate_logits)  # (B, 24, num_heroes + 1)
+        g = torch.sigmoid(gate_logits)
 
         # Cosine-Scaled Policy Projection with learnable temperature tau capped to [0.1, 4.0]
         norm_w_policy = F.normalize(self.w_policy(decoder_output), p=2, dim=-1)
@@ -572,7 +577,7 @@ class HierarchicalTransformer(nn.Module):
         # 2. Policy Head Logits via Multiplicative Slot Attention
         mlm_logits = self.mlm_head(decoder_output, x_draft, patch_ids)
 
-        # 3. Subtractive Role-Inhibition via Direct Pick Key Aggregation
+        # 3. Subtractive Role-Inhibition via 5-Slot Role Probability Collision
         step_indices = torch.arange(seq_len, device=x_draft.device)
         causal_mask = step_indices.unsqueeze(0) < step_indices.unsqueeze(1)
 
@@ -587,18 +592,28 @@ class HierarchicalTransformer(nn.Module):
         num_picks = past_active_picks_mask.float().sum(dim=2, keepdim=True)
         inhibition_enabled = (num_picks > 0).float()
 
-        # Retrieve cached mean-centered keys
-        K_hero = self.mlm_head.centered_K_hero
-        K_seq = self.mlm_head.centered_K_seq
+        if getattr(self.mlm_head, "hero_role_probs", None) is not None:
+            hero_role_probs = self.mlm_head.hero_role_probs  # (B, K+1, 5)
 
-        # Aggregate mean-centered keys of heroes already picked by the same team
-        h_picked = torch.bmm(past_active_picks_mask.float(), K_seq)
-        norm_h_filled = F.normalize(h_picked, p=2, dim=-1)
+            # Gather 5-slot role distribution for each step in sequence
+            hero_indices_seq = x_draft[:, :, 2].clamp(min=0).long()
+            seq_role_probs = torch.gather(
+                hero_role_probs,
+                dim=1,
+                index=hero_indices_seq.unsqueeze(-1).expand(-1, -1, 5)
+            )  # (B, 24, 5)
 
-        cos_sim = torch.bmm(norm_h_filled, K_hero.transpose(1, 2))
+            # Sum same-team active picks' role distributions up to step t
+            team_role_occupancy = torch.bmm(past_active_picks_mask.float(), seq_role_probs)  # (B, 24, 5)
 
-        effective_gamma = F.softplus(self.gamma)
-        inhibition_penalty = effective_gamma * F.softplus(4.0 * cos_sim) * inhibition_enabled
+            # Role collision dot product between team's filled roles and candidate hero role distribution
+            role_collision = torch.bmm(team_role_occupancy, hero_role_probs.transpose(1, 2))  # (B, 24, K+1)
+
+            effective_gamma = F.softplus(self.gamma)
+            inhibition_penalty = effective_gamma * role_collision * inhibition_enabled
+        else:
+            inhibition_penalty = torch.zeros(batch_size, seq_len, self.num_heroes + 1, device=x_draft.device)
+
         self.inhibition_penalty = inhibition_penalty
         mlm_logits = mlm_logits - inhibition_penalty
 

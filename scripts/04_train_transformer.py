@@ -149,6 +149,12 @@ def parse_args() -> argparse.Namespace:
         help="Augmentation setting: 'true' (all 448), 'false' (none), or an integer representing the maximum number of variations allowed per original match (e.g. 5, 10, 20). (default: 'false')",
     )
     parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default=None,
+        help="Weights & Biases project name to log metrics (e.g., 'dota2-drafter'). If not provided, wandb is disabled.",
+    )
+    parser.add_argument(
         "--frozen_embeddings_path",
         type=str,
         default="models/skip_gram_dgi.pt",
@@ -343,6 +349,13 @@ def main() -> None:
             augment=augment_val,
         )
 
+        if args.wandb_project:
+            try:
+                import wandb
+                wandb.init(project=args.wandb_project, config=vars(args))
+            except ImportError:
+                console.print("[bold yellow]Warning:[/bold yellow] wandb package not found. Install it to log metrics.")
+
         console.print("[bold blue]Training transformer model...[/bold blue]")
         trainer = TransformerTrainer(model, config)
 
@@ -355,6 +368,14 @@ def main() -> None:
             player_comfort_map=player_comfort_map,
             patch_ids=patch_ids,
         )
+
+        if args.wandb_project:
+            try:
+                import wandb
+                if wandb.run is not None:
+                    wandb.finish()
+            except ImportError:
+                pass
 
         console.print(f"[bold green]Training complete. Best epoch: {metrics.best_epoch}, "
                       f"Best Top-5 MLM Accuracy: {metrics.best_mlm_top5_acc:.4f}[/bold green]")

@@ -272,6 +272,7 @@ def test_mlm_pre_training_loop():
         device="cpu",
         checkpoint_dir=checkpoint_dir,
         patience=5,
+        slot_tau_decay_epochs=0,
     )
 
     trainer = TransformerTrainer(model=model, train_config=config)
@@ -342,6 +343,7 @@ def test_label_smoothing_training():
         checkpoint_dir=checkpoint_dir,
         patience=5,
         label_smoothing_eps=0.15,
+        slot_tau_decay_epochs=0,
     )
 
     trainer = TransformerTrainer(model=model, train_config=config)

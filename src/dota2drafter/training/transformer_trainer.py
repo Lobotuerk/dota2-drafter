@@ -173,7 +173,12 @@ class TrainingConfig:
     patience: int = 25
     min_delta: float = 1e-4
     label_smoothing_eps: float = 0.15
-    augment: int | bool = True
+    augment: int | str | bool = "false"
+
+    # Temperature Annealing parameters for slot routing
+    slot_tau_start: float = 0.30
+    slot_tau_end: float = 0.05
+    slot_tau_decay_epochs: int = 100
 
 
 @dataclass
@@ -616,7 +621,23 @@ class TransformerTrainer:
         patience_counter = 0
         best_state = None
 
+        # Calculate decay rate for slot attention temperature
+        if self.config.slot_tau_decay_epochs > 0:
+            tau_decay_rate = (self.config.slot_tau_end / self.config.slot_tau_start) ** (
+                1.0 / self.config.slot_tau_decay_epochs
+            )
+        else:
+            tau_decay_rate = 1.0
+
         for epoch in range(1, self.config.num_epochs + 1):
+            # Anneal the temperature
+            current_tau = self.config.slot_tau_start * (
+                tau_decay_rate ** min(epoch - 1, self.config.slot_tau_decay_epochs)
+            )
+            # Inject dynamic temperature into the MLM Head if present
+            if getattr(self.model, "match_network", None) and hasattr(self.model.match_network, "mlm_head"):
+                self.model.match_network.mlm_head.temperature = current_tau
+
             if hasattr(train_dataset, "reshuffle_augmentations"):
                 train_dataset.reshuffle_augmentations()
 

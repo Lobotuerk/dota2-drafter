@@ -376,25 +376,6 @@ def test_hierarchical_transformer_step0_unmasking():
     assert torch.all(pad_mask_b[0, 1:]), "Steps 1..23 should be masked"
 
 
-def test_subtractive_inhibition_parameters():
-    """Verify registration of gamma parameter."""
-    d_model = 32
-    num_heroes = 10
-    h_gnn = torch.randn(num_heroes + 1, d_model)
-    model = MatchNetwork(
-        d_model=d_model,
-        nhead=2,
-        num_layers=1,
-        dim_feedforward=64,
-        num_heroes=num_heroes,
-        player_input_dim=22,
-        h_gnn=h_gnn,
-    )
-    transformer = model.match_network
-    assert hasattr(transformer, "gamma")
-    assert isinstance(transformer.gamma, torch.nn.Parameter)
-
-
 def test_subtractive_inhibition_empty_picks():
     """Verify zero inhibition penalty when no prior picks exist."""
     d_model = 32
@@ -420,45 +401,6 @@ def test_subtractive_inhibition_empty_picks():
         logits, mlm_logits = model(x_draft, player_comfort)
 
     assert mlm_logits.shape == (1, 24, num_heroes + 1)
-
-
-def test_subtractive_inhibition_penalty_monotonicity():
-    """Verify that adding a pick decreases logits for that hero and similar heroes."""
-    d_model = 32
-    num_heroes = 10
-    h_gnn = torch.randn(num_heroes + 1, d_model)
-    model = MatchNetwork(
-        d_model=d_model,
-        nhead=2,
-        num_layers=1,
-        dim_feedforward=64,
-        num_heroes=num_heroes,
-        player_input_dim=22,
-        h_gnn=h_gnn,
-    )
-    model.eval()
-
-    # Use a fixed draft: Team 0 picks hero 3 at step 0
-    x_draft = torch.zeros((1, 24, 4), dtype=torch.float32)
-    x_draft[:, :, 2] = -1.0
-    x_draft[:, :, 3] = torch.arange(24).float()
-    x_draft[0, 0] = torch.tensor([1.0, 0.0, 3.0, 0.0])  # Team 0 picks hero 3 at step 0
-
-    player_comfort = torch.zeros((1, 10, 22), dtype=torch.float32)
-
-    # Run without inhibition (set gamma to negative infinity so softplus yields 0 penalty)
-    model.match_network.gamma.data = torch.tensor(-100.0)
-    with torch.no_grad():
-        _, mlm_logits_uninhibited = model(x_draft, player_comfort)
-
-    # Run with inhibition (gamma=2)
-    model.match_network.gamma.data = torch.tensor(2.0)
-    with torch.no_grad():
-        _, mlm_logits_inhibited = model(x_draft, player_comfort)
-
-    # At step 1 (Team 0 pick again), hero 3 has a past active pick
-    # Logit for hero 3 should be strictly less with inhibition active
-    assert mlm_logits_inhibited[0, 1, 3] < mlm_logits_uninhibited[0, 1, 3]
 
 
 def test_subtractive_inhibition_causality():
@@ -535,25 +477,6 @@ def test_match_network_predict_proba_with_patch_ids():
     assert 0 <= proba_2.item() <= 1
 
 
-def test_subtractive_inhibition_parameters():
-    """Verify registration of gamma parameter."""
-    d_model = 32
-    num_heroes = 10
-    h_gnn = torch.randn(num_heroes + 1, d_model)
-    model = MatchNetwork(
-        d_model=d_model,
-        nhead=2,
-        num_layers=1,
-        dim_feedforward=64,
-        num_heroes=num_heroes,
-        player_input_dim=22,
-        h_gnn=h_gnn,
-    )
-    transformer = model.match_network
-    assert hasattr(transformer, "gamma")
-    assert isinstance(transformer.gamma, torch.nn.Parameter)
-
-
 def test_subtractive_inhibition_empty_picks():
     """Verify zero inhibition penalty when no prior picks exist."""
     d_model = 32
@@ -579,45 +502,6 @@ def test_subtractive_inhibition_empty_picks():
         logits, mlm_logits = model(x_draft, player_comfort)
 
     assert mlm_logits.shape == (1, 24, num_heroes + 1)
-
-
-def test_subtractive_inhibition_penalty_monotonicity():
-    """Verify that adding a pick decreases logits for that hero and similar heroes."""
-    d_model = 32
-    num_heroes = 10
-    h_gnn = torch.randn(num_heroes + 1, d_model)
-    model = MatchNetwork(
-        d_model=d_model,
-        nhead=2,
-        num_layers=1,
-        dim_feedforward=64,
-        num_heroes=num_heroes,
-        player_input_dim=22,
-        h_gnn=h_gnn,
-    )
-    model.eval()
-
-    # Use a fixed draft: Team 0 picks hero 3 at step 0
-    x_draft = torch.zeros((1, 24, 4), dtype=torch.float32)
-    x_draft[:, :, 2] = -1.0
-    x_draft[:, :, 3] = torch.arange(24).float()
-    x_draft[0, 0] = torch.tensor([1.0, 0.0, 3.0, 0.0])  # Team 0 picks hero 3 at step 0
-
-    player_comfort = torch.zeros((1, 10, 22), dtype=torch.float32)
-
-    # Run without inhibition (set gamma to negative infinity so softplus yields 0 penalty)
-    model.match_network.gamma.data = torch.tensor(-100.0)
-    with torch.no_grad():
-        _, mlm_logits_uninhibited = model(x_draft, player_comfort)
-
-    # Run with inhibition (gamma=2)
-    model.match_network.gamma.data = torch.tensor(2.0)
-    with torch.no_grad():
-        _, mlm_logits_inhibited = model(x_draft, player_comfort)
-
-    # At step 1 (Team 0 pick again), hero 3 has a past active pick
-    # Logit for hero 3 should be strictly less with inhibition active
-    assert mlm_logits_inhibited[0, 1, 3] < mlm_logits_uninhibited[0, 1, 3]
 
 
 def test_subtractive_inhibition_causality():

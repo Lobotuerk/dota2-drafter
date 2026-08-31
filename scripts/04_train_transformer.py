@@ -149,6 +149,24 @@ def parse_args() -> argparse.Namespace:
         help="Augmentation setting: 'true' (all 448), 'false' (none), or an integer representing the maximum number of variations allowed per original match (e.g. 5, 10, 20). (default: 'false')",
     )
     parser.add_argument(
+        "--slot_tau_start",
+        type=float,
+        default=0.30,
+        help="Starting temperature for slot routing annealing (default: 0.30)",
+    )
+    parser.add_argument(
+        "--slot_tau_end",
+        type=float,
+        default=0.05,
+        help="Ending temperature for slot routing annealing (default: 0.05)",
+    )
+    parser.add_argument(
+        "--slot_tau_decay_epochs",
+        type=int,
+        default=100,
+        help="Number of epochs to decay slot temperature over (default: 100)",
+    )
+    parser.add_argument(
         "--wandb_project",
         type=str,
         default=None,
@@ -347,6 +365,9 @@ def main() -> None:
             checkpoint_dir=args.checkpoint_dir,
             label_smoothing_eps=args.label_smoothing_eps,
             augment=augment_val,
+            slot_tau_start=args.slot_tau_start,
+            slot_tau_end=args.slot_tau_end,
+            slot_tau_decay_epochs=args.slot_tau_decay_epochs,
         )
 
         if args.wandb_project:

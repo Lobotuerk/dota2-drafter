@@ -9,9 +9,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Disable optimized Scaled Dot Product Attention (SDPA) backends (FlashAttention, Memory-Efficient)
-# and force stable 'math_sdp' fallback. This prevents CUDA crashes (e.g. CUDA error: unknown error)
-# on newer GPU architectures and virtualized environments like WSL2, with zero impact on small sequence lengths.
 if torch.cuda.is_available():
     torch.backends.cuda.enable_flash_sdp(False)
     torch.backends.cuda.enable_mem_efficient_sdp(False)
@@ -22,12 +19,6 @@ class SinusoidalPositionalEncoding(nn.Module):
     """Sinusoidal positional encoding for absolute draft positions (0-23)."""
 
     def __init__(self, d_model: int, max_len: int = 24) -> None:
-        """Initialize positional encoding.
-
-        Args:
-            d_model: Embedding dimension.
-            max_len: Maximum sequence length (24 for full draft).
-        """
         super().__init__()
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
@@ -39,14 +30,6 @@ class SinusoidalPositionalEncoding(nn.Module):
         self.register_buffer("pe", pe)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Add positional encoding to input embeddings.
-
-        Args:
-            x: Input tensor of shape (B, seq_len, d_model).
-
-        Returns:
-            Tensor with positional encoding added, shape (B, seq_len, d_model).
-        """
         return x + self.pe[:, : x.size(1), :]
 
 
@@ -54,13 +37,6 @@ class SetTransformerHead(nn.Module):
     """Set Transformer Head for permutation-invariant win probability estimation."""
 
     def __init__(self, d_model: int = 128, dim_feedforward: int = 256, dropout: float = 0.1) -> None:
-        """Initialize the Set Transformer Head.
-
-        Args:
-            d_model: Transformer embedding dimension.
-            dim_feedforward: Feedforward dimension in the value MLP.
-            dropout: Dropout rate.
-        """
         super().__init__()
         self.d_model = d_model
 
@@ -86,15 +62,6 @@ class SetTransformerHead(nn.Module):
         hero_embeddings: torch.Tensor,
         x_draft: torch.Tensor,
     ) -> torch.Tensor:
-        """Forward pass through the Set Transformer Head.
-
-        Args:
-            hero_embeddings: Pure hero embeddings from JointEmbedding, shape (B, seq_len, d_model).
-            x_draft: Raw draft sequence tensor of shape (B, seq_len, 4).
-
-        Returns:
-            Win probability logits, shape (B,).
-        """
         batch_size = x_draft.size(0)
 
         action_mask = x_draft[:, :, 0] == 1.0
@@ -168,14 +135,6 @@ class JointEmbedding(nn.Module):
     """Computes joint embedding z_t for each draft action."""
 
     def __init__(self, d_model: int, num_heroes: int, h_gnn: torch.Tensor, num_patches: int = 30) -> None:
-        """Initialize JointEmbedding.
-
-        Args:
-            d_model: Transformer embedding dimension.
-            num_heroes: Number of heroes K (for embedding matrix sizing).
-            h_gnn: Frozen RGCN hero embeddings of shape (K+1, d_model).
-            num_patches: Number of unique patches for patch embedding.
-        """
         super().__init__()
         self.d_model = d_model
         self.register_buffer("h_gnn", h_gnn)
@@ -198,28 +157,17 @@ class JointEmbedding(nn.Module):
     def get_pure_hero_embeddings(
         self, hero_indices: torch.Tensor, patch_ids: torch.Tensor | None = None
     ) -> torch.Tensor:
-        """Extract pure hero embeddings without positional/step/action/team tokens.
-
-        Args:
-            hero_indices: Hero index tensor of shape (B, seq_len).
-            patch_ids: Optional patch ID tensor of shape (B,) for FiLM conditioning.
-
-        Returns:
-            Pure hero embeddings of shape (B, seq_len, d_model).
-        """
         device = hero_indices.device
-        
         valid_heroes = (hero_indices >= 0)
         clamped_indices = hero_indices.clamp(min=0).long()
-        # Dynamically ensure self.h_gnn matches the device of hero_indices
-        h_gnn_device = self.h_gnn.to(device)
-        hero_embeds = h_gnn_device[clamped_indices]
-        
+
+        h_gnn = self.h_gnn.to(device)
+        hero_embeds = h_gnn[clamped_indices]
         hero_embeds = hero_embeds * valid_heroes.unsqueeze(-1).float()
         hero_projected = self.project(hero_embeds)
 
         if patch_ids is not None:
-            patch_ids_clamped = torch.clamp(patch_ids, 0, self.w_patch.num_embeddings - 1)
+            patch_ids_clamped = torch.clamp(patch_ids.to(device), 0, self.w_patch.num_embeddings - 1)
             e_patch = self.w_patch(patch_ids_clamped)
             gamma = self.film_gamma(e_patch).unsqueeze(1)
             beta = self.film_beta(e_patch).unsqueeze(1)
@@ -229,11 +177,6 @@ class JointEmbedding(nn.Module):
 
     @torch.no_grad()
     def fuse_embeddings_for_inference(self):
-        """Pre-computes the linear projection to speed up MCTS.
-        
-        This replaces the project layer with an Identity function and
-        pre-multiplies the h_gnn buffer. Call this once before starting MCTS.
-        """
         if isinstance(self.project, nn.Identity):
             return
         fused_h_gnn = self.project(self.h_gnn)
@@ -246,17 +189,8 @@ class JointEmbedding(nn.Module):
         x_draft: torch.Tensor,
         patch_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Compute joint embeddings for the draft sequence.
-
-        Args:
-            x_draft: Draft sequence tensor of shape (B, 24, 4),
-                     where each step is [hero_val, is_pick, team, step_index].
-            patch_ids: Patch ID tensor of shape (B,).
-
-        Returns:
-            Joint embedding tensor z of shape (B, 24, d_model).
-        """
         batch_size, seq_len, _ = x_draft.shape
+        device = x_draft.device
 
         hero_indices = x_draft[:, :, 2].long()
         action_types = x_draft[:, :, 0].long()
@@ -265,7 +199,9 @@ class JointEmbedding(nn.Module):
 
         valid_heroes = (hero_indices >= 0)
         clamped_indices = hero_indices.clamp(min=0)
-        hero_embeds = self.h_gnn[clamped_indices]
+
+        h_gnn = self.h_gnn.to(device)
+        hero_embeds = h_gnn[clamped_indices]
         hero_embeds = hero_embeds * valid_heroes.unsqueeze(-1).float()
         hero_projected = self.project(hero_embeds)
 
@@ -276,7 +212,7 @@ class JointEmbedding(nn.Module):
         team_embeds = self.w_team(teams_clamped)
 
         step_indices_clamped = torch.clamp(step_indices, 0, 23)
-        pe_expanded = self.pos_enc.pe[:, :24, :].expand(batch_size, -1, -1)
+        pe_expanded = self.pos_enc.pe[:, :24, :].to(device).expand(batch_size, -1, -1)
         pos_embeds = torch.gather(
             pe_expanded,
             dim=1,
@@ -286,7 +222,7 @@ class JointEmbedding(nn.Module):
         z = hero_projected + type_embeds + team_embeds + pos_embeds
 
         if patch_ids is not None:
-            patch_ids_clamped = torch.clamp(patch_ids, 0, self.w_patch.num_embeddings - 1)
+            patch_ids_clamped = torch.clamp(patch_ids.to(device), 0, self.w_patch.num_embeddings - 1)
             e_patch = self.w_patch(patch_ids_clamped)
             gamma = self.film_gamma(e_patch).unsqueeze(1)
             beta = self.film_beta(e_patch).unsqueeze(1)
@@ -305,21 +241,9 @@ class SlotAttentionMLMProjection(nn.Module):
         joint_embedding: nn.Module,
         entropy_lambda: float = 0.10,
         dropout: float = 0.1,
-        temperature: float = 0.15,
+        temperature: float = 0.30,
         ortho_lambda: float = 0.25,
     ) -> None:
-        """Initialize the Slot-Attentive Policy Head.
-
-        Args:
-            d_model: Dimension of the transformer embeddings.
-            num_heroes: Number of heroes in the vocabulary (num_heroes + 1 total size).
-            joint_embedding: Reference to the JointEmbedding module to
-                query candidate/pick embeddings.
-            entropy_lambda: Scaling coefficient for the slot occupancy entropy regularization.
-            dropout: Dropout rate applied to slot assignment attention maps.
-            temperature: Scaling temperature for softmax inside slot assignment.
-            ortho_lambda: Scaling coefficient for the slot parameters cosine orthogonality penalty.
-        """
         super().__init__()
         self.d_model = d_model
         self.num_heroes = num_heroes
@@ -328,18 +252,15 @@ class SlotAttentionMLMProjection(nn.Module):
         self.temperature = temperature
         self.ortho_lambda = ortho_lambda
 
-        # Initialize orthogonal slots
         slots = torch.randn(5, d_model)
         slots = F.normalize(slots, p=2, dim=-1)
         self.slots = nn.Parameter(slots)
 
         self.w_k = nn.Linear(d_model, d_model, bias=False)
-        # Orthogonal initialization ensures maximum directional diversity across hero roles
         nn.init.orthogonal_(self.w_k.weight, gain=1.0)
         self.w_policy = nn.Linear(d_model, d_model)
         self.attn_dropout = nn.Dropout(p=dropout)
 
-        # Learnable policy projection temperature initialized at 4.0
         self.tau = nn.Parameter(torch.tensor(4.0))
 
         self.register_buffer("_entropy_loss", torch.tensor(0.0))
@@ -353,16 +274,6 @@ class SlotAttentionMLMProjection(nn.Module):
         x_draft: torch.Tensor,
         patch_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Compute next-action policy logits using slot attention over unfilled slots.
-
-        Args:
-            decoder_output: Output from the transformer decoder (h_t), shape (B, 24, d_model).
-            x_draft: Draft sequence tensor of shape (B, 24, 4).
-            patch_ids: Optional patch ID tensor of shape (B,).
-
-        Returns:
-            Policy logits of shape (B, 24, num_heroes + 1).
-        """
         batch_size, seq_len, _ = x_draft.shape
         device = x_draft.device
 
@@ -378,7 +289,7 @@ class SlotAttentionMLMProjection(nn.Module):
 
         past_active_picks_mask = causal_mask.unsqueeze(0) & same_team & is_pick_s & valid_hero_s
 
-        # 1. Candidate Hero Keys & Slot Role Distribution Matrix (B, K+1, 5)
+        # 1. Candidate Hero Keys & Role Distribution
         all_hero_indices = (
             torch.arange(self.num_heroes + 1, device=device).unsqueeze(0).expand(batch_size, -1)
         )
@@ -393,9 +304,9 @@ class SlotAttentionMLMProjection(nn.Module):
         slots_centered = self.slots - self.slots.mean(dim=0, keepdim=True)
         norm_slots = F.normalize(slots_centered, p=2, dim=-1)
 
-        # 5-dimensional slot profile for every candidate hero in vocabulary
         hero_slot_logits = torch.matmul(norm_slots, K_hero.transpose(1, 2)).permute(0, 2, 1)
-        self.hero_role_probs = F.softmax(hero_slot_logits / 0.25, dim=-1)
+        hero_role_probs = F.softmax(hero_slot_logits / 0.30, dim=-1)
+        self.hero_role_probs = hero_role_probs
 
         # 2. Sequence Keys centered with K_mean
         E = self.joint_embedding.get_pure_hero_embeddings(x_draft[:, :, 2].long(), patch_ids)
@@ -403,13 +314,13 @@ class SlotAttentionMLMProjection(nn.Module):
         K_norm = F.normalize(K_seq_raw - K_mean, p=2, dim=-1)
 
         # 3. Cross-Attention
-        attn_logits = 10.0 * torch.matmul(norm_slots, K_norm.transpose(1, 2))
+        attn_logits = torch.matmul(norm_slots, K_norm.transpose(1, 2)) / self.temperature
         attn_logits = attn_logits.unsqueeze(1).expand(-1, seq_len, -1, -1)
 
         mask = past_active_picks_mask.unsqueeze(2)
         masked_logits = attn_logits.masked_fill(~mask, -1e9)
 
-        attn_weights = F.softmax(masked_logits / self.temperature, dim=2)
+        attn_weights = F.softmax(masked_logits, dim=2)
         attn_weights = self.attn_dropout(attn_weights)
 
         # 4. Filled Slot Occupancies
@@ -417,7 +328,7 @@ class SlotAttentionMLMProjection(nn.Module):
         self.raw_occupancy = raw_occupancy
         unfilled_weight = torch.exp(-raw_occupancy)
 
-        # 5. Entropy & Orthogonality Regularization
+        # 5. Entropy & Slot Orthogonality Regularization (No Vocabulary Uniformity Loss)
         alpha = 1.0 - unfilled_weight
         eps = 1e-6
         entropy = -(
@@ -436,7 +347,6 @@ class SlotAttentionMLMProjection(nn.Module):
         gate_logits = torch.bmm(h_query, K_hero.transpose(1, 2)) / math.sqrt(self.d_model)
         g = torch.sigmoid(gate_logits)
 
-        # Cosine-Scaled Policy Projection with learnable temperature tau capped to [0.1, 4.0]
         norm_w_policy = F.normalize(self.w_policy(decoder_output), p=2, dim=-1)
         norm_E_hero = F.normalize(E_hero, p=2, dim=-1)
         cos_sim_policy = torch.bmm(norm_w_policy, norm_E_hero.transpose(1, 2))
@@ -449,28 +359,13 @@ class SlotAttentionMLMProjection(nn.Module):
         return logits
 
     def get_entropy_loss(self) -> torch.Tensor:
-        """Retrieve and reset the accumulated slot assignment entropy loss.
-
-        Returns:
-            Scalar tensor representing the entropy penalty for this batch.
-        """
         loss = self._entropy_loss.clone()
         self._entropy_loss.zero_()
         return loss
 
 
 class HierarchicalTransformer(nn.Module):
-    """Hierarchical Transformer (Match Network) for draft sequence modeling.
-
-    Models the sequence of draft actions and cross-attends with player
-    preference vectors to compute win probability.
-
-    Architecture:
-    - Joint embedding layer: maps a_t = (h_t, p_t, c_t, o_t) to z_t
-    - Transformer body: stacked decoder layers with self-attention + cross-attention
-    - Output head: masked global average pooling + MLP + sigmoid
-    - MLM head: predicts masked hero identities for pre-training
-    """
+    """Hierarchical Transformer (Match Network) for draft sequence modeling."""
 
     def __init__(
         self,
@@ -483,18 +378,6 @@ class HierarchicalTransformer(nn.Module):
         h_gnn: Optional[torch.Tensor] = None,
         num_patches: int = 30,
     ) -> None:
-        """Initialize the HierarchicalTransformer.
-
-        Args:
-            d_model: Transformer embedding dimension.
-            nhead: Number of attention heads.
-            num_layers: Number of stacked TransformerDecoderLayer blocks.
-            dim_feedforward: Feedforward dimension in decoder layers.
-            dropout: Dropout rate.
-            num_heroes: Number of heroes K (for embedding matrix sizing).
-            h_gnn: Frozen RGCN hero embeddings of shape (K+1, d_model).
-                   If None, will be initialized randomly.
-        """
         super().__init__()
         self.d_model = d_model
         self.num_heroes = num_heroes
@@ -527,9 +410,10 @@ class HierarchicalTransformer(nn.Module):
             dropout=dropout,
             ortho_lambda=0.25,
             entropy_lambda=0.10,
+            temperature=0.30,
         )
 
-        self.gamma = nn.Parameter(torch.tensor(3.0))
+        self.register_buffer("_collision_loss", torch.tensor(0.0))
 
     def forward(
         self,
@@ -537,22 +421,8 @@ class HierarchicalTransformer(nn.Module):
         player_pref_vectors: torch.Tensor,
         patch_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass through the Match Network.
-
-        Args:
-            x_draft: Draft sequence tensor of shape (B, 24, 4).
-            player_pref_vectors: Player preference vectors from PlayerComfortNetwork,
-                                 shape (B, 10, d_model).
-            patch_ids: Patch ID tensor of shape (B,).
-
-        Returns:
-            Tuple of:
-                - Win probability scalar per sample, shape (B,).
-                - MLM logits per step, shape (B, 24, num_heroes + 1).
-        """
         batch_size = x_draft.shape[0]
 
-        # 1. Internal Right-Shift for Causal Policy Decoder
         shifted_x_draft = x_draft.clone()
         shifted_x_draft[:, 0, 2] = -1.0
         shifted_x_draft[:, 1:, 2] = x_draft[:, :-1, 2]
@@ -574,10 +444,10 @@ class HierarchicalTransformer(nn.Module):
             tgt_key_padding_mask=pad_mask,
         )
 
-        # 2. Policy Head Logits via Multiplicative Slot Attention
+        # mlm_logits returned cleanly without forward-pass logit warping
         mlm_logits = self.mlm_head(decoder_output, x_draft, patch_ids)
 
-        # 3. Subtractive Role-Inhibition via 5-Slot Role Probability Collision
+        # Compute Differentiable Policy Role Collision Loss for Training
         step_indices = torch.arange(seq_len, device=x_draft.device)
         causal_mask = step_indices.unsqueeze(0) < step_indices.unsqueeze(1)
 
@@ -595,7 +465,6 @@ class HierarchicalTransformer(nn.Module):
         if getattr(self.mlm_head, "hero_role_probs", None) is not None:
             hero_role_probs = self.mlm_head.hero_role_probs  # (B, K+1, 5)
 
-            # Gather 5-slot role distribution for each step in sequence
             hero_indices_seq = x_draft[:, :, 2].clamp(min=0).long()
             seq_role_probs = torch.gather(
                 hero_role_probs,
@@ -603,19 +472,17 @@ class HierarchicalTransformer(nn.Module):
                 index=hero_indices_seq.unsqueeze(-1).expand(-1, -1, 5)
             )  # (B, 24, 5)
 
-            # Sum same-team active picks' role distributions up to step t
             team_role_occupancy = torch.bmm(past_active_picks_mask.float(), seq_role_probs)  # (B, 24, 5)
-
-            # Role collision dot product between team's filled roles and candidate hero role distribution
             role_collision = torch.bmm(team_role_occupancy, hero_role_probs.transpose(1, 2))  # (B, 24, K+1)
 
-            effective_gamma = F.softplus(self.gamma)
-            inhibition_penalty = effective_gamma * role_collision * inhibition_enabled
-        else:
-            inhibition_penalty = torch.zeros(batch_size, seq_len, self.num_heroes + 1, device=x_draft.device)
+            p_policy = F.softmax(mlm_logits, dim=-1)  # Predicted probabilities
+            expected_collision = (p_policy * role_collision).sum(dim=-1, keepdim=True)
 
-        self.inhibition_penalty = inhibition_penalty
-        mlm_logits = mlm_logits - inhibition_penalty
+            self._collision_loss = (expected_collision * inhibition_enabled).mean()
+            self.inhibition_penalty = role_collision * inhibition_enabled
+        else:
+            self._collision_loss = torch.tensor(0.0, device=x_draft.device)
+            self.inhibition_penalty = torch.zeros(batch_size, seq_len, self.num_heroes + 1, device=x_draft.device)
 
         hero_indices = x_draft[:, :, 2]
         pure_hero_embeds = self.joint_embedding.get_pure_hero_embeddings(hero_indices, patch_ids)
@@ -629,18 +496,13 @@ class HierarchicalTransformer(nn.Module):
         player_pref_vectors: torch.Tensor,
         patch_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Compute win probability using sigmoid on logits.
-
-        Args:
-            x_draft: Draft sequence tensor of shape (B, 24, 4).
-            player_pref_vectors: Player preference vectors, shape (B, 10, d_model).
-            patch_ids: Patch ID tensor of shape (B,).
-
-        Returns:
-            Win probability, shape (B,).
-        """
         logits, _ = self.forward(x_draft, player_pref_vectors, patch_ids=patch_ids)
         return torch.sigmoid(logits)
+
+    def get_collision_loss(self) -> torch.Tensor:
+        loss = self._collision_loss.clone()
+        self._collision_loss.zero_()
+        return loss
 
 
 class MatchNetwork(nn.Module):
@@ -658,18 +520,6 @@ class MatchNetwork(nn.Module):
         h_gnn: Optional[torch.Tensor] = None,
         num_patches: int = 30,
     ) -> None:
-        """Initialize the Match Network.
-
-        Args:
-            d_model: Transformer embedding dimension.
-            nhead: Number of attention heads.
-            num_layers: Number of stacked TransformerDecoderLayer blocks.
-            dim_feedforward: Feedforward dimension in decoder layers.
-            dropout: Dropout rate.
-            num_heroes: Number of heroes K.
-            player_input_dim: C, number of input features per player comfort vector (default: 127, matching total hero count).
-            h_gnn: Frozen RGCN hero embeddings of shape (K+1, d_model).
-        """
         super().__init__()
         self.d_model = d_model
         self.player_input_dim = player_input_dim
@@ -698,18 +548,6 @@ class MatchNetwork(nn.Module):
         player_comfort: torch.Tensor,
         patch_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass through the full Match Network.
-
-        Args:
-            x_draft: Draft sequence tensor of shape (B, 24, 4).
-            player_comfort: Player comfort tensor of shape (B, 10, C).
-            patch_ids: Patch ID tensor of shape (B,).
-
-        Returns:
-            Tuple of:
-                - Win probability logits, shape (B,).
-                - MLM logits, shape (B, 24, num_heroes + 1).
-        """
         player_pref_vectors = self.player_network(player_comfort)
         logits, mlm_logits = self.match_network(x_draft, player_pref_vectors, patch_ids=patch_ids)
         return logits, mlm_logits
@@ -720,23 +558,15 @@ class MatchNetwork(nn.Module):
         player_comfort: torch.Tensor,
         patch_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Compute win probability.
-
-        Args:
-            x_draft: Draft sequence tensor of shape (B, 24, 4).
-            player_comfort: Player comfort tensor of shape (B, 10, C).
-            patch_ids: Patch ID tensor of shape (B,).
-
-        Returns:
-            Win probability, shape (B,).
-        """
         logits, _ = self.forward(x_draft, player_comfort, patch_ids=patch_ids)
         return torch.sigmoid(logits)
 
     def get_entropy_loss(self) -> torch.Tensor:
         return self.match_network.mlm_head.get_entropy_loss()
 
+    def get_collision_loss(self) -> torch.Tensor:
+        return self.match_network.get_collision_loss()
+
     @torch.no_grad()
     def fuse_embeddings_for_inference(self):
-        """Pre-computes the linear projection to speed up MCTS."""
         self.match_network.joint_embedding.fuse_embeddings_for_inference()

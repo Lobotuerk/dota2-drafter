@@ -223,3 +223,7 @@ data/
 checkpoints/
 checkpoints_test/
 /models/
+# Weights and Biases
+wandb/
+wandb-debug.log
+wandb-debug-internal.log

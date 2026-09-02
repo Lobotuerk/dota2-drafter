@@ -6,6 +6,7 @@ Includes tests for MLM, prefix training, permutations, and label smoothing.
 import os
 import shutil
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -438,32 +439,26 @@ def test_discriminative_learning_rates():
 
     trainer = TransformerTrainer(model=model, train_config=config)
 
-    # Check optimizer has three parameter groups
-    assert len(trainer.optimizer.param_groups) == 3
+    # Check optimizer has two parameter groups
+    assert len(trainer.optimizer.param_groups) == 2
 
     # Check that backbone group has correct learning rate (1e-5)
     # and head groups have correct learning rate (1e-3)
     backbone_group = trainer.optimizer.param_groups[0]
     head_group = trainer.optimizer.param_groups[1]
-    mlm_group = trainer.optimizer.param_groups[2]
 
     assert backbone_group["lr"] == 1e-5
     assert head_group["lr"] == 1e-3
-    assert mlm_group["lr"] == 0.002
 
     # Check parameters were assigned to the correct group
     # Let's inspect parameter names
     backbone_param_ids = {id(p) for p in backbone_group["params"]}
     head_param_ids = {id(p) for p in head_group["params"]}
-    mlm_param_ids = {id(p) for p in mlm_group["params"]}
 
     # Ensure set_transformer_head and mlm_head parameters are in the head groups and not in the backbone group
     for name, param in model.named_parameters():
         if "set_transformer_head" in name:
             assert id(param) in head_param_ids
-            assert id(param) not in backbone_param_ids
-        elif "mlm_head.w_k" in name:
-            assert id(param) in mlm_param_ids
             assert id(param) not in backbone_param_ids
         elif "mlm_head" in name:
             assert id(param) in head_param_ids
@@ -543,6 +538,28 @@ def test_step_weighted_loss():
     trainer_computed_loss = torch.mean(weights * loss_elements)
 
     assert torch.allclose(trainer_computed_loss, expected_loss_weighted)
+    
+    # 2. Test Step-Weighted Cross Entropy logic natively
+    ntp_labels = torch.randint(0, num_heroes + 1, (1, 24))
+    t_idx = torch.arange(24).float()
+    step_weights = 0.5 + 1.0 * (t_idx / 23.0)
+    
+    ce_elements = torch.nn.functional.cross_entropy(
+        mlm_logits[:1].transpose(1, 2), 
+        ntp_labels, 
+        ignore_index=-1,
+        reduction="none",
+    )
+    
+    weighted_ce = ce_elements * step_weights.unsqueeze(0)
+    
+    # Assert weights at boundaries
+    assert step_weights[0].item() == pytest.approx(0.5)
+    assert step_weights[23].item() == pytest.approx(1.5)
+    
+    # Assert proper scaling
+    assert weighted_ce[0, 0].item() == pytest.approx((ce_elements[0, 0] * 0.5).item())
+    assert weighted_ce[0, 23].item() == pytest.approx((ce_elements[0, 23] * 1.5).item())
 
 
 def test_ntp_loss_and_priors():

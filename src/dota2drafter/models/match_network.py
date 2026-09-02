@@ -16,8 +16,6 @@ if torch.cuda.is_available():
 
 
 class SinusoidalPositionalEncoding(nn.Module):
-    """Sinusoidal positional encoding for absolute draft positions (0-23)."""
-
     def __init__(self, d_model: int, max_len: int = 24) -> None:
         super().__init__()
         pe = torch.zeros(max_len, d_model)
@@ -34,8 +32,6 @@ class SinusoidalPositionalEncoding(nn.Module):
 
 
 class SetTransformerHead(nn.Module):
-    """Set Transformer Head for permutation-invariant win probability estimation."""
-
     def __init__(self, d_model: int = 128, dim_feedforward: int = 256, dropout: float = 0.1) -> None:
         super().__init__()
         self.d_model = d_model
@@ -132,8 +128,6 @@ class SetTransformerHead(nn.Module):
 
 
 class JointEmbedding(nn.Module):
-    """Computes joint embedding z_t for each draft action."""
-
     def __init__(self, d_model: int, num_heroes: int, h_gnn: torch.Tensor, num_patches: int = 30) -> None:
         super().__init__()
         self.d_model = d_model
@@ -232,7 +226,7 @@ class JointEmbedding(nn.Module):
 
 
 class SlotAttentionMLMProjection(nn.Module):
-    """Custom Slot-Attentive Policy Head with Multiplicative Candidate Role Gating."""
+    """Slot-Attentive Policy Head with Self-Supervised Role Prediction."""
 
     def __init__(
         self,
@@ -241,32 +235,30 @@ class SlotAttentionMLMProjection(nn.Module):
         joint_embedding: nn.Module,
         entropy_lambda: float = 0.10,
         dropout: float = 0.1,
-        temperature: float = 0.30,
-        ortho_lambda: float = 0.25,
+        sharpness_lambda: float = 0.35,
     ) -> None:
         super().__init__()
         self.d_model = d_model
         self.num_heroes = num_heroes
         self.joint_embedding = joint_embedding
         self.entropy_lambda = entropy_lambda
-        self.temperature = temperature
-        self.ortho_lambda = ortho_lambda
+        self.sharpness_lambda = sharpness_lambda
 
-        slots = torch.randn(5, d_model)
-        slots = F.normalize(slots, p=2, dim=-1)
-        self.slots = nn.Parameter(slots)
-
-        self.w_k = nn.Linear(d_model, d_model, bias=False)
-        nn.init.orthogonal_(self.w_k.weight, gain=1.0)
         self.w_policy = nn.Linear(d_model, d_model)
         self.attn_dropout = nn.Dropout(p=dropout)
+
+        # Self-Supervised Role Predictor Head (d_model -> 5 roles)
+        self.role_head = nn.Sequential(
+            nn.Linear(d_model, 64),
+            nn.GELU(),
+            nn.Linear(64, 5)
+        )
 
         self.tau = nn.Parameter(torch.tensor(4.0))
 
         self.register_buffer("_entropy_loss", torch.tensor(0.0))
         self.raw_occupancy: torch.Tensor | None = None
         self.hero_role_probs: torch.Tensor | None = None
-        self.centered_K_hero: torch.Tensor | None = None
 
     def forward(
         self,
@@ -289,63 +281,57 @@ class SlotAttentionMLMProjection(nn.Module):
 
         past_active_picks_mask = causal_mask.unsqueeze(0) & same_team & is_pick_s & valid_hero_s
 
-        # 1. Candidate Hero Keys & Role Distribution
+        # 1. Hero Encodings & 5-Slot Softmax Distributions
         all_hero_indices = (
             torch.arange(self.num_heroes + 1, device=device).unsqueeze(0).expand(batch_size, -1)
         )
         E_hero = self.joint_embedding.get_pure_hero_embeddings(all_hero_indices, patch_ids)
 
-        K_raw_all = self.w_k(E_hero)
-        K_raw_playable = K_raw_all[:, 1:, :]
-        K_mean = K_raw_playable.mean(dim=-2, keepdim=True)
-        K_hero = F.normalize(K_raw_all - K_mean, p=2, dim=-1)
-        self.centered_K_hero = K_hero
+        # Compute 5-slot role vectors r_h using role_head
+        role_logits = self.role_head(E_hero)
+        hero_role_probs = F.softmax(role_logits / 0.20, dim=-1)
+        # Zero out low-confidence tail probabilities (e.g. < 5% noise bleed)
+        threshold = 0.05
+        hero_role_probs = torch.where(hero_role_probs >= threshold, hero_role_probs, torch.zeros_like(hero_role_probs))
 
-        slots_centered = self.slots - self.slots.mean(dim=0, keepdim=True)
-        norm_slots = F.normalize(slots_centered, p=2, dim=-1)
-
-        hero_slot_logits = torch.matmul(norm_slots, K_hero.transpose(1, 2)).permute(0, 2, 1)
-        hero_role_probs = F.softmax(hero_slot_logits / 0.30, dim=-1)
+        # Re-normalize remaining probability mass
+        hero_role_probs = F.normalize(hero_role_probs, p=1, dim=-1)
         self.hero_role_probs = hero_role_probs
 
-        # 2. Sequence Keys centered with K_mean
-        E = self.joint_embedding.get_pure_hero_embeddings(x_draft[:, :, 2].long(), patch_ids)
-        K_seq_raw = self.w_k(E)
-        K_norm = F.normalize(K_seq_raw - K_mean, p=2, dim=-1)
+        # 2. Gather the 5-dim role probability for each hero in the draft sequence
+        # x_draft[:, :, 2] has shape [batch_size, seq_len].
+        # These are hero indices. We clamp them to the range [0, num_heroes] for safe gathering.
+        draft_hero_indices = torch.clamp(x_draft[:, :, 2].long(), min=0, max=self.num_heroes)
+        
+        # Gather the role probability distribution for each drafted hero
+        drafted_hero_role_probs = torch.gather(
+            hero_role_probs,
+            dim=1,
+            index=draft_hero_indices.unsqueeze(-1).expand(-1, -1, 5)
+        ) # [batch_size, seq_len, 5]
 
-        # 3. Cross-Attention
-        attn_logits = torch.matmul(norm_slots, K_norm.transpose(1, 2)) / self.temperature
-        attn_logits = attn_logits.unsqueeze(1).expand(-1, seq_len, -1, -1)
-
-        mask = past_active_picks_mask.unsqueeze(2)
-        masked_logits = attn_logits.masked_fill(~mask, -1e9)
-
-        attn_weights = F.softmax(masked_logits, dim=2)
-        attn_weights = self.attn_dropout(attn_weights)
-
-        # 4. Filled Slot Occupancies
-        raw_occupancy = (attn_weights * mask.float()).sum(dim=-1)
+        # 3. Sum the role probabilities over past active picks to get raw occupancy
+        # past_active_picks_mask: [batch_size, seq_len, seq_len]
+        mask_float = past_active_picks_mask.to(dtype=drafted_hero_role_probs.dtype)
+        
+        # [batch_size, seq_len, seq_len] @ [batch_size, seq_len, 5] -> [batch_size, seq_len, 5]
+        raw_occupancy = torch.bmm(mask_float, drafted_hero_role_probs)
         self.raw_occupancy = raw_occupancy
-        unfilled_weight = torch.exp(-raw_occupancy)
+        
+        unfilled_weight = torch.exp(-raw_occupancy) # [batch_size, seq_len, 5]
 
-        # 5. Entropy & Slot Orthogonality Regularization (No Vocabulary Uniformity Loss)
-        alpha = 1.0 - unfilled_weight
+        # 4. Sharpness Regularization (Ortho loss is removed since self.slots is deleted)
         eps = 1e-6
-        entropy = -(
-            alpha * torch.log(alpha + eps) + (1.0 - alpha) * torch.log(1.0 - alpha + eps)
-        )
+        role_entropy = -(hero_role_probs * torch.log(hero_role_probs + eps)).sum(dim=-1).mean()
 
-        cos_sim = torch.matmul(norm_slots, norm_slots.t())
-        eye = torch.eye(5, device=device)
-        ortho_loss = torch.sum((cos_sim - eye) ** 2)
+        self._entropy_loss = self.sharpness_lambda * role_entropy
 
-        self._entropy_loss = self.entropy_lambda * entropy.mean() + self.ortho_lambda * ortho_loss
-
-        # 6. Multiplicative Candidate Role Gating
-        h_query = torch.matmul(unfilled_weight, self.slots)
-
-        gate_logits = torch.bmm(h_query, K_hero.transpose(1, 2)) / math.sqrt(self.d_model)
-        g = torch.sigmoid(gate_logits)
+        # 5. Candidate Gating & Logits
+        # bmm calculation:
+        # unfilled_weight: [batch_size, seq_len, 5]
+        # hero_role_probs: [batch_size, num_heroes + 1, 5]
+        # bmm(unfilled_weight, hero_role_probs.transpose(1, 2)) -> [batch_size, seq_len, num_heroes + 1]
+        g = torch.bmm(unfilled_weight, hero_role_probs.transpose(1, 2))
 
         norm_w_policy = F.normalize(self.w_policy(decoder_output), p=2, dim=-1)
         norm_E_hero = F.normalize(E_hero, p=2, dim=-1)
@@ -353,6 +339,7 @@ class SlotAttentionMLMProjection(nn.Module):
         tau = torch.clamp(self.tau, min=0.1, max=4.0)
         base_logits = tau * cos_sim_policy
 
+        eps = 1e-6
         gate_impact = 3.0 * torch.log(g + eps)
         logits = base_logits + gate_impact
 
@@ -408,12 +395,11 @@ class HierarchicalTransformer(nn.Module):
             num_heroes=num_heroes,
             joint_embedding=self.joint_embedding,
             dropout=dropout,
-            ortho_lambda=0.25,
             entropy_lambda=0.10,
-            temperature=0.30,
         )
 
         self.register_buffer("_collision_loss", torch.tensor(0.0))
+        self.register_buffer("_composition_loss", torch.tensor(0.0))
 
     def forward(
         self,
@@ -444,45 +430,64 @@ class HierarchicalTransformer(nn.Module):
             tgt_key_padding_mask=pad_mask,
         )
 
-        # mlm_logits returned cleanly without forward-pass logit warping
         mlm_logits = self.mlm_head(decoder_output, x_draft, patch_ids)
 
-        # Compute Differentiable Policy Role Collision Loss for Training
+        # --- Self-Supervised Composition & Collision Loss Computation ---
+        hero_role_probs = self.mlm_head.hero_role_probs  # (B, K+1, 5)
+
         step_indices = torch.arange(seq_len, device=x_draft.device)
         causal_mask = step_indices.unsqueeze(0) < step_indices.unsqueeze(1)
 
-        is_pick_s = (x_draft[:, :, 0] == 1.0).unsqueeze(1)
-        valid_hero_s = (x_draft[:, :, 2] >= 0.0).unsqueeze(1)
+        is_pick_s = (x_draft[:, :, 0] == 1.0)
+        valid_hero_s = (x_draft[:, :, 2] >= 0.0)
 
+        # 1. Draft Composition Loss: Sum of 5 team picks' roles must equal [1,1,1,1,1]
+        hero_indices_seq = x_draft[:, :, 2].clamp(min=0).long()
+        seq_role_probs = torch.gather(
+            hero_role_probs,
+            dim=1,
+            index=hero_indices_seq.unsqueeze(-1).expand(-1, -1, 5)
+        )  # (B, 24, 5)
+
+        team0_picks_mask = (x_draft[:, :, 1] == 0.0) & is_pick_s & valid_hero_s
+        team1_picks_mask = (x_draft[:, :, 1] == 1.0) & is_pick_s & valid_hero_s
+
+        team0_sum = (seq_role_probs * team0_picks_mask.unsqueeze(-1).float()).sum(dim=1)  # (B, 5)
+        team1_sum = (seq_role_probs * team1_picks_mask.unsqueeze(-1).float()).sum(dim=1)  # (B, 5)
+
+        target_ones = torch.ones_like(team0_sum)
+
+        # Count active picks per team in each sample
+        t0_count = team0_picks_mask.float().sum(dim=1, keepdim=True) # (B, 1)
+        t1_count = team1_picks_mask.float().sum(dim=1, keepdim=True) # (B, 1)
+
+        # Only enforce [1,1,1,1,1] composition when a team has completed all 5 picks
+        mask_t0 = (t0_count == 5.0).float()
+        mask_t1 = (t1_count == 5.0).float()
+
+        loss_t0 = (F.mse_loss(team0_sum, target_ones, reduction="none") * mask_t0).sum() / torch.clamp(mask_t0.sum() * 5.0, min=1.0)
+        loss_t1 = (F.mse_loss(team1_sum, target_ones, reduction="none") * mask_t1).sum() / torch.clamp(mask_t1.sum() * 5.0, min=1.0)
+        composition_loss = loss_t0 + loss_t1
+
+        self._composition_loss = composition_loss
+
+        # 2. Policy Role Collision Loss
         team_t = x_draft[:, :, 1].unsqueeze(2)
         team_s = x_draft[:, :, 1].unsqueeze(1)
         same_team = (team_t == team_s)
 
-        past_active_picks_mask = causal_mask.unsqueeze(0) & same_team & is_pick_s & valid_hero_s
+        past_active_picks_mask = causal_mask.unsqueeze(0) & same_team & is_pick_s.unsqueeze(1) & valid_hero_s.unsqueeze(1)
         num_picks = past_active_picks_mask.float().sum(dim=2, keepdim=True)
         inhibition_enabled = (num_picks > 0).float()
 
-        if getattr(self.mlm_head, "hero_role_probs", None) is not None:
-            hero_role_probs = self.mlm_head.hero_role_probs  # (B, K+1, 5)
+        team_role_occupancy = torch.bmm(past_active_picks_mask.float(), seq_role_probs)  # (B, 24, 5)
+        role_collision = torch.bmm(team_role_occupancy, hero_role_probs.transpose(1, 2))  # (B, 24, K+1)
 
-            hero_indices_seq = x_draft[:, :, 2].clamp(min=0).long()
-            seq_role_probs = torch.gather(
-                hero_role_probs,
-                dim=1,
-                index=hero_indices_seq.unsqueeze(-1).expand(-1, -1, 5)
-            )  # (B, 24, 5)
+        p_policy = F.softmax(mlm_logits, dim=-1)
+        expected_collision = (p_policy * role_collision).sum(dim=-1, keepdim=True)
 
-            team_role_occupancy = torch.bmm(past_active_picks_mask.float(), seq_role_probs)  # (B, 24, 5)
-            role_collision = torch.bmm(team_role_occupancy, hero_role_probs.transpose(1, 2))  # (B, 24, K+1)
-
-            p_policy = F.softmax(mlm_logits, dim=-1)  # Predicted probabilities
-            expected_collision = (p_policy * role_collision).sum(dim=-1, keepdim=True)
-
-            self._collision_loss = (expected_collision * inhibition_enabled).mean()
-            self.inhibition_penalty = role_collision * inhibition_enabled
-        else:
-            self._collision_loss = torch.tensor(0.0, device=x_draft.device)
-            self.inhibition_penalty = torch.zeros(batch_size, seq_len, self.num_heroes + 1, device=x_draft.device)
+        self._collision_loss = (expected_collision * inhibition_enabled).mean()
+        self.inhibition_penalty = role_collision * inhibition_enabled
 
         hero_indices = x_draft[:, :, 2]
         pure_hero_embeds = self.joint_embedding.get_pure_hero_embeddings(hero_indices, patch_ids)
@@ -502,6 +507,11 @@ class HierarchicalTransformer(nn.Module):
     def get_collision_loss(self) -> torch.Tensor:
         loss = self._collision_loss.clone()
         self._collision_loss.zero_()
+        return loss
+
+    def get_composition_loss(self) -> torch.Tensor:
+        loss = self._composition_loss.clone()
+        self._composition_loss.zero_()
         return loss
 
 
@@ -566,6 +576,9 @@ class MatchNetwork(nn.Module):
 
     def get_collision_loss(self) -> torch.Tensor:
         return self.match_network.get_collision_loss()
+
+    def get_composition_loss(self) -> torch.Tensor:
+        return self.match_network.get_composition_loss()
 
     @torch.no_grad()
     def fuse_embeddings_for_inference(self):

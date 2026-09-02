@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -9,7 +11,14 @@ from dota2drafter.processor.hero_indexer import HeroIndexer
 def hero_indexer():
     indexer = HeroIndexer()
     # Build mapping for 120 heroes (from 1 to 120) so they map to contiguous indices 1..120
-    indexer.build_mapping([{"id": i, "playable": True} for i in range(1, 121)])
+    indexer_path = Path("data") / "hero_indexer.json"
+    assert indexer_path.exists(), f"Hero indexer missing at {indexer_path.resolve()}"
+    import json
+    with open(indexer_path, "r") as f:
+        hero_data = json.load(f)
+    # Reconstruct hero list from mapping
+    heroes = [{"id": int(api_id), "playable": True} for api_id in hero_data.keys()]
+    indexer.build_mapping(heroes)
     return indexer
 
 

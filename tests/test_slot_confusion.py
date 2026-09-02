@@ -12,13 +12,13 @@ def hero_indexer():
     indexer = HeroIndexer()
     # Build mapping for 120 heroes (from 1 to 120) so they map to contiguous indices 1..120
     indexer_path = Path("data") / "hero_indexer.json"
-    if indexer_path.exists():
-        import json
-        with open(indexer_path, "r") as f:
-            hero_data = json.load(f)
-        # Reconstruct hero list from mapping
-        heroes = [{"id": int(api_id), "playable": True} for api_id in hero_data.keys()]
-        indexer.build_mapping(heroes)
+    assert indexer_path.exists(), f"Hero indexer missing at {indexer_path.resolve()}"
+    import json
+    with open(indexer_path, "r") as f:
+        hero_data = json.load(f)
+    # Reconstruct hero list from mapping
+    heroes = [{"id": int(api_id), "playable": True} for api_id in hero_data.keys()]
+    indexer.build_mapping(heroes)
     return indexer
 
 
@@ -28,15 +28,36 @@ def patch_id():
 
 
 @pytest.fixture
-def model():
-    return MatchNetwork(
-        d_model=64,
+def model(hero_indexer):
+    d_model = 64
+    num_heroes = 127
+    player_input_dim = 310
+
+    # Load pre-trained RGCN hero embeddings or fallback to random
+    rgcn_path = Path("models/rgcn.pt")
+    assert rgcn_path.exists(), f"Checkpoint missing at {rgcn_path.resolve()}"
+    h_gnn = torch.load(rgcn_path, weights_only=True)
+    h_gnn = h_gnn.get("embedding.weight")
+    assert h_gnn.shape == (num_heroes + 1, d_model)
+
+    model = MatchNetwork(
+        d_model=d_model,
         nhead=4,
         num_layers=2,
         dim_feedforward=128,
-        num_heroes=120,
-        player_input_dim=127,
+        num_heroes=num_heroes,
+        player_input_dim=player_input_dim,
+        h_gnn=h_gnn,
     )
+
+    # Load trained checkpoint if available; fallback to eval mode.
+    checkpoint_path = Path("checkpoints/best_model.pt")
+    assert checkpoint_path.exists(), f"Checkpoint missing at {checkpoint_path.resolve()}"
+    checkpoint = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
+    model.load_state_dict(checkpoint["model_state"], strict=True)
+
+    model.eval()
+    return model
 
 
 @torch.no_grad()

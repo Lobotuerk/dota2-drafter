@@ -479,11 +479,8 @@ class TransformerTrainer:
 
             backbone_params = []
             head_params = []
-            wk_params = []
             for name, param in self.model.named_parameters():
-                if "mlm_head.w_k" in name:
-                    wk_params.append(param)
-                elif "set_transformer_head" in name or "mlm_head" in name:
+                if "set_transformer_head" in name or "mlm_head" in name:
                     head_params.append(param)
                 else:
                     backbone_params.append(param)
@@ -498,11 +495,6 @@ class TransformerTrainer:
                     "params": head_params,
                     "lr": actual_lr_head,
                     "initial_lr": actual_lr_head,
-                },
-                {
-                    "params": wk_params,
-                    "lr": actual_lr_head * 2.0,  # 2x learning rate for fast key-space role separation
-                    "weight_decay": 0.0,         # Do not decay projection weights toward origin
                 },
             ]
             self.optimizer = torch.optim.AdamW(
@@ -571,9 +563,6 @@ class TransformerTrainer:
         older_shuffled = torch.randperm(len(older_patch_indices)).tolist()
         older_patch_indices = [older_patch_indices[i] for i in older_shuffled]
         
-        # The user wants Val AUC to ONLY reflect the latest patch.
-        # However, we MUST leave the majority of the latest patch in the training set so the model can actually learn the current meta!
-        # We will take 20% of the latest patch for validation, and put the remaining 80% + ALL older matches into training.
         val_size = int(len(latest_patch_indices) * 0.4)
         val_size = max(1, val_size) if latest_patch_indices else 0
         
@@ -585,7 +574,6 @@ class TransformerTrainer:
         train_shuffled = torch.randperm(len(train_indices)).tolist()
         train_indices = [train_indices[i] for i in train_shuffled]
 
-        # Determine player_input_dim: first try model, then fallback to comfort map or default
         player_input_dim = getattr(self.model, "player_input_dim", 127)
         if player_comfort_map:
             first_tensor = next(iter(player_comfort_map.values()))
@@ -619,7 +607,6 @@ class TransformerTrainer:
         os.makedirs(self.config.checkpoint_dir, exist_ok=True)
 
         patience_counter = 0
-        best_state = None
 
         # Calculate decay rate for slot attention temperature
         if self.config.slot_tau_decay_epochs > 0:
@@ -636,7 +623,8 @@ class TransformerTrainer:
             )
             # Inject dynamic temperature into the MLM Head if present
             if getattr(self.model, "match_network", None) and hasattr(self.model.match_network, "mlm_head"):
-                self.model.match_network.mlm_head.temperature = current_tau
+                if hasattr(self.model.match_network.mlm_head, "temperature"):
+                    self.model.match_network.mlm_head.temperature = current_tau
 
             if hasattr(train_dataset, "reshuffle_augmentations"):
                 train_dataset.reshuffle_augmentations()
@@ -674,21 +662,40 @@ class TransformerTrainer:
                 else:
                     loss = self.criterion(logits, y_smoothed)
                 
-                # NTP loss: targets are the true heroes at all 24 sequence positions
+                # NTP loss: targets are the true heroes at all sequence positions
                 ntp_labels = x_batch[:, :, 2].long()
                 
-                mlm_loss = torch.nn.functional.cross_entropy(
-                    mlm_logits.view(-1, mlm_logits.size(-1)), 
-                    ntp_labels.view(-1), 
+                # Step-Weighted Cross Entropy:
+                # w_t = 0.5 + 1.0 * (t / 23) => 0.5 at Step 0, 1.5 at Last Pick
+                seq_len = mlm_logits.size(1)
+                t_idx = torch.arange(seq_len, device=self.device).float()
+                step_weights = 0.5 + 1.0 * (t_idx / max(1.0, float(seq_len - 1)))
+                
+                ce_elements = torch.nn.functional.cross_entropy(
+                    mlm_logits.transpose(1, 2), 
+                    ntp_labels, 
                     ignore_index=-1,
+                    reduction="none",
                     label_smoothing=0.0
                 )
                 
+                weighted_ce = ce_elements * step_weights.unsqueeze(0)
+                valid_elements = (ntp_labels != -1).sum().float()
+                
+                mlm_loss = weighted_ce.sum() / torch.clamp(valid_elements, min=1.0)
+                
                 # Slot attention entropy regularization
                 entropy_loss = self.model.get_entropy_loss()
+                collision_loss = self.model.get_collision_loss()
+                composition_loss = self.model.get_composition_loss()
 
-                # Combine losses (AlphaZero-style dual objective)
-                total_loss = 2.0 * loss + 1.0 * mlm_loss + entropy_loss
+                total_loss = (
+                    1.0 * loss               # Win BCE loss
+                    + 1.0 * mlm_loss          # Draft Policy NTP loss
+                    + entropy_loss            # Role Head Sharpness
+                    + 0.05 * collision_loss   # Subtractive Repulsion
+                    + 0.10 * composition_loss # Role Composition Constraint
+                )
 
                 self.optimizer.zero_grad()
                 total_loss.backward()
@@ -709,15 +716,16 @@ class TransformerTrainer:
             self.metrics.val_mlm_top5_accuracies.append(val_metrics["mlm_top5_accuracy"])
 
             logger.info(
-                "Epoch %d/%d - Train Loss: %.4f - Val Loss: %.4f - Val Acc: %.4f - Val AUC: %.4f - Val MLM: %.4f - Top5: %.4f",
+                "Epoch %d/%d - Train Loss: %.4f - Val Loss: %.4f - Val AUC: %.4f - Top5: %.4f (P1: %.4f | P2: %.4f | P3: %.4f)",
                 epoch,
                 self.config.num_epochs,
                 avg_train_loss,
                 val_loss,
-                val_metrics["accuracy"],
                 val_metrics["roc_auc"],
-                val_metrics["mlm_accuracy"],
                 val_metrics["mlm_top5_accuracy"],
+                val_metrics["p1_top5_accuracy"],
+                val_metrics["p2_top5_accuracy"],
+                val_metrics["p3_top5_accuracy"],
             )
 
             if wandb is not None and wandb.run is not None:
@@ -727,6 +735,9 @@ class TransformerTrainer:
                         "train_loss": avg_train_loss,
                         "val_loss": val_loss,
                         "val_top5_acc": val_metrics["mlm_top5_accuracy"],
+                        "val_p1_top5_acc": val_metrics["p1_top5_accuracy"],
+                        "val_p2_top5_acc": val_metrics["p2_top5_accuracy"],
+                        "val_p3_top5_acc": val_metrics["p3_top5_accuracy"],
                         "val_auc": val_metrics["roc_auc"],
                     }
                 )
@@ -767,6 +778,14 @@ class TransformerTrainer:
         mlm_correct = 0
         mlm_top5_correct = 0
         mlm_total = 0
+        
+        # Track Top-5 hits and totals by draft phase
+        p1_hits = 0
+        p2_hits = 0
+        p3_hits = 0
+        p1_total = 0
+        p2_total = 0
+        p3_total = 0
 
         with torch.no_grad():
             for batch_data in tqdm(val_loader, desc="Validation"):
@@ -795,7 +814,16 @@ class TransformerTrainer:
 
                 # Slot attention entropy regularization
                 entropy_loss = self.model.get_entropy_loss()
-                val_loss += (loss + entropy_loss).item()
+                collision_loss = self.model.get_collision_loss()
+                composition_loss = self.model.get_composition_loss()
+
+                val_loss += (
+                    loss
+                    + entropy_loss
+                    + 0.20 * collision_loss
+                    + 1.0 * composition_loss
+                ).item()
+
                 all_preds.append(logits.cpu())
                 all_targets.append(y_batch.cpu())
                 val_batches += 1
@@ -812,14 +840,33 @@ class TransformerTrainer:
                     
                     # Compute Top-5 accuracy over valid steps
                     top5_preds = mlm_logits.topk(k=5, dim=-1).indices
-                    expanded_labels = ntp_labels[valid_mask].unsqueeze(-1)
-                    mlm_top5_correct += (top5_preds[valid_mask] == expanded_labels).any(dim=-1).sum().item()
+                    expanded_labels = ntp_labels.unsqueeze(-1)
                     
+                    # Shape: (B, 24)
+                    hits_mask = (top5_preds == expanded_labels).any(dim=-1) & valid_mask
+                    mlm_top5_correct += hits_mask.sum().item()
                     mlm_total += valid_mask.sum().item()
+                    
+                    # Separate hit counts and totals by draft phase
+                    # Phase 1: Steps 0-7 (Flex/Meta)
+                    p1_hits += hits_mask[:, :8].sum().item()
+                    p1_total += valid_mask[:, :8].sum().item()
+                    
+                    # Phase 2: Steps 8-15 (Core Structure)
+                    p2_hits += hits_mask[:, 8:16].sum().item()
+                    p2_total += valid_mask[:, 8:16].sum().item()
+                    
+                    # Phase 3: Steps 16-23 (Counter/Last Picks)
+                    p3_hits += hits_mask[:, 16:24].sum().item()
+                    p3_total += valid_mask[:, 16:24].sum().item()
 
         avg_val_loss = val_loss / max(val_batches, 1)
         mlm_accuracy = (mlm_correct / mlm_total) if mlm_total > 0 else 0.0
         mlm_top5_accuracy = (mlm_top5_correct / mlm_total) if mlm_total > 0 else 0.0
+        
+        p1_accuracy = (p1_hits / p1_total) if p1_total > 0 else 0.0
+        p2_accuracy = (p2_hits / p2_total) if p2_total > 0 else 0.0
+        p3_accuracy = (p3_hits / p3_total) if p3_total > 0 else 0.0
 
         if all_preds:
             all_preds_tensor = torch.cat(all_preds)
@@ -830,6 +877,9 @@ class TransformerTrainer:
             
         metrics["mlm_accuracy"] = mlm_accuracy
         metrics["mlm_top5_accuracy"] = mlm_top5_accuracy
+        metrics["p1_top5_accuracy"] = p1_accuracy
+        metrics["p2_top5_accuracy"] = p2_accuracy
+        metrics["p3_top5_accuracy"] = p3_accuracy
 
         return avg_val_loss, metrics
 

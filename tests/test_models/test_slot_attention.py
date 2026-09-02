@@ -53,9 +53,7 @@ def _make_draft(batch_size, num_heroes=120, with_bans=False):
 def test_parameter_registration():
     """Verify learnable parameters are registered correctly."""
     head = _build_slot_head()
-    assert head.slots.shape == (5, 64)
-    assert head.slots.requires_grad
-    assert hasattr(head, "w_k")
+    assert hasattr(head, "role_head")
     assert hasattr(head, "w_policy")
 
 
@@ -169,9 +167,10 @@ def test_smooth_gradient_flow():
     loss = logits.sum()
     loss.backward()
 
-    # Slots should have non-zero gradients
-    assert head.slots.grad is not None
-    assert head.slots.grad.abs().sum() > 0
+    # role_head should have non-zero gradients
+    for param in head.role_head.parameters():
+        assert param.grad is not None
+        assert param.grad.abs().sum() > 0
 
 
 def test_inference_fusion():

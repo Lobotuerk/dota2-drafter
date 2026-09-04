@@ -5,10 +5,13 @@ Usage:
     python scripts/01d_add_custom_player.py
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
 import torch
 import json
 import math
-from pathlib import Path
 from dota2drafter.config import load_config
 from rich.console import Console
 from rich.prompt import Prompt, IntPrompt
@@ -24,6 +27,10 @@ def wilson_score(wins: int, n: int, z: float = 1.96) -> float:
     return (center - spread) / denominator
 
 def main():
+    if "--help" in sys.argv:
+        console.print("[red]player_comfort.pt not found![/red]")
+        return
+
     comfort_path = Path("data/player_comfort.pt")
     if not comfort_path.exists():
         console.print("[red]player_comfort.pt not found![/red]")

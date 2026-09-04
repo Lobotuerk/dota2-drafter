@@ -30,12 +30,12 @@ The core of the system is the `MatchNetwork`, a Hierarchical Sequence Transforme
 
 ### 2.1. The Joint Embedding ($z_t$)
 Every step of the 24-action Captains Mode draft is embedded into a joint space before entering the Transformer:
-$$ z_t = Project(H_{GNN}[h_t]) + W_{type}(p_t) + W_{team}(c_t) + PE(o_t) + W_{patch}(patch\_id) $$
+$$ z_t = \gamma_{patch} \cdot (Project(H_{GNN}[h_t]) + W_{type}(p_t) + W_{team}(c_t) + PE(o_t)) + \beta_{patch} $$
 * **$H_{GNN}$:** The frozen RGCN hero embedding.
 * **$W_{type}$:** Action type (Pick vs. Ban).
 * **$W_{team}$:** Team side (Radiant vs. Dire).
 * **$PE$:** Sinusoidal absolute positional encoding (Step 0 through 23).
-* **$W_{patch}$ (Contextual Patch Embedding):** An `nn.Embedding` that dynamically shifts the network's hidden state based on the historical meta (e.g., Patch 7.37 vs 7.41e). This allows the network to train on hundreds of thousands of historical matches to learn the "universal mechanics" of Dota, while isolating meta-specific balance shifts.
+* **$\gamma_{patch}, \beta_{patch}$ (FiLM Contextual Patch Embeddings):** The system uses **Feature-wise Linear Modulation (FiLM)** instead of additive patch embeddings. The patch embedding generates two vectors — a scaling factor $\gamma$ and a shifting factor $\beta$ — that dynamically modulate the joint embedding based on the historical meta (e.g., Patch 7.37 vs 7.41e). This allows the network to train on hundreds of thousands of historical matches to learn the "universal mechanics" of Dota, while isolating meta-specific balance shifts through learned affine transformations rather than simple addition.
 
 ### 2.2. Player Comfort Network (PCN)
 The model dynamically factors in the human element. The PCN takes a $(10, C)$ historical win/loss differential matrix for the players in the lobby and maps it to a $(10, d\_model)$ preference vector, which is cross-attended with the draft sequence in the Transformer.
@@ -51,12 +51,13 @@ The Transformer is trained using a parallel dual-objective setup to combat Task 
 
 ### 3.1. The Value Head (Win-Probability)
 * **Goal:** Predict the final outcome of the match.
-* **Mechanism:** Applies masked global average pooling over **all valid draft steps** (both picks and bans). The pooled vector is passed through an MLP to output a sigmoid scalar predicting the Radiant Win Probability.
+* **Mechanism:** Uses a **SetTransformerHead** that operates over the set of drafted heroes. The head first groups Radiant and Dire picks independently, processing each set through Set Attention Blocks (SAB) and Pooling by Multihead Attention (PMA) to produce order-invariant set representations. It then performs explicit cross-attention between the Radiant and Dire sets (`r2d_attn`, `d2r_attn`) to model compositional synergies and antagonist counters — capturing, for example, how a specific Radiant lineup counters a particular Dire composition. The concatenated cross-attended representation is routed through a final MLP to output a sigmoid scalar predicting the Radiant Win Probability.
 * **Optimization:** Evaluated using `BCEWithLogitsLoss`, combined with aggressive label smoothing (`eps=0.15`) and heavy weight decay (`0.1`) to prevent memorization of a noisy, high-variance dataset.
 
 ### 3.2. The Policy Head (Masked Language Modeling)
 * **Goal:** Predict what a professional team is most likely to do at a given step.
-* **Mechanism:** During training, 15% of the draft sequence is masked out (`hero_val = -1`). An `mlm_head` projects the sequence back up to the hero vocabulary size (`num_heroes + 1`) to predict the missing heroes.
+* **Mechanism:** Features a **Slot-Attentive Policy Head** (`SlotAttentionMLMProjection`) that goes beyond simple linear projection. During training, 15% of the draft sequence is masked out (`hero_val = -1`). The head computes cosine similarities between the policy projection and pure hero embeddings, scaled by a learnable temperature parameter (`tau`) to produce sharp, calibrated logits over the hero vocabulary.
+* **Self-Supervised Role Prediction:** A sub-network computes 5-slot role distributions (e.g., Carry, Mid, Offlane, Support, Hard Support) and applies expected collision and composition penalties to prevent drafting conflicting roles. This anchors the model's understanding of functional Dota 2 team drafts — not just which heroes are statistically likely, but which heroes fulfill complementary roles within a coherent strategy.
 * **Parallel Loss:** The network is optimized on a combined loss function: `Loss = ValueLoss + (0.5 * PolicyLoss)`. This anchors the network, preventing it from collapsing into a naive win-predictor by forcing its internal representations to always understand standard drafting grammar.
 
 ---

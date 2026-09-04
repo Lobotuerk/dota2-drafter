@@ -64,7 +64,7 @@ The architecture utilizes a state-of-the-art approach to Dota 2 drafting:
 1. **Data Gathering** — Dual-API fetch (STRATZ/OpenDota) with automatic Historical Patch Tagging.
 2. **Hero Embeddings (Skip-Gram + DGI)** — Unsupervised deep graph infomax to map the spatial topology of heroes.
 3. **Hero Embeddings (RGCN)** — Multi-relational GCN with a deep Link Prediction Decoder to encode synergies, counters, and required bans.
-4. **Transformer Training** — A Two-Headed AlphaZero-style Transformer (predicts Win-Probability alongside Masked Language Modeling) utilizing Contextual Patch Embeddings.
+4. **Transformer Training** — A Two-Headed AlphaZero-style Transformer (predicting Win-Probability via a SetTransformer and Policy via Slot-Attentive MLM) utilizing FiLM Contextual Patch Embeddings.
 5. **MCTS Inference** — Real-time interactive drafting using PyMCTS, utilizing the MLM Policy Head for instant O(B) PUCT priors.
 
 ---

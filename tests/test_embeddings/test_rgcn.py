@@ -130,3 +130,33 @@ def test_hero_rgcn_save_load(tmp_path: Path) -> None:
     loaded_out = loaded_model(graph.edge_index, graph.edge_type)
 
     assert torch.allclose(orig_out, loaded_out)
+
+
+def test_hero_rgcn_save_load_multi_layer(tmp_path: Path) -> None:
+    """Test saving and loading HeroRGCN model with custom multi-layer structures (e.g., 6 layers)."""
+    frozen_embeddings = torch.randn(11, 64)
+    model = HeroRGCN(
+        num_nodes=11,
+        d_model=64,
+        num_relations=3,
+        frozen_embeddings=frozen_embeddings,
+        num_layers=6,
+    )
+
+    save_path = tmp_path / "rgcn_6layers.pt"
+    model.save(save_path)
+
+    loaded_model = HeroRGCN.load(
+        path=save_path,
+        frozen_embeddings=frozen_embeddings,
+        d_model=64,
+        num_relations=3,
+    )
+
+    assert len(loaded_model.rgcn_layers) == 6
+
+    graph = _create_mock_graph(num_nodes=11, num_edges=30)
+    orig_out = model(graph.edge_index, graph.edge_type)
+    loaded_out = loaded_model(graph.edge_index, graph.edge_type)
+
+    assert torch.allclose(orig_out, loaded_out)

@@ -12,6 +12,7 @@ A Python-based data ingestion pipeline that fetches, validates, and transforms D
 - [Stage 3: RGCN Training](#stage-3-rgcn-training)
 - [Stage 4: Transformer Training](#stage-4-transformer-training)
 - [Stage 5: Interactive Draft (MCTS)](#stage-5-interactive-draft-mcts)
+- [Hyperparameter Tuning (Optuna)](#hyperparameter-tuning-optuna)
 
 ---
 
@@ -98,7 +99,7 @@ python scripts/01c_build_comfort.py
 Trains Skip-Gram + DGI unsupervised hero embeddings from draft co-occurrence data.
 
 ```bash
-python scripts/02_train_embeddings.py --mode train --dgi_epochs 100 --skip_gram_epochs 5 --dgi_lr 5e-4
+python scripts/02_train_embeddings.py --mode train --dgi_epochs 300 --skip_gram_epochs 10 --dgi_lr 10e-3
 ```
 
 ---
@@ -108,7 +109,7 @@ python scripts/02_train_embeddings.py --mode train --dgi_epochs 100 --skip_gram_
 Trains the Relational GNN over the multi-relational hero graph using a 3-layer deep MLP Link Prediction Decoder.
 
 ```bash
-python scripts/03_train_rgcn.py --mode train --data_dir data --frozen_embeddings_path models/skip_gram_dgi.pt --output_file models/rgcn.pt --d_model 64 --rgcn_epochs 150 --learning_rate 5e-4
+python scripts/03_train_rgcn.py --mode train --data_dir data --frozen_embeddings_path models/skip_gram_dgi.pt --output_file models/rgcn.pt --d_model 64 --rgcn_epochs 500 --learning_rate 3e-4 --wilson_threshold 0.52
 ```
 
 ---
@@ -120,7 +121,7 @@ Trains the Two-Headed Hierarchical Sequence Transformer. The script automaticall
 *Note: MLM training is now performed in parallel with Value training (AlphaZero-style), so no `--mlm_epochs` flag is needed.*
 
 ```bash
-python scripts/04_train_transformer.py     --mode train     --data_dir data     --rgcn_path models/rgcn.pt     --comfort_path data/player_comfort.pt     --checkpoint_dir checkpoints     --device cuda     --num_heroes 127     --num_epochs 20     --batch_size 256     --dropout 0.5     --dim_feedforward 128     --lr_backbone 1e-4     --lr_head 5e-4     --augment 2
+python scripts/04_train_transformer.py     --mode train     --data_dir data     --rgcn_path models/rgcn.pt     --comfort_path data/player_comfort.pt     --checkpoint_dir checkpoints     --device cuda     --num_heroes 127     --num_epochs 150     --batch_size 64     --dropout 0.1     --dim_feedforward 128     --lr_backbone 1e-4     --lr_head 3e-4     --augment 5 --wilson_threshold 0.52
 ```
 
 ---
@@ -131,4 +132,52 @@ Boot up the real-time CLI assistant to guide you through a draft. The MCTS engin
 
 ```bash
 python scripts/interactive_draft.py     --num_heroes 127     --max_iterations 15000     --max_seconds 60     --device cuda     --top_n 10     --max_candidates 5
+```
+
+---
+
+## Hyperparameter Tuning (Optuna)
+
+To find the absolute best set of parameters for this AI architecture, you can use the multi-objective tuning script. Because the embedding size (`d_model`) dictates both the spatial embedding dimensions and downstream transformer dimensions, this script wraps all three training stages (**Skip-Gram + DGI pre-training**, **RGCN training**, and **Transformer training**) into a single, end-to-end objective function.
+
+It utilizes Optuna's multi-objective search (NSGA-II) to find the Pareto front across two conflicting targets:
+1. **Top-5 MLM Drafting Policy Accuracy** (the model's capacity to recommend the best contextual picks/bans).
+2. **Win-rate ROC-AUC score** (the accuracy of win probability predictions).
+
+### Installation
+
+Ensure `optuna` is installed (it is already registered as a project dependency):
+```bash
+pip install optuna
+```
+
+### Usage
+
+Execute the unified tuning pipeline:
+```bash
+python scripts/07_tune_pipeline.py \
+    --data_dir data \
+    --comfort_path data/player_comfort.pt \
+    --n_trials 20 \
+    --skip_gram_epochs 5 \
+    --dgi_epochs 10 \
+    --rgcn_epochs 10 \
+    --transformer_epochs 20
+```
+
+*Note: You can pass custom epochs or trials using the command line arguments to balance search depth with your available compute budget.*
+
+### Remote Storage & Parallelization (Optional)
+
+You can persist study results to a SQLite database. This allows you to safely interrupt the study and resume it later, or run multiple parallel tuning workers concurrently:
+
+```bash
+# Save to a local database
+python scripts/07_tune_pipeline.py --storage sqlite:///optuna_study.db
+```
+
+To monitor the search and visualize the Pareto front / hyperparameter importance in real-time:
+```bash
+pip install optuna-dashboard
+optuna-dashboard sqlite:///optuna_study.db
 ```

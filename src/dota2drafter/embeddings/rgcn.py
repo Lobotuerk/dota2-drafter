@@ -239,7 +239,11 @@ class HeroRGCN(nn.Module):
             pass
 
         state = torch.load(path, weights_only=True)
-        num_layers = len([k for k in state if k.startswith("rgcn_layers.")])
+        
+        # Determine num_layers from state keys (e.g. rgcn_layers.5.bias -> index 5 -> 6 layers)
+        layer_indices = {int(k.split(".")[1]) for k in state.keys() if k.startswith("rgcn_layers.")}
+        num_layers = max(layer_indices) + 1 if layer_indices else 2
+        
         num_nodes = frozen_embeddings.shape[0]
 
         model = cls(
@@ -247,6 +251,7 @@ class HeroRGCN(nn.Module):
             d_model=d_model,
             num_relations=num_relations,
             frozen_embeddings=frozen_embeddings,
+            num_layers=num_layers,
         )
         model.load_state_dict(state)
         model.eval()

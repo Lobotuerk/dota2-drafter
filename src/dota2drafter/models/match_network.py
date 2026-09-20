@@ -133,7 +133,8 @@ class JointEmbedding(nn.Module):
         self.d_model = d_model
         self.register_buffer("h_gnn", h_gnn)
 
-        self.project = nn.Linear(d_model, d_model)
+        self.project_policy = nn.Linear(d_model, d_model)
+        self.project_value = nn.Linear(d_model, d_model)
         self.w_type = nn.Embedding(2, d_model)
         self.w_team = nn.Embedding(2, d_model)
         self.w_patch = nn.Embedding(num_patches, d_model)
@@ -149,16 +150,24 @@ class JointEmbedding(nn.Module):
         self.pos_enc = SinusoidalPositionalEncoding(d_model, max_len=24)
 
     def get_pure_hero_embeddings(
-        self, hero_indices: torch.Tensor, patch_ids: torch.Tensor | None = None
+        self, hero_indices: torch.Tensor, patch_ids: torch.Tensor | None = None, for_value: bool = False
     ) -> torch.Tensor:
         device = hero_indices.device
         valid_heroes = (hero_indices >= 0)
         clamped_indices = hero_indices.clamp(min=0).long()
 
-        h_gnn = self.h_gnn.to(device)
-        hero_embeds = h_gnn[clamped_indices]
-        hero_embeds = hero_embeds * valid_heroes.unsqueeze(-1).float()
-        hero_projected = self.project(hero_embeds)
+        project_layer = self.project_value if for_value else self.project_policy
+
+        if isinstance(project_layer, nn.Identity):
+            h_gnn = (self.h_gnn_value if for_value else self.h_gnn_policy).to(device)
+            hero_embeds = h_gnn[clamped_indices]
+            hero_embeds = hero_embeds * valid_heroes.unsqueeze(-1).float()
+            hero_projected = hero_embeds
+        else:
+            h_gnn = self.h_gnn.to(device)
+            hero_embeds = h_gnn[clamped_indices]
+            hero_embeds = hero_embeds * valid_heroes.unsqueeze(-1).float()
+            hero_projected = project_layer(hero_embeds)
 
         if patch_ids is not None:
             patch_ids_clamped = torch.clamp(patch_ids.to(device), 0, self.w_patch.num_embeddings - 1)
@@ -171,12 +180,21 @@ class JointEmbedding(nn.Module):
 
     @torch.no_grad()
     def fuse_embeddings_for_inference(self):
-        if isinstance(self.project, nn.Identity):
+        if isinstance(self.project_policy, nn.Identity) and isinstance(self.project_value, nn.Identity):
             return
-        fused_h_gnn = self.project(self.h_gnn)
+        
+        # Fuse policy embeddings
+        fused_h_gnn_policy = self.project_policy(self.h_gnn)
+        self.register_buffer("h_gnn_policy", fused_h_gnn_policy)
+        self.project_policy = nn.Identity()
+
+        # Fuse value embeddings
+        fused_h_gnn_value = self.project_value(self.h_gnn)
+        self.register_buffer("h_gnn_value", fused_h_gnn_value)
+        self.project_value = nn.Identity()
+
+        # Delete original to save memory
         del self.h_gnn
-        self.register_buffer("h_gnn", fused_h_gnn)
-        self.project = nn.Identity()
 
     def forward(
         self,
@@ -194,10 +212,16 @@ class JointEmbedding(nn.Module):
         valid_heroes = (hero_indices >= 0)
         clamped_indices = hero_indices.clamp(min=0)
 
-        h_gnn = self.h_gnn.to(device)
-        hero_embeds = h_gnn[clamped_indices]
-        hero_embeds = hero_embeds * valid_heroes.unsqueeze(-1).float()
-        hero_projected = self.project(hero_embeds)
+        if isinstance(self.project_policy, nn.Identity):
+            h_gnn = self.h_gnn_policy.to(device)
+            hero_embeds = h_gnn[clamped_indices]
+            hero_embeds = hero_embeds * valid_heroes.unsqueeze(-1).float()
+            hero_projected = hero_embeds
+        else:
+            h_gnn = self.h_gnn.to(device)
+            hero_embeds = h_gnn[clamped_indices]
+            hero_embeds = hero_embeds * valid_heroes.unsqueeze(-1).float()
+            hero_projected = self.project_policy(hero_embeds)
 
         action_types_clamped = torch.clamp(action_types, 0, 1)
         type_embeds = self.w_type(action_types_clamped)
@@ -285,7 +309,7 @@ class SlotAttentionMLMProjection(nn.Module):
         all_hero_indices = (
             torch.arange(self.num_heroes + 1, device=device).unsqueeze(0).expand(batch_size, -1)
         )
-        E_hero = self.joint_embedding.get_pure_hero_embeddings(all_hero_indices, patch_ids)
+        E_hero = self.joint_embedding.get_pure_hero_embeddings(all_hero_indices, patch_ids, for_value=False)
 
         # Compute 5-slot role vectors r_h using role_head
         role_logits = self.role_head(E_hero)
@@ -490,7 +514,7 @@ class HierarchicalTransformer(nn.Module):
         self.inhibition_penalty = role_collision * inhibition_enabled
 
         hero_indices = x_draft[:, :, 2]
-        pure_hero_embeds = self.joint_embedding.get_pure_hero_embeddings(hero_indices, patch_ids)
+        pure_hero_embeds = self.joint_embedding.get_pure_hero_embeddings(hero_indices, patch_ids, for_value=True)
         logits = self.set_transformer_head(pure_hero_embeds, x_draft)
 
         return logits, mlm_logits

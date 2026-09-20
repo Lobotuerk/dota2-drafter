@@ -106,6 +106,9 @@ def parse_args() -> argparse.Namespace:
         "--num_epochs", type=int, default=50, help="Number of training epochs (default: 50)"
     )
     parser.add_argument(
+        "--patience", type=int, default=25, help="Early stopping patience (default: 25)"
+    )
+    parser.add_argument(
         "--learning_rate", type=float, default=1e-4, help="Learning rate (default: 1e-4)"
     )
     parser.add_argument(
@@ -368,6 +371,7 @@ def main() -> None:
             slot_tau_start=args.slot_tau_start,
             slot_tau_end=args.slot_tau_end,
             slot_tau_decay_epochs=args.slot_tau_decay_epochs,
+            patience=args.patience,
         )
 
         if args.wandb_project:

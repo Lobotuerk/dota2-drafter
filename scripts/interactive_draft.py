@@ -535,9 +535,9 @@ def main() -> None:
     
     # Initialize the draft agent
     
-    # We pass the absolute latest patch ID (index 13 which corresponds to 7.41e)
+    # We pass the absolute latest patch ID (which corresponds to 7.41f)
     # to evaluate all games in the current meta.
-    patch_tensor = torch.tensor([21], dtype=torch.long, device=device)
+    patch_tensor = torch.tensor([22], dtype=torch.long, device=device)
     
     # Wrap model to automatically inject the patch_tensor
     class PatchWrappedModel(torch.nn.Module):

@@ -119,6 +119,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help='Device to train on (auto-detect if None)',
     )
+    parser.add_argument(
+        "--llm_patience",
+        type=int,
+        default=25,
+        help="Early stopping patience for LLM/Transformer training (default: 25)",
+    )
     return parser.parse_args()
 
 
@@ -353,6 +359,7 @@ def make_objective(
                         checkpoint_dir=str(tmp_path / "checkpoints"),
                         label_smoothing_eps=label_smoothing_eps,
                         augment=augment,
+                        patience=args.llm_patience,
                     )
 
                     trainer = TransformerTrainer(model, config)

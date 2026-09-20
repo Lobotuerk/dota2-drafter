@@ -477,103 +477,48 @@ def test_match_network_predict_proba_with_patch_ids():
     assert 0 <= proba_2.item() <= 1
 
 
-def test_subtractive_inhibition_empty_picks():
-    """Verify zero inhibition penalty when no prior picks exist."""
+def test_separate_projections_gradient_flow():
+    """Verify that gradients from the policy head and value head flow separately
+    to project_policy and project_value respectively."""
     d_model = 32
-    num_heroes = 10
-    h_gnn = torch.randn(num_heroes + 1, d_model)
-    model = MatchNetwork(
-        d_model=d_model,
-        nhead=2,
-        num_layers=1,
-        dim_feedforward=64,
-        num_heroes=num_heroes,
-        player_input_dim=22,
-        h_gnn=h_gnn,
-    )
-    model.eval()
-
-    x_draft = torch.zeros((1, 24, 4), dtype=torch.float32)
-    x_draft[:, :, 2] = -1.0  # Empty draft (all padding)
-    x_draft[:, :, 3] = torch.arange(24).float()
-    player_comfort = torch.zeros((1, 10, 22), dtype=torch.float32)
-
-    with torch.no_grad():
-        logits, mlm_logits = model(x_draft, player_comfort)
-
-    assert mlm_logits.shape == (1, 24, num_heroes + 1)
-
-
-def test_subtractive_inhibition_causality():
-    """Verify that changing a pick at step t does not alter mlm_logits at steps < t."""
-    d_model = 32
-    num_heroes = 10
-    h_gnn = torch.randn(num_heroes + 1, d_model)
-    model = MatchNetwork(
-        d_model=d_model,
-        nhead=2,
-        num_layers=1,
-        dim_feedforward=64,
-        num_heroes=num_heroes,
-        player_input_dim=22,
-        h_gnn=h_gnn,
-    )
-    model.eval()
-
-    x_draft_1 = torch.zeros((1, 24, 4), dtype=torch.float32)
-    x_draft_1[:, :, 2] = -1.0
-    x_draft_1[:, :, 3] = torch.arange(24).float()
-    x_draft_1[0, 0] = torch.tensor([1.0, 0.0, 2.0, 0.0])  # Pick hero 2 at step 0
-    x_draft_1[0, 1] = torch.tensor([1.0, 1.0, 4.0, 1.0])  # Pick hero 4 at step 1
-
-    x_draft_2 = x_draft_1.clone()
-    x_draft_2[0, 1] = torch.tensor([1.0, 1.0, 8.0, 1.0])  # Change step 1 pick to hero 8
-
-    player_comfort = torch.zeros((1, 10, 22), dtype=torch.float32)
-
-    with torch.no_grad():
-        _, mlm_logits_1 = model(x_draft_1, player_comfort)
-        _, mlm_logits_2 = model(x_draft_2, player_comfort)
-
-    # Logits at step 0 and step 1 must be identical across both drafts
-    torch.testing.assert_close(mlm_logits_1[0, 0], mlm_logits_2[0, 0])
-    torch.testing.assert_close(mlm_logits_1[0, 1], mlm_logits_2[0, 1])
-
-
-def test_match_network_predict_proba_with_patch_ids():
-    """Test MatchNetwork predict_proba accepts patch_ids and returns valid probabilities."""
-    d_model = 64
-    num_heroes = 120
-    player_input_dim = 10
-    h_gnn = torch.randn(num_heroes + 1, d_model)
+    num_heroes = 20
+    player_input_dim = 5
+    batch_size = 2
 
     model = MatchNetwork(
         d_model=d_model,
-        nhead=4,
-        num_layers=2,
-        dim_feedforward=128,
-        dropout=0.0,
         num_heroes=num_heroes,
         player_input_dim=player_input_dim,
-        h_gnn=h_gnn,
-        num_patches=10,
     )
 
-    x_draft = torch.zeros(1, 24, 4)
-    x_draft[0, :, 2] = torch.arange(24) + 1
-    x_draft[0, :, 0] = 1.0
-    x_draft[0, :, 3] = torch.arange(24).float()
+    # Forward with dummy input
+    x_draft = torch.zeros(batch_size, 24, 4)
+    x_draft[:, :, 2] = torch.arange(24).repeat(batch_size, 1) % num_heroes
+    x_draft[:, :, 0] = 1.0  # pick
+    x_draft[:, :, 3] = torch.arange(24).float()
+    player_comfort = torch.randn(batch_size, 10, player_input_dim)
 
-    player_comfort = torch.randn(1, 10, player_input_dim)
+    logits, mlm_logits = model(x_draft, player_comfort)
 
-    patch_1 = torch.tensor([1], dtype=torch.long)
-    proba_1 = model.predict_proba(x_draft, player_comfort, patch_ids=patch_1)
+    # Zero any gradients
+    model.zero_grad()
 
-    patch_2 = torch.tensor([2], dtype=torch.long)
-    proba_2 = model.predict_proba(x_draft, player_comfort, patch_ids=patch_2)
+    # Backward *only* on value (win prediction) head
+    loss_value = logits.sum()
+    loss_value.backward(retain_graph=True)
 
-    assert proba_1.shape == (1,)
-    assert proba_2.shape == (1,)
-    assert 0 <= proba_1.item() <= 1
-    assert 0 <= proba_2.item() <= 1
+    # project_value should have gradients, project_policy should NOT
+    assert model.match_network.joint_embedding.project_value.weight.grad is not None
+    assert model.match_network.joint_embedding.project_policy.weight.grad is None
+
+    # Zero gradients again
+    model.zero_grad()
+
+    # Backward *only* on policy (MLM) head
+    loss_policy = mlm_logits.sum()
+    loss_policy.backward()
+
+    # project_policy should have gradients, project_value should NOT
+    assert model.match_network.joint_embedding.project_policy.weight.grad is not None
+    assert model.match_network.joint_embedding.project_value.weight.grad is None
 

@@ -375,3 +375,31 @@ def test_cleanup_unapproved_rechunks(tmp_path: Path) -> None:
     assert data["match_ids"] == ["10001", "10002"]
 
 
+def test_train_transformer_patience_arg_parsing():
+    """Verify that 04_train_transformer parses --patience correctly."""
+    import importlib
+    import sys
+    from unittest.mock import patch
+
+    train_transformer = importlib.import_module("scripts.04_train_transformer")
+
+    test_args = ["04_train_transformer.py", "--patience", "12"]
+    with patch.object(sys, "argv", test_args):
+        args = train_transformer.parse_args()
+        assert args.patience == 12
+
+
+def test_tune_pipeline_llm_patience_arg_parsing():
+    """Verify that 07_tune_pipeline parses --llm_patience correctly."""
+    import importlib
+    import sys
+    from unittest.mock import patch
+
+    tune_pipeline = importlib.import_module("scripts.07_tune_pipeline")
+
+    test_args = ["07_tune_pipeline.py", "--llm_patience", "33"]
+    with patch.object(sys, "argv", test_args):
+        args = tune_pipeline.parse_args()
+        assert args.llm_patience == 33
+
+

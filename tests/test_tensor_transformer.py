@@ -201,3 +201,23 @@ def test_tensor_transformer_batch_shape():
     assert processed.x_tensor.dtype == torch.float32
     assert processed.y_tensor.shape == (1,)
     assert processed.y_tensor.dtype == torch.float32
+
+
+def test_get_patch_id():
+    from dota2drafter.processor.tensor_transformer import get_patch_id
+
+    # Check that a timestamp before 7.37 (first patch) returns the first patch's ID (0)
+    assert get_patch_id(1722383000) == 0
+
+    # Check exact patch start timestamps
+    assert get_patch_id(1722384000) == 0  # 7.37
+    assert get_patch_id(1785369600) == 21 # 7.41e
+    assert get_patch_id(1789430400) == 22 # 7.41f
+
+    # Check times inside/between patches
+    assert get_patch_id(1789430400 + 3600) == 22 # 1 hour after 7.41f starts
+    assert get_patch_id(1785369600 + 86400) == 21 # 1 day after 7.41e starts
+
+    # Check that None/empty timestamp returns the absolute latest patch ID (22)
+    assert get_patch_id(None) == 22
+

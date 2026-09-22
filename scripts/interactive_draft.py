@@ -54,10 +54,19 @@ console = Console()
 torch.set_float32_matmul_precision('high')
 
 
-def parse_args() -> argparse.Namespace:
+import os
+from dota2drafter.config import load_config
+
+def parse_args(config=None, args=None) -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description="Interactive MCTS draft decision support tool.",
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="config.yaml",
+        help="Path to config file (default: config.yaml)",
     )
     parser.add_argument(
         "--data_dir",
@@ -89,18 +98,27 @@ def parse_args() -> argparse.Namespace:
         default="models/skip_gram_dgi.pt",
         help="Path to frozen skip-gram/DGI embeddings (default: models/skip_gram_dgi.pt)",
     )
-    parser.add_argument("--d_model", type=int, default=64, help="Transformer d_model (default: 64)")
-    parser.add_argument("--nhead", type=int, default=4, help="Number of attention heads (default: 4)")
+    
+    d_model_default = config.model.d_model if config else 64
+    nhead_default = config.model.nhead if config else 4
+    num_layers_default = config.model.num_layers_transformer if config else 2
+    dim_feedforward_default = config.model.dim_feedforward if config else 128
+    dropout_default = config.model.dropout if config else 0.1
+    wilson_threshold_default = config.graph.wilson_threshold if config else 0.50
+    gamma_default = config.graph.gamma if config else 0.80
+
+    parser.add_argument("--d_model", type=int, default=d_model_default, help=f"Transformer d_model (default: {d_model_default})")
+    parser.add_argument("--nhead", type=int, default=nhead_default, help=f"Number of attention heads (default: {nhead_default})")
     parser.add_argument(
-        "--num_layers", type=int, default=2, help="Number of transformer layers (default: 2)"
+        "--num_layers", type=int, default=num_layers_default, help=f"Number of transformer layers (default: {num_layers_default})"
     )
     parser.add_argument(
         "--dim_feedforward",
         type=int,
-        default=128,
-        help="Feedforward dimension (default: 128)",
+        default=dim_feedforward_default,
+        help=f"Feedforward dimension (default: {dim_feedforward_default})",
     )
-    parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate (default: 0.1)")
+    parser.add_argument("--dropout", type=float, default=dropout_default, help=f"Dropout rate (default: {dropout_default})")
     parser.add_argument(
         "--num_heroes", type=int, default=127, help="Number of heroes (default: 127)"
     )
@@ -140,28 +158,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--wilson_threshold",
         type=float,
-        default=0.50,
-        help="Wilson Score threshold for pruning edges (default: 0.50)",
+        default=wilson_threshold_default,
+        help=f"Wilson Score threshold for pruning edges (default: {wilson_threshold_default})",
     )
     parser.add_argument(
         "--gamma",
         type=float,
-        default=0.80,
-        help="Decay factor per major patch (default: 0.80)",
+        default=gamma_default,
+        help=f"Decay factor per major patch (default: {gamma_default})",
     )
-    return parser.parse_args()
+    return parser.parse_args(args)
 
 
 def load_hero_indexer(data_dir: str) -> HeroIndexer:
-    """Load HeroIndexer from data/hero_indexer.json if available."""
-    indexer = HeroIndexer()
+    """Load HeroIndexer from data/hero_indexer.json."""
     indexer_path = Path(data_dir) / "hero_indexer.json"
-    if indexer_path.exists():
-        import json
-        with open(indexer_path) as f:
-            hero_data = json.load(f)
-        heroes = [{"id": int(api_id), "playable": True} for api_id in hero_data.keys()]
-        indexer.build_mapping(heroes)
+    if not indexer_path.exists():
+        raise FileNotFoundError(f"Hero indexer not found at: {indexer_path}")
+    import json
+    with open(indexer_path) as f:
+        hero_data = json.load(f)
+    heroes = [{"id": int(api_id), "playable": True} for api_id in hero_data.keys()]
+    indexer = HeroIndexer()
+    indexer.build_mapping(heroes)
     return indexer
 
 
@@ -179,7 +198,7 @@ def load_hero_names(path: str, indexer: HeroIndexer) -> dict[int, str]:
 
     mapping_path = Path(path)
     if not mapping_path.exists():
-        return {}
+        raise FileNotFoundError(f"Hero mapping file not found at: {mapping_path}")
 
     with open(mapping_path) as f:
         raw = json.load(f)
@@ -415,7 +434,21 @@ def get_user_move(step: int, hero_names: dict[int, str]) -> DraftMove | None:
 
 def main() -> None:
     """Run the interactive draft tool."""
-    args = parse_args()
+    # Pre-parse --config to load dynamic defaults
+    config_path = "config.yaml"
+    for i, arg in enumerate(sys.argv):
+        if arg == "--config" and i + 1 < len(sys.argv):
+            config_path = sys.argv[i + 1]
+            break
+            
+    config = None
+    if os.path.exists(config_path):
+        try:
+            config = load_config(config_path)
+        except Exception as e:
+            logger.warning(f"Could not load config from {config_path}: {e}")
+
+    args = parse_args(config)
 
     # Setup device
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))

@@ -55,9 +55,18 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-def parse_args() -> argparse.Namespace:
+import os
+from dota2drafter.config import load_config
+
+def parse_args(config=None, args=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train or predict with the Hierarchical Sequence Transformer.",
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="config.yaml",
+        help="Path to config file (default: config.yaml)",
     )
     parser.add_argument(
         "--mode",
@@ -90,18 +99,32 @@ def parse_args() -> argparse.Namespace:
         default="./checkpoints",
         help="Directory for model checkpoints (default: ./checkpoints)",
     )
-    parser.add_argument("--d_model", type=int, default=64, help="Transformer d_model (default: 64)")
-    parser.add_argument("--nhead", type=int, default=4, help="Number of attention heads (default: 4)")
+    
+    d_model_default = config.model.d_model if config else 64
+    nhead_default = config.model.nhead if config else 4
+    num_layers_default = config.model.num_layers_transformer if config else 2
+    dim_feedforward_default = config.model.dim_feedforward if config else 128
+    dropout_default = config.model.dropout if config else 0.1
+    learning_rate_default = config.training.learning_rate if config else 1e-4
+    batch_size_default = config.training.batch_size if config else 16
+    wilson_threshold_default = config.graph.wilson_threshold if config else 0.50
+    gamma_default = config.graph.gamma if config else 0.80
+    label_smoothing_eps_default = config.training.label_smoothing_eps if config else 0.15
+    step_loss_gamma_default = config.training.step_loss_gamma if config else 0.0
+    augment_default = str(config.training.augment) if config else "false"
+
+    parser.add_argument("--d_model", type=int, default=d_model_default, help=f"Transformer d_model (default: {d_model_default})")
+    parser.add_argument("--nhead", type=int, default=nhead_default, help=f"Number of attention heads (default: {nhead_default})")
     parser.add_argument(
-        "--num_layers", type=int, default=2, help="Number of transformer layers (default: 2)"
+        "--num_layers", type=int, default=num_layers_default, help=f"Number of transformer layers (default: {num_layers_default})"
     )
     parser.add_argument(
         "--dim_feedforward",
         type=int,
-        default=128,
-        help="Feedforward dimension (default: 128)",
+        default=dim_feedforward_default,
+        help=f"Feedforward dimension (default: {dim_feedforward_default})",
     )
-    parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate (default: 0.1)")
+    parser.add_argument("--dropout", type=float, default=dropout_default, help=f"Dropout rate (default: {dropout_default})")
     parser.add_argument(
         "--num_epochs", type=int, default=50, help="Number of training epochs (default: 50)"
     )
@@ -109,7 +132,7 @@ def parse_args() -> argparse.Namespace:
         "--patience", type=int, default=25, help="Early stopping patience (default: 25)"
     )
     parser.add_argument(
-        "--learning_rate", type=float, default=1e-4, help="Learning rate (default: 1e-4)"
+        "--learning_rate", type=float, default=learning_rate_default, help=f"Learning rate (default: {learning_rate_default})"
     )
     parser.add_argument(
         "--lr_backbone",
@@ -123,7 +146,7 @@ def parse_args() -> argparse.Namespace:
         default=1e-3,
         help="Learning rate for linear head (default: 1e-3)",
     )
-    parser.add_argument("--batch_size", type=int, default=16, help="Batch size (default: 256)")
+    parser.add_argument("--batch_size", type=int, default=batch_size_default, help=f"Batch size (default: {batch_size_default})")
     parser.add_argument(
         "--device", type=str, default=None, help='Device: "cpu" or "cuda" (auto-detect if None)'
     )
@@ -131,25 +154,25 @@ def parse_args() -> argparse.Namespace:
         "--num_heroes", type=int, default=127, help="Number of heroes (default: 127)"
     )
     parser.add_argument(
-        "--wilson_threshold", type=float, default=0.50, help="Wilson Score threshold for pruning edges (default: 0.50)"
+        "--wilson_threshold", type=float, default=wilson_threshold_default, help=f"Wilson Score threshold for pruning edges (default: {wilson_threshold_default})"
     )
     parser.add_argument(
-        "--gamma", type=float, default=0.80, help="Decay factor per major patch (default: 0.80)"
+        "--gamma", type=float, default=gamma_default, help=f"Decay factor per major patch (default: {gamma_default})"
     )
     parser.add_argument(
-        "--label_smoothing_eps", type=float, default=0.15, help="Label smoothing epsilon value (default: 0.15)"
+        "--label_smoothing_eps", type=float, default=label_smoothing_eps_default, help=f"Label smoothing epsilon value (default: {label_smoothing_eps_default})"
     )
     parser.add_argument(
         "--step_loss_gamma",
         type=float,
-        default=0.0,
-        help="Gamma for step-weighted loss (default: 0.0 to disable)",
+        default=step_loss_gamma_default,
+        help=f"Gamma for step-weighted loss (default: {step_loss_gamma_default})",
     )
     parser.add_argument(
         "--augment",
         type=str,
-        default="false",
-        help="Augmentation setting: 'true' (all 448), 'false' (none), or an integer representing the maximum number of variations allowed per original match (e.g. 5, 10, 20). (default: 'false')",
+        default=augment_default,
+        help=f"Augmentation setting (default: '{augment_default}')",
     )
     parser.add_argument(
         "--slot_tau_start",
@@ -181,20 +204,21 @@ def parse_args() -> argparse.Namespace:
         default="models/skip_gram_dgi.pt",
         help="Path to frozen skip-gram/DGI embeddings (default: models/skip_gram_dgi.pt)",
     )
-    return parser.parse_args()
+    return parser.parse_args(args)
 
 
 def load_hero_indexer(data_dir: str) -> HeroIndexer:
-    """Load HeroIndexer from data/hero_indexer.json if available."""
-    indexer = HeroIndexer()
+    """Load HeroIndexer from data/hero_indexer.json."""
     indexer_path = Path(data_dir) / "hero_indexer.json"
-    if indexer_path.exists():
-        import json
-        with open(indexer_path, "r") as f:
-            hero_data = json.load(f)
-        # Reconstruct hero list from mapping
-        heroes = [{"id": api_id, "playable": True} for api_id in hero_data.keys()]
-        indexer.build_mapping(heroes)
+    if not indexer_path.exists():
+        raise FileNotFoundError(f"Hero indexer not found at: {indexer_path}")
+    import json
+    with open(indexer_path) as f:
+        hero_data = json.load(f)
+    # Reconstruct hero list from mapping
+    heroes = [{"id": int(api_id), "playable": True} for api_id in hero_data.keys()]
+    indexer = HeroIndexer()
+    indexer.build_mapping(heroes)
     return indexer
 
 
@@ -271,7 +295,22 @@ def main() -> None:
         format="%(message)s",
         handlers=[RichHandler(rich_tracebacks=True)],
     )
-    args = parse_args()
+    
+    # Pre-parse --config to load dynamic defaults
+    config_path = "config.yaml"
+    for i, arg in enumerate(sys.argv):
+        if arg == "--config" and i + 1 < len(sys.argv):
+            config_path = sys.argv[i + 1]
+            break
+            
+    config = None
+    if os.path.exists(config_path):
+        try:
+            config = load_config(config_path)
+        except Exception as e:
+            logger.warning(f"Could not load config from {config_path}: {e}")
+
+    args = parse_args(config)
 
     if args.mode == "train":
         data_dir = Path(args.data_dir)

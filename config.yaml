@@ -38,5 +38,25 @@ state:
 
 # Graph construction settings
 graph:
-  wilson_threshold: 0.50
-  gamma: 0.80
+  wilson_threshold: 0.42 # Optuna best found
+  gamma: 0.72 # Optuna best found
+
+# Model architecture defaults
+model:
+  d_model: 128
+  nhead: 4
+  dim_feedforward: 2048 # Optuna best found
+  num_layers_rgcn: 3
+  num_layers_transformer: 13
+  dropout: 0.1
+
+# Training configuration defaults
+training:
+  learning_rate: 0.0001
+  step_loss_gamma: 0.0
+  label_smoothing_eps: 0.15
+  augment: 25 # Optuna best found
+  batch_size: 16
+  skip_gram_lr: 0.01
+  dgi_lr: 0.01
+  rgcn_lr: 0.0015

@@ -23,7 +23,7 @@ class HeroIndexer:
         Indices are 1-based: h in {1, ..., K}.
         """
         playable = [h for h in heroes if h.get("playable", False)]
-        playable.sort(key=lambda h: h.get("id", 0))
+        playable.sort(key=lambda h: int(h.get("id", 0)))
 
         self._api_to_index.clear()
         self._index_to_api.clear()
@@ -31,18 +31,20 @@ class HeroIndexer:
         for idx, hero in enumerate(playable, start=1):
             hero_id = hero.get("id")
             if hero_id is not None:
-                self._api_to_index[hero_id] = idx
-                self._index_to_api[idx] = hero_id
+                hero_id_int = int(hero_id)
+                self._api_to_index[hero_id_int] = idx
+                self._index_to_api[idx] = hero_id_int
 
         self._hero_count = len(playable)
         logger.info("Built hero mapping: %d heroes (K=%d)", self._hero_count, self._hero_count)
 
-    def map_hero_id(self, api_hero_id: int) -> int | None:
+    def map_hero_id(self, api_hero_id: int | str) -> int | None:
         """Map an API hero ID to a contiguous index.
 
         Returns None if the hero ID is not in the mapping.
+        Raises ValueError or TypeError if api_hero_id cannot be converted to int.
         """
-        return self._api_to_index.get(api_hero_id)
+        return self._api_to_index.get(int(api_hero_id))
 
     def get_contiguous_count(self) -> int:
         """Return K, the number of playable heroes."""

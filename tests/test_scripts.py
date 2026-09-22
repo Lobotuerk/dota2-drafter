@@ -45,16 +45,6 @@ def test_script_syntax_and_help(script_name: str) -> None:
         )
         assert result.returncode == 1
         assert "Error" in result.stdout or "Error" in result.stderr
-    elif script_name == "01d_add_custom_player.py":
-        # Interactive script, just check that it parses without syntax errors
-        result = subprocess.run(
-            [sys.executable, str(script_path), "--help"],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-        assert result.returncode == 0
-        assert "player_comfort.pt not found!" in result.stdout or "player_comfort.pt not found!" in result.stderr
     else:
         # Other scripts support --help
         result = subprocess.run(
@@ -250,6 +240,54 @@ def test_add_custom_player_functional(tmp_path: Path) -> None:
 
         # Verify torch.save was called
         mock_save.assert_called_with(mock_comfort_map, mock_path_inst)
+
+
+def test_add_custom_player_non_contiguous_api_ids(tmp_path: Path) -> None:
+    """Verify that heroes with API ID gaps (e.g. Lina = 25) are mapped to their contiguous slot."""
+    import importlib
+    import json
+    from unittest.mock import MagicMock, mock_open, patch
+
+    add_custom_player = importlib.import_module("scripts.01d_add_custom_player")
+
+    # API IDs with gaps: 1, 2, 25 (Lina is 3rd playable hero -> contiguous index 3 -> slot 2)
+    hero_indexer_data = {
+        "1": "anti-mage",
+        "2": "axe",
+        "25": "lina",
+    }
+
+    # Existing comfort map with vocab_size 25 (tensor dimension 50)
+    mock_comfort_map = {999: torch.ones(50, dtype=torch.float32)}
+
+    with patch.object(add_custom_player, "Path") as mock_path_class, \
+         patch("builtins.open", mock_open(read_data=json.dumps(hero_indexer_data))), \
+         patch.object(add_custom_player.torch, "load") as mock_load, \
+         patch.object(add_custom_player.torch, "save"), \
+         patch.object(add_custom_player.IntPrompt, "ask") as mock_int_ask, \
+         patch.object(add_custom_player.Prompt, "ask") as mock_prompt_ask:
+
+        mock_path_inst = MagicMock()
+        mock_path_inst.exists.return_value = True
+        mock_path_class.return_value = mock_path_inst
+        mock_load.return_value = mock_comfort_map
+
+        # Account ID: 111, total games: 20, games on Lina: 10, wins: 8
+        mock_int_ask.side_effect = [111, 20, 10, 8]
+        mock_prompt_ask.side_effect = ["lina", "done"]
+
+        add_custom_player.main()
+
+        assert 111 in mock_comfort_map
+        vec = mock_comfort_map[111]
+        assert vec.shape == (50,)
+        vocab_size = 25
+        # Lina is contiguous index 3 -> slot 2
+        assert vec[2].item() == 10 / 20
+        assert vec[vocab_size + 2].item() == pytest.approx(add_custom_player.wilson_score(8, 10))
+        # Ensure slot 24 (which old code would have written to) is 0.0 affinity
+        assert vec[24].item() == 0.0
+
 def test_interactive_draft_checkpoint_loading_formats() -> None:
     """Verify that interactive_draft.py loads checkpoints in both 'model_state' and 'model_state_dict' formats."""
     import importlib
@@ -401,5 +439,73 @@ def test_tune_pipeline_llm_patience_arg_parsing():
     with patch.object(sys, "argv", test_args):
         args = tune_pipeline.parse_args()
         assert args.llm_patience == 33
+
+
+def test_scripts_config_overrides(tmp_path):
+    """Verify that scripts load defaults from config.yaml but allow CLI overrides."""
+    import importlib
+    import sys
+    import yaml
+    from unittest.mock import patch
+    from dota2drafter.config import PipelineConfig, ModelConfig, TrainingConfig
+
+    # 1. Create a mock config with custom values
+    custom_model_config = ModelConfig(
+        d_model=99,
+        nhead=8,
+        dim_feedforward=999,
+        num_layers_rgcn=5,
+        num_layers_transformer=7,
+        dropout=0.33,
+    )
+    custom_training_config = TrainingConfig(
+        learning_rate=3e-5,
+        batch_size=42,
+        skip_gram_lr=0.07,
+        dgi_lr=0.08,
+        rgcn_lr=0.009,
+    )
+    
+    config_obj = PipelineConfig(
+        model=custom_model_config,
+        training=custom_training_config
+    )
+
+    # 2. Verify 02_train_embeddings config loading
+    train_embeddings = importlib.import_module("scripts.02_train_embeddings")
+    args = train_embeddings.parse_args(config_obj, args=[])
+    assert args.embed_dim == 99
+    assert args.skip_gram_lr == 0.07
+    assert args.dgi_lr == 0.08
+    assert args.batch_size == 42
+
+    # CLI option overrides config default
+    args_overridden = train_embeddings.parse_args(config_obj, args=["--embed_dim", "128"])
+    assert args_overridden.embed_dim == 128
+    assert args_overridden.skip_gram_lr == 0.07  # still loads default
+
+    # 3. Verify 03_train_rgcn config loading
+    train_rgcn = importlib.import_module("scripts.03_train_rgcn")
+    args = train_rgcn.parse_args(config_obj, args=[])
+    assert args.d_model == 99
+    assert args.num_layers == 5
+    assert args.learning_rate == 0.009
+
+    # 4. Verify 04_train_transformer config loading
+    train_transformer = importlib.import_module("scripts.04_train_transformer")
+    args = train_transformer.parse_args(config_obj, args=[])
+    assert args.d_model == 99
+    assert args.nhead == 8
+    assert args.num_layers == 7
+    assert args.dim_feedforward == 999
+    assert args.dropout == 0.33
+    assert args.learning_rate == 3e-5
+    assert args.batch_size == 42
+
+    # CLI option overrides config default
+    args_overridden = train_transformer.parse_args(config_obj, args=["--batch_size", "64", "--dropout", "0.15"])
+    assert args_overridden.batch_size == 64
+    assert args_overridden.dropout == 0.15
+    assert args_overridden.d_model == 99  # still loads default
 
 

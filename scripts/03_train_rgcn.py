@@ -39,9 +39,18 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-def parse_args() -> argparse.Namespace:
+import os
+from dota2drafter.config import load_config
+
+def parse_args(config=None, args=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train or predict with the Relational GNN (HeroRGCN).",
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="config.yaml",
+        help="Path to config file (default: config.yaml)",
     )
     parser.add_argument(
         "--mode",
@@ -74,7 +83,14 @@ def parse_args() -> argparse.Namespace:
         default="models/rgcn.pt",
         help="Path to loaded RGCN model weights (predict mode, default: models/rgcn.pt)",
     )
-    parser.add_argument("--d_model", type=int, default=64, help="Embedding dimension (default: 64)")
+    
+    d_model_default = config.model.d_model if config else 64
+    num_layers_rgcn_default = config.model.num_layers_rgcn if config else 2
+    rgcn_lr_default = config.training.rgcn_lr if config else 1.5e-3
+    wilson_threshold_default = config.graph.wilson_threshold if config else 0.50
+    gamma_default = config.graph.gamma if config else 0.80
+
+    parser.add_argument("--d_model", type=int, default=d_model_default, help=f"Embedding dimension (default: {d_model_default})")
     parser.add_argument(
         "--num_relations", type=int, default=3, help="Number of edge types (default: 3)"
     )
@@ -82,16 +98,16 @@ def parse_args() -> argparse.Namespace:
         "--rgcn_epochs", type=int, default=20, help="RGCN training epochs (default: 20)"
     )
     parser.add_argument(
-        "--learning_rate", type=float, default=1.5e-3, help="Learning rate (default: 1.5e-3)"
+        "--learning_rate", type=float, default=rgcn_lr_default, help=f"Learning rate (default: {rgcn_lr_default})"
     )
     parser.add_argument(
-        "--num_layers", type=int, default=2, help="Number of RGCN layers (default: 2)"
+        "--num_layers", type=int, default=num_layers_rgcn_default, help=f"Number of RGCN layers (default: {num_layers_rgcn_default})"
     )
     parser.add_argument(
-        "--wilson_threshold", type=float, default=0.50, help="Wilson Score threshold for pruning edges (default: 0.50)"
+        "--wilson_threshold", type=float, default=wilson_threshold_default, help=f"Wilson Score threshold for pruning edges (default: {wilson_threshold_default})"
     )
     parser.add_argument(
-        "--gamma", type=float, default=0.80, help="Decay factor per major patch (default: 0.80)"
+        "--gamma", type=float, default=gamma_default, help=f"Decay factor per major patch (default: {gamma_default})"
     )
     parser.add_argument(
         "--device", type=str, default=None, help='Device: "cpu" or "cuda" (auto-detect if None)'
@@ -99,7 +115,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num_heroes", type=int, default=127, help="Number of heroes (default: 127)"
     )
-    return parser.parse_args()
+    return parser.parse_args(args)
 
 
 def main() -> None:
@@ -108,7 +124,22 @@ def main() -> None:
         format="%(message)s",
         handlers=[RichHandler(rich_tracebacks=True)],
     )
-    args = parse_args()
+    
+    # Pre-parse --config to load dynamic defaults
+    config_path = "config.yaml"
+    for i, arg in enumerate(sys.argv):
+        if arg == "--config" and i + 1 < len(sys.argv):
+            config_path = sys.argv[i + 1]
+            break
+            
+    config = None
+    if os.path.exists(config_path):
+        try:
+            config = load_config(config_path)
+        except Exception as e:
+            logger.warning(f"Could not load config from {config_path}: {e}")
+
+    args = parse_args(config)
 
     if args.mode == "train":
         data_dir = Path(args.data_dir)

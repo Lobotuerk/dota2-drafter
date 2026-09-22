@@ -155,15 +155,16 @@ def load_data(data_dir: str):
 
 
 def load_hero_indexer(data_dir: str) -> HeroIndexer:
-    """Load HeroIndexer from data/hero_indexer.json if available."""
-    indexer = HeroIndexer()
+    """Load HeroIndexer from data/hero_indexer.json."""
     indexer_path = Path(data_dir) / "hero_indexer.json"
-    if indexer_path.exists():
-        import json
-        with open(indexer_path, "r") as f:
-            hero_data = json.load(f)
-        heroes = [{"id": api_id, "playable": True} for api_id in hero_data.keys()]
-        indexer.build_mapping(heroes)
+    if not indexer_path.exists():
+        raise FileNotFoundError(f"Hero indexer not found at: {indexer_path}")
+    import json
+    with open(indexer_path) as f:
+        hero_data = json.load(f)
+    heroes = [{"id": int(api_id), "playable": True} for api_id in hero_data.keys()]
+    indexer = HeroIndexer()
+    indexer.build_mapping(heroes)
     return indexer
 
 
@@ -228,7 +229,7 @@ def make_objective(
         nhead = trial.suggest_categorical("nhead", nhead_choices)
 
         # Feed-forward size for the transformer
-        dim_feedforward_choices = [128, 256, 512, 1024, 2048]
+        dim_feedforward_choices = [2048, 4096, 8192]
         dim_feedforward = trial.suggest_categorical("dim_feedforward", dim_feedforward_choices)
         
         # GNN and Transformer layers

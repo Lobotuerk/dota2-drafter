@@ -51,6 +51,28 @@ class GraphConfig:
 
 
 @dataclass
+class ModelConfig:
+    d_model: int = 64
+    nhead: int = 4
+    dim_feedforward: int = 128
+    num_layers_rgcn: int = 2
+    num_layers_transformer: int = 2
+    dropout: float = 0.1
+
+
+@dataclass
+class TrainingConfig:
+    learning_rate: float = 1e-4
+    step_loss_gamma: float = 0.0
+    label_smoothing_eps: float = 0.15
+    augment: int | str | bool = 0
+    batch_size: int = 16
+    skip_gram_lr: float = 1e-2
+    dgi_lr: float = 1e-2
+    rgcn_lr: float = 1.5e-3
+
+
+@dataclass
 class PipelineConfig:
     cutoff_date: str = "2026-06-04"
     tiers: list[int] = field(default_factory=lambda: [1, 2])
@@ -60,6 +82,8 @@ class PipelineConfig:
     output: OutputConfig = field(default_factory=lambda: OutputConfig())
     state: StateConfig = field(default_factory=lambda: StateConfig())
     graph: GraphConfig = field(default_factory=lambda: GraphConfig())
+    model: ModelConfig = field(default_factory=lambda: ModelConfig())
+    training: TrainingConfig = field(default_factory=lambda: TrainingConfig())
 
 
 def _resolve_env_vars(value: str) -> str:
@@ -118,6 +142,30 @@ def _load_graph(data: dict[str, Any], config: PipelineConfig) -> GraphConfig:
     )
 
 
+def _load_model(data: dict[str, Any], config: PipelineConfig) -> ModelConfig:
+    return ModelConfig(
+        d_model=data.get("d_model", config.model.d_model),
+        nhead=data.get("nhead", config.model.nhead),
+        dim_feedforward=data.get("dim_feedforward", config.model.dim_feedforward),
+        num_layers_rgcn=data.get("num_layers_rgcn", config.model.num_layers_rgcn),
+        num_layers_transformer=data.get("num_layers_transformer", config.model.num_layers_transformer),
+        dropout=data.get("dropout", config.model.dropout),
+    )
+
+
+def _load_training(data: dict[str, Any], config: PipelineConfig) -> TrainingConfig:
+    return TrainingConfig(
+        learning_rate=data.get("learning_rate", config.training.learning_rate),
+        step_loss_gamma=data.get("step_loss_gamma", config.training.step_loss_gamma),
+        label_smoothing_eps=data.get("label_smoothing_eps", config.training.label_smoothing_eps),
+        augment=data.get("augment", config.training.augment),
+        batch_size=data.get("batch_size", config.training.batch_size),
+        skip_gram_lr=data.get("skip_gram_lr", config.training.skip_gram_lr),
+        dgi_lr=data.get("dgi_lr", config.training.dgi_lr),
+        rgcn_lr=data.get("rgcn_lr", config.training.rgcn_lr),
+    )
+
+
 def load_config(path: str | Path = "config.yaml") -> PipelineConfig:
     """Load pipeline configuration from a YAML file."""
     load_dotenv()
@@ -138,5 +186,7 @@ def load_config(path: str | Path = "config.yaml") -> PipelineConfig:
         output=_load_output(raw.get("output", {}), base),
         state=_load_state(raw.get("state", {}), base),
         graph=_load_graph(raw.get("graph", {}), base),
+        model=_load_model(raw.get("model", {}), base),
+        training=_load_training(raw.get("training", {}), base),
     )
     return resolved

@@ -33,9 +33,18 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-def parse_args() -> argparse.Namespace:
+import os
+from dota2drafter.config import load_config
+
+def parse_args(config=None, args=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train or predict with hero embeddings (Skip-Gram + DGI).",
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="config.yaml",
+        help="Path to config file (default: config.yaml)",
     )
     parser.add_argument(
         "--mode",
@@ -56,18 +65,26 @@ def parse_args() -> argparse.Namespace:
         default="models/skip_gram_dgi.pt",
         help="Model save/load path (default: models/skip_gram_dgi.pt)",
     )
-    parser.add_argument("--embed_dim", type=int, default=64, help="Embedding dimension (default: 64)")
+    
+    embed_dim_default = config.model.d_model if config else 64
+    skip_gram_lr_default = config.training.skip_gram_lr if config else 1e-2
+    dgi_lr_default = config.training.dgi_lr if config else 1e-2
+    batch_size_default = config.training.batch_size if config else 256
+    wilson_threshold_default = config.graph.wilson_threshold if config else 0.50
+    gamma_default = config.graph.gamma if config else 0.80
+
+    parser.add_argument("--embed_dim", type=int, default=embed_dim_default, help=f"Embedding dimension (default: {embed_dim_default})")
     parser.add_argument(
         "--skip_gram_epochs", type=int, default=10, help="Skip-Gram training epochs (default: 10)"
     )
     parser.add_argument("--dgi_epochs", type=int, default=20, help="DGI training epochs (default: 20)")
     parser.add_argument(
-        "--skip_gram_lr", type=float, default=1e-2, help="Skip-Gram learning rate (default: 1e-2)"
+        "--skip_gram_lr", type=float, default=skip_gram_lr_default, help=f"Skip-Gram learning rate (default: {skip_gram_lr_default})"
     )
     parser.add_argument(
-        "--dgi_lr", type=float, default=1e-2, help="DGI learning rate (default: 1e-2)"
+        "--dgi_lr", type=float, default=dgi_lr_default, help=f"DGI learning rate (default: {dgi_lr_default})"
     )
-    parser.add_argument("--batch_size", type=int, default=256, help="Batch size (default: 256)")
+    parser.add_argument("--batch_size", type=int, default=batch_size_default, help=f"Batch size (default: {batch_size_default})")
     parser.add_argument(
         "--device", type=str, default=None, help='Device: "cpu" or "cuda" (auto-detect if None)'
     )
@@ -80,7 +97,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num_heroes", type=int, default=127, help="Number of heroes (default: 127)"
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--wilson_threshold", type=float, default=wilson_threshold_default, help=f"Wilson score threshold (default: {wilson_threshold_default})"
+    )
+    parser.add_argument(
+        "--gamma", type=float, default=gamma_default, help=f"Decay factor per major patch (default: {gamma_default})"
+    )
+    return parser.parse_args(args)
 
 
 def main() -> None:
@@ -89,7 +112,22 @@ def main() -> None:
         format="%(message)s",
         handlers=[RichHandler(rich_tracebacks=True)],
     )
-    args = parse_args()
+    
+    # Pre-parse --config to load dynamic defaults
+    config_path = "config.yaml"
+    for i, arg in enumerate(sys.argv):
+        if arg == "--config" and i + 1 < len(sys.argv):
+            config_path = sys.argv[i + 1]
+            break
+            
+    config = None
+    if os.path.exists(config_path):
+        try:
+            config = load_config(config_path)
+        except Exception as e:
+            logger.warning(f"Could not load config from {config_path}: {e}")
+
+    args = parse_args(config)
 
     if args.mode == "train":
         data_dir = Path(args.data_dir)
@@ -111,6 +149,8 @@ def main() -> None:
             dgi_lr=args.dgi_lr,
             batch_size=args.batch_size,
             device=args.device,
+            wilson_threshold=args.wilson_threshold,
+            gamma=args.gamma,
         )
         console.print(f"[bold green]Saved embeddings to: {result}[/bold green]")
 

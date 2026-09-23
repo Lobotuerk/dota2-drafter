@@ -43,9 +43,11 @@ from rich.logging import RichHandler
 # and force stable 'math_sdp' fallback. This prevents CUDA crashes (e.g. CUDA error: unknown error)
 # on newer GPU architectures and virtualized environments like WSL2, with zero impact on small sequence lengths.
 if torch.cuda.is_available():
+    torch.set_float32_matmul_precision("high")
     torch.backends.cuda.enable_flash_sdp(False)
     torch.backends.cuda.enable_mem_efficient_sdp(False)
     torch.backends.cuda.enable_math_sdp(True)
+    torch.backends.cudnn.benchmark = True
 
 from dota2drafter.models.match_network import MatchNetwork
 from dota2drafter.training.transformer_trainer import TransformerTrainer, TrainingConfig
@@ -112,6 +114,11 @@ def parse_args(config=None, args=None) -> argparse.Namespace:
     label_smoothing_eps_default = config.training.label_smoothing_eps if config else 0.15
     step_loss_gamma_default = config.training.step_loss_gamma if config else 0.0
     augment_default = str(config.training.augment) if config else "false"
+    checkpoint_metric_default = (
+        config.training.checkpoint_metric
+        if config and hasattr(config.training, "checkpoint_metric")
+        else "val_auc"
+    )
 
     parser.add_argument("--d_model", type=int, default=d_model_default, help=f"Transformer d_model (default: {d_model_default})")
     parser.add_argument("--nhead", type=int, default=nhead_default, help=f"Number of attention heads (default: {nhead_default})")
@@ -203,6 +210,16 @@ def parse_args(config=None, args=None) -> argparse.Namespace:
         type=str,
         default="models/skip_gram_dgi.pt",
         help="Path to frozen skip-gram/DGI embeddings (default: models/skip_gram_dgi.pt)",
+    )
+    parser.add_argument(
+        "--checkpoint_metric",
+        type=str,
+        choices=["val_auc", "val_top5_acc", "val_loss"],
+        default=checkpoint_metric_default,
+        help=(
+            f"Metric for checkpoint selection and early stopping: 'val_auc', 'val_top5_acc', "
+            f"or 'val_loss' (default: '{checkpoint_metric_default}')"
+        ),
     )
     return parser.parse_args(args)
 
@@ -411,6 +428,7 @@ def main() -> None:
             slot_tau_end=args.slot_tau_end,
             slot_tau_decay_epochs=args.slot_tau_decay_epochs,
             patience=args.patience,
+            checkpoint_metric=args.checkpoint_metric,
         )
 
         if args.wandb_project:
@@ -441,8 +459,8 @@ def main() -> None:
             except ImportError:
                 pass
 
-        console.print(f"[bold green]Training complete. Best epoch: {metrics.best_epoch}, "
-                      f"Best Top-5 MLM Accuracy: {metrics.best_mlm_top5_acc:.4f}[/bold green]")
+        score_desc = f"Best {config.checkpoint_metric}: {metrics.best_checkpoint_value:.4f}" if metrics.best_checkpoint_value != float("-inf") else f"Best Top-5: {metrics.best_mlm_top5_acc:.4f}"
+        console.print(f"[bold green]Training complete. Best epoch: {metrics.best_epoch}, {score_desc}[/bold green]")
 
     elif args.mode == "predict":
         checkpoint_dir = Path(args.checkpoint_dir)

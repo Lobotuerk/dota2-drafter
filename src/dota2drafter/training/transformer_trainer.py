@@ -179,6 +179,7 @@ class TrainingConfig:
     slot_tau_start: float = 0.30
     slot_tau_end: float = 0.05
     slot_tau_decay_epochs: int = 100
+    checkpoint_metric: str = "val_auc"
 
 
 @dataclass
@@ -193,6 +194,9 @@ class TrainingMetrics:
     val_mlm_top5_accuracies: list[float] = field(default_factory=list)
     best_epoch: int = 0
     best_mlm_top5_acc: float = float("-inf")
+    best_val_auc: float = float("-inf")
+    best_val_loss: float = float("inf")
+    best_checkpoint_value: float = float("-inf")
 
 
 class PlayerComfortDataset(Dataset):
@@ -742,8 +746,37 @@ class TransformerTrainer:
                     }
                 )
 
-            if val_metrics["mlm_top5_accuracy"] > self.metrics.best_mlm_top5_acc + self.config.min_delta:
+            metric_choice = self.config.checkpoint_metric.lower().strip()
+            if metric_choice in ("val_auc", "auc", "roc_auc"):
+                current_score = val_metrics["roc_auc"]
+                is_better = current_score > self.metrics.best_val_auc + self.config.min_delta
+                score_str = f"Val AUC={current_score:.4f}"
+            elif metric_choice in (
+                "val_top5_acc", "top5", "val_top5_accuracy", "mlm_top5_accuracy"
+            ):
+                current_score = val_metrics["mlm_top5_accuracy"]
+                is_better = current_score > self.metrics.best_mlm_top5_acc + self.config.min_delta
+                score_str = f"Val Top5={current_score:.4f}"
+            elif metric_choice in ("val_loss", "loss"):
+                current_score = val_loss
+                is_better = current_score < self.metrics.best_val_loss - self.config.min_delta
+                score_str = f"Val Loss={current_score:.4f}"
+            else:
+                raise ValueError(
+                    f"Unsupported checkpoint_metric '{self.config.checkpoint_metric}'. "
+                    "Expected one of: 'val_auc', 'val_top5_acc', 'val_loss'"
+                )
+
+            # Update tracked best values
+            if val_metrics["roc_auc"] > self.metrics.best_val_auc:
+                self.metrics.best_val_auc = val_metrics["roc_auc"]
+            if val_metrics["mlm_top5_accuracy"] > self.metrics.best_mlm_top5_acc:
                 self.metrics.best_mlm_top5_acc = val_metrics["mlm_top5_accuracy"]
+            if val_loss < self.metrics.best_val_loss:
+                self.metrics.best_val_loss = val_loss
+
+            if is_better:
+                self.metrics.best_checkpoint_value = current_score
                 self.metrics.best_epoch = epoch
                 patience_counter = 0
 
@@ -751,12 +784,16 @@ class TransformerTrainer:
                     "model_state": self.model.state_dict(),
                     "optimizer_state": self.optimizer.state_dict(),
                     "epoch": epoch,
+                    "val_loss": val_loss,
+                    "val_auc": val_metrics["roc_auc"],
                     "mlm_top5_accuracy": val_metrics["mlm_top5_accuracy"],
+                    "checkpoint_metric": metric_choice,
+                    "checkpoint_value": current_score,
                 }
 
                 checkpoint_path = os.path.join(self.config.checkpoint_dir, "best_model.pt")
                 torch.save(best_state, checkpoint_path)
-                logger.info("  [checkpoint] Saved best model at epoch %d (Val Top5=%.4f)", epoch, val_metrics["mlm_top5_accuracy"])
+                logger.info("  [checkpoint] Saved best model at epoch %d (%s)", epoch, score_str)
             else:
                 patience_counter += 1
                 if patience_counter >= self.config.patience:
@@ -764,6 +801,9 @@ class TransformerTrainer:
                     break
 
             self.scheduler.step()
+
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
 
         return self.metrics
 

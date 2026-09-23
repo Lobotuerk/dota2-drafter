@@ -97,6 +97,7 @@ def test_model_and_training_config_defaults():
     assert config.model.dim_feedforward == 128
     assert config.training.learning_rate == 1e-4
     assert config.training.batch_size == 16
+    assert config.training.checkpoint_metric == "val_auc"
 
 
 def test_load_model_and_training_from_file(tmp_path):
@@ -109,7 +110,8 @@ def test_load_model_and_training_from_file(tmp_path):
         "training": {
             "learning_rate": 5e-5,
             "batch_size": 32,
-            "skip_gram_lr": 0.02
+            "skip_gram_lr": 0.02,
+            "checkpoint_metric": "val_loss",
         }
     }
     config_file = tmp_path / "config.yaml"
@@ -123,4 +125,5 @@ def test_load_model_and_training_from_file(tmp_path):
     assert config.training.learning_rate == 5e-5
     assert config.training.batch_size == 32
     assert config.training.skip_gram_lr == 0.02
+    assert config.training.checkpoint_metric == "val_loss"
 

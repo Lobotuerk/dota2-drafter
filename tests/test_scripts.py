@@ -464,6 +464,7 @@ def test_scripts_config_overrides(tmp_path):
         skip_gram_lr=0.07,
         dgi_lr=0.08,
         rgcn_lr=0.009,
+        checkpoint_metric="val_top5_acc",
     )
     
     config_obj = PipelineConfig(
@@ -501,11 +502,16 @@ def test_scripts_config_overrides(tmp_path):
     assert args.dropout == 0.33
     assert args.learning_rate == 3e-5
     assert args.batch_size == 42
+    assert args.checkpoint_metric == "val_top5_acc"
 
     # CLI option overrides config default
-    args_overridden = train_transformer.parse_args(config_obj, args=["--batch_size", "64", "--dropout", "0.15"])
+    args_overridden = train_transformer.parse_args(
+        config_obj,
+        args=["--batch_size", "64", "--dropout", "0.15", "--checkpoint_metric", "val_loss"],
+    )
     assert args_overridden.batch_size == 64
     assert args_overridden.dropout == 0.15
+    assert args_overridden.checkpoint_metric == "val_loss"
     assert args_overridden.d_model == 99  # still loads default
 
 

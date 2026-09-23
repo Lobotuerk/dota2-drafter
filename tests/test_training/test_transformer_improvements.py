@@ -312,6 +312,54 @@ def test_mlm_pre_training_loop():
     shutil.rmtree(checkpoint_dir, ignore_errors=True)
 
 
+def test_checkpoint_metric_selection(tmp_path):
+    """Test checkpointing respects custom checkpoint_metric (val_auc, val_loss, val_top5_acc)."""
+    d_model = 32
+    num_heroes = 20
+    batch_size = 4
+    player_input_dim = 10
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    model = MatchNetwork(
+        d_model=d_model,
+        nhead=2,
+        num_layers=1,
+        dim_feedforward=64,
+        num_heroes=num_heroes,
+        player_input_dim=player_input_dim,
+        h_gnn=h_gnn,
+    )
+
+    ckpt_dir = tmp_path / "checkpoints_metric"
+    config = TrainingConfig(
+        learning_rate=1e-3,
+        num_epochs=1,
+        batch_size=batch_size,
+        device="cpu",
+        checkpoint_dir=str(ckpt_dir),
+        checkpoint_metric="val_loss",
+    )
+    trainer = TransformerTrainer(model=model, train_config=config)
+
+    x_drafts = [torch.zeros(24, 4) for _ in range(8)]
+    y_labels = [torch.tensor([1.0 if i < 4 else 0.0]) for i in range(8)]
+    radiant_players = [[1000 + i * 10 + j for j in range(5)] for i in range(8)]
+    dire_players = [[2000 + i * 10 + j for j in range(5)] for i in range(8)]
+
+    trainer.train(
+        x_drafts=x_drafts,
+        y_labels=y_labels,
+        radiant_players=radiant_players,
+        dire_players=dire_players,
+    )
+
+    saved_ckpt = torch.load(ckpt_dir / "best_model.pt", weights_only=True)
+    assert saved_ckpt["checkpoint_metric"] == "val_loss"
+    assert "val_loss" in saved_ckpt
+    assert "val_auc" in saved_ckpt
+    assert "mlm_top5_accuracy" in saved_ckpt
+
+
 def test_label_smoothing_training():
     """Test regular training with label smoothing executes successfully."""
     d_model = 32

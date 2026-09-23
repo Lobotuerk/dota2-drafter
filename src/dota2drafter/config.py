@@ -70,6 +70,7 @@ class TrainingConfig:
     skip_gram_lr: float = 1e-2
     dgi_lr: float = 1e-2
     rgcn_lr: float = 1.5e-3
+    checkpoint_metric: str = "val_auc"
 
 
 @dataclass
@@ -117,8 +118,12 @@ def _load_opendota(data: dict[str, Any], config: PipelineConfig) -> OpenDotaConf
 def _load_concurrency(data: dict[str, Any], config: PipelineConfig) -> ConcurrencyConfig:
     return ConcurrencyConfig(
         max_workers=data.get("max_workers", config.concurrency.max_workers),
-        max_connections_per_host=data.get("max_connections_per_host", config.concurrency.max_connections_per_host),
-        rate_limit_per_second=data.get("rate_limit_per_second", config.concurrency.rate_limit_per_second),
+        max_connections_per_host=data.get(
+            "max_connections_per_host", config.concurrency.max_connections_per_host
+        ),
+        rate_limit_per_second=data.get(
+            "rate_limit_per_second", config.concurrency.rate_limit_per_second
+        ),
     )
 
 
@@ -148,7 +153,9 @@ def _load_model(data: dict[str, Any], config: PipelineConfig) -> ModelConfig:
         nhead=data.get("nhead", config.model.nhead),
         dim_feedforward=data.get("dim_feedforward", config.model.dim_feedforward),
         num_layers_rgcn=data.get("num_layers_rgcn", config.model.num_layers_rgcn),
-        num_layers_transformer=data.get("num_layers_transformer", config.model.num_layers_transformer),
+        num_layers_transformer=data.get(
+            "num_layers_transformer", config.model.num_layers_transformer
+        ),
         dropout=data.get("dropout", config.model.dropout),
     )
 
@@ -163,6 +170,7 @@ def _load_training(data: dict[str, Any], config: PipelineConfig) -> TrainingConf
         skip_gram_lr=data.get("skip_gram_lr", config.training.skip_gram_lr),
         dgi_lr=data.get("dgi_lr", config.training.dgi_lr),
         rgcn_lr=data.get("rgcn_lr", config.training.rgcn_lr),
+        checkpoint_metric=data.get("checkpoint_metric", config.training.checkpoint_metric),
     )
 
 
@@ -173,7 +181,7 @@ def load_config(path: str | Path = "config.yaml") -> PipelineConfig:
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
-    with open(config_path, "r", encoding="utf-8") as f:
+    with open(config_path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
     base = PipelineConfig()

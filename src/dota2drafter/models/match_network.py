@@ -71,7 +71,7 @@ class SetTransformerHead(nn.Module):
         max_heroes = 5
 
         r_cumsum = torch.cumsum(r_mask.long(), dim=-1)
-        r_pick_idx = torch.where(r_mask, r_cumsum, torch.tensor(0, device=r_mask.device))
+        r_pick_idx = torch.where(r_mask, r_cumsum, 0)
         r_valid_pick = (r_pick_idx >= 1) & (r_pick_idx <= max_heroes)
         rb_coords, rt_coords = torch.where(r_valid_pick)
         rdest_coords = r_pick_idx[rb_coords, rt_coords] - 1
@@ -83,7 +83,7 @@ class SetTransformerHead(nn.Module):
         r_pad_mask[rb_coords, rdest_coords] = False
 
         d_cumsum = torch.cumsum(d_mask.long(), dim=-1)
-        d_pick_idx = torch.where(d_mask, d_cumsum, torch.tensor(0, device=d_mask.device))
+        d_pick_idx = torch.where(d_mask, d_cumsum, 0)
         d_valid_pick = (d_pick_idx >= 1) & (d_pick_idx <= max_heroes)
         db_coords, dt_coords = torch.where(d_valid_pick)
         ddest_coords = d_pick_idx[db_coords, dt_coords] - 1

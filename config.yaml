@@ -53,10 +53,11 @@ model:
 # Training configuration defaults
 training:
   learning_rate: 0.0001
-  step_loss_gamma: 0.0
-  label_smoothing_eps: 0.15
+  step_loss_gamma: 0.23
+  label_smoothing_eps: 0.2
   augment: 25 # Optuna best found
-  batch_size: 16
+  batch_size: 128
   skip_gram_lr: 0.01
   dgi_lr: 0.01
   rgcn_lr: 0.0015
+  checkpoint_metric: "val_auc"

@@ -24,6 +24,9 @@ The draft tensor masks will correctly differentiate picks from bans:
 * `ban_mask = (x_draft[:, :, 0] == 0.0) & (x_draft[:, :, 2] >= 0.0)` (Bans)
 * `team_mask = x_draft[:, :, 1] == 0.0` (Radiant=0, Dire=1)
 
+**Edge Cases & Disambiguation:**
+* **Mask Disambiguation:** Verify that `x_draft[:, :, 2] >= 0.0` correctly filters unpadded hero tokens vs. zero-padded background slots in intermediate batch tensors.
+
 ### 2.3. Cross-Attention Flow
 1. **Self-Attention:** `rp_syn = sab_pick(rp, rp, rp)`, `rb_syn = sab_ban(rb, rb, rb)`, etc.
 2. **Cross-Team Attention:** `rp_cross = r2d_pick(rp_syn, dp_syn, dp_syn)`, `rb_cross = r2d_ban(rb_syn, db_syn, db_syn)`, etc.
@@ -32,7 +35,13 @@ The draft tensor masks will correctly differentiate picks from bans:
    * `rb_out = ban2pick(rb_cross, all_picks, all_picks)`
 4. **Pooling & MLP:** Seed poolers reduce all 4 channels to `(batch_size, d_model)` which are concatenated and passed through `value_mlp`.
 
-### 2.4. Brier Calibration Score Metric
+**Edge Cases for Attention Blocks:**
+* **Empty Set Padding / Attention Masks:** At draft Step 0, both teams have zero picks and zero bans. Ensure `_extract_set` and the cross-attention blocks (`pick2ban`, `ban2pick`) apply dynamic key-padding masks or return zero-tensors when querying empty sets to prevent `NaN` losses or division-by-zero during softmax normalization.
+
+### 2.4. Value Head Embedding Input
+* Ensure the embeddings used as input to the `SetTransformerHead` are the ones **after** the film patch embedding, not the hero pure embedding.
+
+### 2.5. Brier Calibration Score Metric
 The Brier score measures the mean squared error between predicted probabilities and actual binary labels.
 * Update `compute_metrics` in `src/dota2drafter/training/transformer_trainer.py` to calculate:
   ```python
@@ -84,6 +93,6 @@ graph TD
 ## 4. Implementation Steps
 1. Modify `TrainingMetrics` and `compute_metrics` in `transformer_trainer.py` to calculate and track the Brier score.
 2. Update the `SetTransformerHead` class in `match_network.py` by redefining the initialization modules for the expanded dual-channel structure.
-3. Add the `_extract_set` helper method to `SetTransformerHead`.
-4. Rewrite the `forward()` method of `SetTransformerHead` to extract 4 sets, process them through the expanded attention flow, and concatenate them for the MLP.
+3. Add the `_extract_set` helper method to `SetTransformerHead`, ensuring robust handling of empty sets at Step 0.
+4. Rewrite the `forward()` method of `SetTransformerHead` to extract 4 sets, process them through the expanded attention flow (using embeddings with film patch applied), and concatenate them for the MLP.
 5. Update `scripts/` or `tests/` if any tensor sizes implicitly assumed `2 * d_model` instead of the internal `SetTransformerHead` handling. (Internal changes should abstract this, but tests should be run).

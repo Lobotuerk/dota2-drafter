@@ -36,22 +36,156 @@ class SetTransformerHead(nn.Module):
         super().__init__()
         self.d_model = d_model
 
-        self.sab = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
-        self.pma_r = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
-        self.pma_d = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
+        # Self-Attention Blocks (SABs) per channel
+        self.sab_pick = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
+        self.sab_ban = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
 
-        self.r2d_attn = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
-        self.d2r_attn = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
+        # Cross-Team Attention: pick2dir, dir2pick, ban2dir, dir2ban
+        self.r2d_pick = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
+        self.d2r_pick = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
+        self.r2d_ban = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
+        self.d2r_ban = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
 
-        self.seed_r = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
-        self.seed_d = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+        # Cross-Channel Attention: picks attend to bans, bans attend to picks
+        self.pick2ban = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
+        self.ban2pick = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
 
+        # PMA Poolers per channel
+        self.pma_r_pick = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
+        self.pma_d_pick = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
+        self.pma_r_ban = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
+        self.pma_d_ban = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True, dropout=dropout)
+
+        # Seeds per channel
+        self.seed_r_pick = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+        self.seed_d_pick = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+        self.seed_r_ban = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+        self.seed_d_ban = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+
+        # Value MLP: input dim expands from 2*d_model to 4*d_model
         self.value_mlp = nn.Sequential(
-            nn.Linear(2 * d_model, dim_feedforward),
+            nn.Linear(4 * d_model, dim_feedforward),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(dim_feedforward, 1),
         )
+
+    @staticmethod
+    def _extract_set(mask: torch.Tensor, embeddings: torch.Tensor, max_items: int) -> torch.Tensor:
+        """Extract dynamically-sized set into padded tensor using vectorized scatter.
+
+        Args:
+            mask: Boolean tensor of shape (batch_size, seq_len) indicating valid items.
+            embeddings: Tensor of shape (batch_size, seq_len, d_model) with embeddings.
+            max_items: Maximum number of items to pad to.
+
+        Returns:
+            Padded tensor of shape (batch_size, max_items, d_model).
+        """
+        batch_size = embeddings.size(0)
+        seq_len = embeddings.size(1)
+        d_model = embeddings.size(2)
+        device = embeddings.device
+
+        # cumsum: (B, S) gives 1-based position of each valid item within its batch
+        cumsum = mask.long().cumsum(dim=-1)  # (B, S)
+        valid = (cumsum > 0) & (cumsum <= max_items)  # (B, S)
+
+        # scatter_idx: (B, S) where valid positions have their target position, invalid get 0
+        scatter_idx = torch.where(valid, cumsum - 1, torch.zeros(1, dtype=torch.long, device=device))
+
+        # Expand for scatter: (B, S, 1) -> (B, S, d_model)
+        scatter_idx_expanded = scatter_idx.unsqueeze(-1).expand(-1, -1, d_model)
+
+        # Zero out invalid embeddings to prevent them from overwriting valid data
+        embeddings_masked = embeddings * valid.unsqueeze(-1).float()
+
+        # Scatter into result tensor
+        result = torch.zeros(batch_size, max_items, d_model, device=device)
+        result.scatter_(1, scatter_idx_expanded, embeddings_masked)
+
+        return result
+
+    def _make_pad_mask(self, mask: torch.Tensor) -> torch.Tensor:
+        """Create a key_padding_mask for attention from a boolean selection mask.
+
+        Args:
+            mask: Boolean tensor of shape (batch_size, max_items) indicating valid items.
+                  True means the item is valid (not padding).
+
+        Returns:
+            key_padding_mask of shape (batch_size, max_items) where True means padding (to be ignored).
+        """
+        # Pad mask: True means ignore (padding), False means keep
+        return ~mask
+
+    def _get_set_pad_masks(
+        self,
+        action_mask: torch.Tensor,
+        ban_mask: torch.Tensor,
+        team: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Extract set masks and create pad masks for all 4 sets.
+
+        Returns dict with 'r_pick', 'd_pick', 'r_ban', 'd_ban' pad masks
+        of shape (batch_size, max_items) where True means padding (to be ignored).
+        """
+        batch_size = action_mask.size(0)
+        max_picks = 5
+        max_bans = 7
+
+        r_pick_mask = action_mask & (team == 0.0)
+        d_pick_mask = action_mask & (team == 1.0)
+        r_ban_mask = ban_mask & (team == 0.0)
+        d_ban_mask = ban_mask & (team == 1.0)
+
+        # Count valid items per set per batch
+        r_pick_count = r_pick_mask.sum(dim=-1, keepdim=True)  # (B, 1)
+        d_pick_count = d_pick_mask.sum(dim=-1, keepdim=True)
+        r_ban_count = r_ban_mask.sum(dim=-1, keepdim=True)
+        d_ban_count = d_ban_mask.sum(dim=-1, keepdim=True)
+
+        # Build pad masks: True means ignore (padding)
+        # For each set, items beyond the count are padding
+        r_pick_pad_mask = self._make_set_pad_mask(r_pick_mask, r_pick_count, max_picks)
+        d_pick_pad_mask = self._make_set_pad_mask(d_pick_mask, d_pick_count, max_picks)
+        r_ban_pad_mask = self._make_set_pad_mask(r_ban_mask, r_ban_count, max_bans)
+        d_ban_pad_mask = self._make_set_pad_mask(d_ban_mask, d_ban_count, max_bans)
+
+        return {
+            "r_pick": r_pick_pad_mask,
+            "d_pick": d_pick_pad_mask,
+            "r_ban": r_ban_pad_mask,
+            "d_ban": d_ban_pad_mask,
+            "r_pick_valid": r_pick_mask,
+            "d_pick_valid": d_pick_mask,
+            "r_ban_valid": r_ban_mask,
+            "d_ban_valid": d_ban_mask,
+        }
+
+    @staticmethod
+    def _make_set_pad_mask(
+        valid_mask: torch.Tensor,
+        count: torch.Tensor,
+        max_items: int,
+    ) -> torch.Tensor:
+        """Create pad mask from a valid mask and count using vectorized operations.
+
+        Args:
+            valid_mask: Boolean (batch_size, seq_len) indicating valid items.
+            count: (batch_size, 1) number of valid items per batch.
+            max_items: Maximum items per set.
+
+        Returns:
+            Boolean (batch_size, max_items) pad mask where True means padding.
+        """
+        batch_size = valid_mask.size(0)
+        device = valid_mask.device
+        # Create index: (batch_size, 1) positions 0..max_items-1
+        positions = torch.arange(max_items, device=device).unsqueeze(0).expand(batch_size, -1)  # (B, max_items)
+        # Pad mask is True where position >= count
+        pad_mask = positions >= count  # (B, max_items)
+        return pad_mask
 
     def forward(
         self,
@@ -60,69 +194,104 @@ class SetTransformerHead(nn.Module):
     ) -> torch.Tensor:
         batch_size = x_draft.size(0)
 
-        action_mask = x_draft[:, :, 0] == 1.0
-        hero_valid = x_draft[:, :, 2] >= 0.0
-        pick_mask = action_mask & hero_valid
-        team_mask = x_draft[:, :, 1] == 0.0
+        # --- Step 1: Extract masks ---
+        # Column 0: action_mask (1.0=pick, 0.0=ban)
+        # Column 1: team (0.0=Radiant, 1.0=Dire)
+        # Column 2: hero_idx (1-based, -1.0 for padding)
+        action_mask = (x_draft[:, :, 0] == 1.0) & (x_draft[:, :, 2] >= 0.0)  # Fix 2: filter unpadded hero tokens
+        ban_mask = (x_draft[:, :, 0] == 0.0) & (x_draft[:, :, 2] >= 0.0)
+        team = x_draft[:, :, 1]  # (B, seq_len)
 
-        r_mask = pick_mask & team_mask
-        d_mask = pick_mask & (~team_mask)
+        # Get pad masks for all sets
+        set_masks = self._get_set_pad_masks(action_mask, ban_mask, team)
+        r_pick_valid = set_masks["r_pick_valid"]
+        d_pick_valid = set_masks["d_pick_valid"]
+        r_ban_valid = set_masks["r_ban_valid"]
+        d_ban_valid = set_masks["d_ban_valid"]
 
-        max_heroes = 5
+        # Extract 4 sets using vectorized scatter
+        rp_embeds = self._extract_set(r_pick_valid, hero_embeddings, max_items=5)
+        dp_embeds = self._extract_set(d_pick_valid, hero_embeddings, max_items=5)
+        rb_embeds = self._extract_set(r_ban_valid, hero_embeddings, max_items=7)
+        db_embeds = self._extract_set(d_ban_valid, hero_embeddings, max_items=7)
 
-        r_cumsum = torch.cumsum(r_mask.long(), dim=-1)
-        r_pick_idx = torch.where(r_mask, r_cumsum, 0)
-        r_valid_pick = (r_pick_idx >= 1) & (r_pick_idx <= max_heroes)
-        rb_coords, rt_coords = torch.where(r_valid_pick)
-        rdest_coords = r_pick_idx[rb_coords, rt_coords] - 1
+        # Build pad masks for attention layers
+        rp_pad_mask = set_masks["r_pick"]  # (B, 5) True=padding
+        dp_pad_mask = set_masks["d_pick"]
+        rb_pad_mask = set_masks["r_ban"]  # (B, 7) True=padding
+        db_pad_mask = set_masks["d_ban"]
 
-        r_embeds = torch.zeros(batch_size, max_heroes, self.d_model, device=hero_embeddings.device)
-        r_embeds[rb_coords, rdest_coords] = hero_embeddings[rb_coords, rt_coords]
+        # Expand pad masks for cross-attention (need to match key dimension)
+        # For cross-team attention, the key padding mask should match the key set size
+        # For cross-channel, the key padding mask should match the concatenated set size
+        all_bans_pad_mask = torch.cat([rb_pad_mask, db_pad_mask], dim=-1)  # (B, 14)
+        all_picks_pad_mask = torch.cat([rp_pad_mask, dp_pad_mask], dim=-1)  # (B, 10)
 
-        r_pad_mask = torch.ones(batch_size, max_heroes, dtype=torch.bool, device=hero_embeddings.device)
-        r_pad_mask[rb_coords, rdest_coords] = False
+        # Handle empty sets: if a batch has no items in a set, the pad mask
+        # will be all True. We need to ensure at least one position is valid
+        # to prevent NaN in softmax normalization.
+        def _safe_pad_mask(pad_mask: torch.Tensor) -> torch.Tensor:
+            """Ensure at least one position is valid per batch to prevent NaN."""
+            empty = pad_mask.all(dim=-1, keepdim=True)  # (B, 1) True=all padding
+            safe_pad_mask = pad_mask.clone()
+            # For batches where all items are padding, set first position to valid
+            batch_indices = torch.arange(pad_mask.size(0), device=pad_mask.device)
+            safe_pad_mask[empty.squeeze(-1), 0] = False
+            return safe_pad_mask
 
-        d_cumsum = torch.cumsum(d_mask.long(), dim=-1)
-        d_pick_idx = torch.where(d_mask, d_cumsum, 0)
-        d_valid_pick = (d_pick_idx >= 1) & (d_pick_idx <= max_heroes)
-        db_coords, dt_coords = torch.where(d_valid_pick)
-        ddest_coords = d_pick_idx[db_coords, dt_coords] - 1
+        rp_pad_mask = _safe_pad_mask(set_masks["r_pick"])
+        dp_pad_mask = _safe_pad_mask(set_masks["d_pick"])
+        rb_pad_mask = _safe_pad_mask(set_masks["r_ban"])
+        db_pad_mask = _safe_pad_mask(set_masks["d_ban"])
+        all_bans_pad_mask = _safe_pad_mask(torch.cat([rb_pad_mask, db_pad_mask], dim=-1))
+        all_picks_pad_mask = _safe_pad_mask(torch.cat([rp_pad_mask, dp_pad_mask], dim=-1))
 
-        d_embeds = torch.zeros(batch_size, max_heroes, self.d_model, device=hero_embeddings.device)
-        d_embeds[db_coords, ddest_coords] = hero_embeddings[db_coords, dt_coords]
+        # Expand seeds to batch dimension
+        seed_rp = self.seed_r_pick.expand(batch_size, 1, self.d_model)
+        seed_dp = self.seed_d_pick.expand(batch_size, 1, self.d_model)
+        seed_rb = self.seed_r_ban.expand(batch_size, 1, self.d_model)
+        seed_db = self.seed_d_ban.expand(batch_size, 1, self.d_model)
 
-        d_pad_mask = torch.ones(batch_size, max_heroes, dtype=torch.bool, device=hero_embeddings.device)
-        d_pad_mask[db_coords, ddest_coords] = False
+        # --- Step 2: Self-Attention on each set ---
+        rp_syn, _ = self.sab_pick(rp_embeds, rp_embeds, rp_embeds, key_padding_mask=rp_pad_mask)
+        dp_syn, _ = self.sab_pick(dp_embeds, dp_embeds, dp_embeds, key_padding_mask=dp_pad_mask)
+        rb_syn, _ = self.sab_ban(rb_embeds, rb_embeds, rb_embeds, key_padding_mask=rb_pad_mask)
+        db_syn, _ = self.sab_ban(db_embeds, db_embeds, db_embeds, key_padding_mask=db_pad_mask)
 
-        empty_r = r_pad_mask.all(dim=-1, keepdim=True)
-        empty_d = d_pad_mask.all(dim=-1, keepdim=True)
+        # --- Step 3: Cross-Team Attention ---
+        # r2d_pick: Radiant picks attend to Dire picks
+        rp_cross, _ = self.r2d_pick(rp_syn, dp_syn, dp_syn, key_padding_mask=dp_pad_mask)
+        # d2r_pick: Dire picks attend to Radiant picks
+        dp_cross, _ = self.d2r_pick(dp_syn, rp_syn, rp_syn, key_padding_mask=rp_pad_mask)
+        # r2d_ban: Radiant bans attend to Dire bans
+        rb_cross, _ = self.r2d_ban(rb_syn, db_syn, db_syn, key_padding_mask=db_pad_mask)
+        # d2r_ban: Dire bans attend to Radiant bans
+        db_cross, _ = self.d2r_ban(db_syn, rb_syn, rb_syn, key_padding_mask=rb_pad_mask)
 
-        safe_r_pad_mask = r_pad_mask.clone()
-        safe_r_pad_mask[empty_r.squeeze(-1), 0] = False
+        # --- Step 4: Cross-Channel Attention ---
+        # Concatenate cross-attention outputs for cross-channel queries
+        all_bans = torch.cat([rb_cross, db_cross], dim=1)  # (B, 14, d_model)
+        all_picks = torch.cat([rp_cross, dp_cross], dim=1)  # (B, 10, d_model)
+        # picks query all bans, bans query all picks
+        rp_out, _ = self.pick2ban(rp_cross, all_bans, all_bans, key_padding_mask=all_bans_pad_mask)
+        dp_out, _ = self.pick2ban(dp_cross, all_bans, all_bans, key_padding_mask=all_bans_pad_mask)
+        rb_out, _ = self.ban2pick(rb_cross, all_picks, all_picks, key_padding_mask=all_picks_pad_mask)
+        db_out, _ = self.ban2pick(db_cross, all_picks, all_picks, key_padding_mask=all_picks_pad_mask)
 
-        safe_d_pad_mask = d_pad_mask.clone()
-        safe_d_pad_mask[empty_d.squeeze(-1), 0] = False
+        # --- Step 5: PMA Pooling ---
+        v_rp, _ = self.pma_r_pick(seed_rp, rp_out, rp_out, key_padding_mask=rp_pad_mask)
+        v_dp, _ = self.pma_d_pick(seed_dp, dp_out, dp_out, key_padding_mask=dp_pad_mask)
+        v_rb, _ = self.pma_r_ban(seed_rb, rb_out, rb_out, key_padding_mask=rb_pad_mask)
+        v_db, _ = self.pma_d_ban(seed_db, db_out, db_out, key_padding_mask=db_pad_mask)
 
-        r_syn, _ = self.sab(r_embeds, r_embeds, r_embeds, key_padding_mask=safe_r_pad_mask)
-        d_syn, _ = self.sab(d_embeds, d_embeds, d_embeds, key_padding_mask=safe_d_pad_mask)
+        v_rp = v_rp.squeeze(1)  # (B, d_model)
+        v_dp = v_dp.squeeze(1)
+        v_rb = v_rb.squeeze(1)
+        v_db = v_db.squeeze(1)
 
-        r_cross, _ = self.r2d_attn(r_syn, d_syn, d_syn, key_padding_mask=safe_d_pad_mask)
-        d_cross, _ = self.d2r_attn(d_syn, r_syn, r_syn, key_padding_mask=safe_r_pad_mask)
-
-        seed_r = self.seed_r.expand(batch_size, 1, self.d_model)
-        seed_d = self.seed_d.expand(batch_size, 1, self.d_model)
-
-        v_r, _ = self.pma_r(seed_r, r_cross, r_cross, key_padding_mask=safe_r_pad_mask)
-        v_d, _ = self.pma_d(seed_d, d_cross, d_cross, key_padding_mask=safe_d_pad_mask)
-
-        v_r = v_r.squeeze(1)
-        v_d = v_d.squeeze(1)
-
-        v_r = v_r * (~empty_r).float()
-        v_d = v_d * (~empty_d).float()
-
-        concat = torch.cat([v_r, v_d], dim=-1)
-        logits = self.value_mlp(concat).squeeze(-1)
+        # --- Step 6: Value MLP ---
+        concat = torch.cat([v_rp, v_dp, v_rb, v_db], dim=-1)  # (B, 4*d_model)
+        logits = self.value_mlp(concat).squeeze(-1)  # (B,)
 
         return logits
 
@@ -516,9 +685,7 @@ class HierarchicalTransformer(nn.Module):
         self._collision_loss = (expected_collision * inhibition_enabled).mean()
         self.inhibition_penalty = role_collision * inhibition_enabled
 
-        hero_indices = x_draft[:, :, 2]
-        pure_hero_embeds = self.joint_embedding.get_pure_hero_embeddings(hero_indices, patch_ids, for_value=True)
-        logits = self.set_transformer_head(pure_hero_embeds, x_draft)
+        logits = self.set_transformer_head(z, x_draft)
 
         return logits, mlm_logits
 

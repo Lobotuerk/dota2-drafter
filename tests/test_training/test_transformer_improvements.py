@@ -722,3 +722,22 @@ def test_mcts_prior_extraction():
         if valid_hero_mask.any():
             # At least some variation in logits
             assert policy_logits.std() > 0
+
+
+def test_brier_score_metric():
+    """Test that compute_metrics returns brier_score."""
+    from dota2drafter.training.transformer_trainer import compute_metrics
+
+    predictions = torch.tensor([0.5, 0.8, 0.3])
+    targets = torch.tensor([1.0, 1.0, 0.0])
+
+    metrics = compute_metrics(predictions, targets)
+    assert "brier_score" in metrics
+    brier = metrics["brier_score"]
+    assert brier > 0.0
+    assert torch.isfinite(torch.tensor(brier))
+
+    # Verify brier_score equals MSE between probabilities and targets
+    probs = torch.sigmoid(predictions)
+    expected = torch.nn.functional.mse_loss(probs, targets).item()
+    assert abs(brier - expected) < 1e-6

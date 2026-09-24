@@ -18,6 +18,7 @@ import torch
         "01c_build_comfort.py",
         "01d_add_custom_player.py",
         "01e_cleanup_unapproved.py",
+        "01f_gather_high_pubs.py",
         "02_train_embeddings.py",
         "03_train_rgcn.py",
         "04_train_transformer.py",

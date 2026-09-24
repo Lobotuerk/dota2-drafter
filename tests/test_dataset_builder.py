@@ -68,3 +68,43 @@ def test_dataset_builder(tmp_path):
     assert batch2["x"].shape == (1, 24, 3)
     assert batch2["y"].shape == (1,)
     assert batch2["y"].tolist() == [1.0]
+
+
+def test_dataset_builder_custom_prefix(tmp_path):
+    config = OutputConfig(directory=str(tmp_path / "data"), chunk_size=2)
+    builder = DatasetBuilder(config, prefix="games_batch_")
+
+    match1 = ProcessedMatch(
+        x_tensor=torch.randn(24, 4),
+        y_tensor=torch.tensor([1.0]),
+        match_id="pub_1",
+        patch_id=22,
+    )
+    match2 = ProcessedMatch(
+        x_tensor=torch.randn(24, 4),
+        y_tensor=torch.tensor([0.0]),
+        match_id="pub_2",
+        patch_id=22,
+    )
+
+    builder.add(match1)
+    builder.add(match2)
+
+    out_dir = Path(config.directory)
+    file1 = out_dir / "games_batch_00001.pt"
+    assert file1.exists()
+
+    # Verify continuing batch numbering with new builder instance
+    builder2 = DatasetBuilder(config, prefix="games_batch_")
+    match3 = ProcessedMatch(
+        x_tensor=torch.randn(24, 4),
+        y_tensor=torch.tensor([1.0]),
+        match_id="pub_3",
+        patch_id=22,
+    )
+    builder2.add(match3)
+    builder2.flush()
+
+    file2 = out_dir / "games_batch_00002.pt"
+    assert file2.exists()
+

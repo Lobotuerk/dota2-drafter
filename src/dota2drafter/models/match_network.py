@@ -447,6 +447,9 @@ class HierarchicalTransformer(nn.Module):
 
         pad_mask = (x_draft[:, :, 2] == -1.0).to(tgt.device)
 
+        if pad_mask.all():
+            pad_mask[0, :] = False
+
         decoder_output = self.transformer_decoder(
             tgt=tgt,
             memory=memory,

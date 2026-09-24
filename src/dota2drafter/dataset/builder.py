@@ -18,19 +18,20 @@ logger = logging.getLogger(__name__)
 class DatasetBuilder:
     """Aggregates processed matches and saves them as PyTorch .pt files."""
 
-    def __init__(self, config: OutputConfig) -> None:
+    def __init__(self, config: OutputConfig, prefix: str = "drafts_batch_") -> None:
         self._config = config
+        self._prefix = prefix
         self._output_dir = Path(config.directory)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._buffer: list[ProcessedMatch] = []
         
         # Dynamically find the highest existing batch number in the directory
-        existing_batches = list(self._output_dir.glob("drafts_batch_*.pt"))
+        existing_batches = list(self._output_dir.glob(f"{self._prefix}*.pt"))
         if existing_batches:
             batch_nums = []
             for path in existing_batches:
                 try:
-                    num = int(path.stem.split("drafts_batch_")[1])
+                    num = int(path.stem.split(self._prefix)[1])
                     batch_nums.append(num)
                 except (IndexError, ValueError):
                     pass
@@ -88,7 +89,7 @@ class DatasetBuilder:
         }
 
         self._batch_count += 1
-        output_path = self._output_dir / f"drafts_batch_{self._batch_count:05d}.pt"
+        output_path = self._output_dir / f"{self._prefix}{self._batch_count:05d}.pt"
         torch.save(dataset, str(output_path))
 
         logger.info(

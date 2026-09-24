@@ -70,6 +70,44 @@ MATCH_DETAILS_QUERY = """
     }
 """
 
+LEADERBOARD_PLAYERS_QUERY = """
+    query LeaderboardPlayers($division: LeaderboardDivision!, $take: Long, $skip: Long) {
+        leaderboard {
+            season(request: { leaderBoardDivision: $division }) {
+                playerCount
+                players(take: $take, skip: $skip) {
+                    steamAccountId
+                    rank
+                }
+            }
+        }
+    }
+"""
+
+PLAYER_MATCHES_QUERY = """
+    query PlayerMatches($id: Long!, $take: Int!) {
+        player(steamAccountId: $id) {
+            matches(request: { take: $take }) {
+                id
+                didRadiantWin
+                startDateTime
+                gameMode
+                gameVersionId
+                lobbyType
+                bracket
+                rank
+                actualRank
+                regionId
+                players {
+                    heroId
+                    isRadiant
+                    steamAccountId
+                }
+            }
+        }
+    }
+"""
+
 HEROES_QUERY = """
     query Heroes {
         constants {
@@ -277,6 +315,71 @@ class StratzClient:
             mapped_match["league"] = league
             
         return mapped_match
+
+    async def fetch_leaderboard_players(
+        self, division: str = "AMERICAS", take: int = 100, skip: int = 0
+    ) -> list[dict[str, Any]]:
+        """Fetch top ranked players from a regional division leaderboard.
+
+        Args:
+            division: One of 'AMERICAS', 'SE_ASIA', 'EUROPE', 'CHINA'.
+            take: Number of players to fetch.
+            skip: Offset in leaderboard.
+
+        Returns:
+            List of player dicts containing steamAccountId and rank.
+        """
+        variables = {"division": division, "take": take, "skip": skip}
+        data = await self._graphql(LEADERBOARD_PLAYERS_QUERY, variables)
+        return data.get("data", {}).get("leaderboard", {}).get("season", {}).get("players") or []
+
+    async def fetch_player_matches(
+        self, steam_account_id: int, take: int = 100
+    ) -> list[dict[str, Any]]:
+        """Fetch recent matches for a player with full 10-player draft/team outcomes.
+
+        Args:
+            steam_account_id: Steam account ID (32-bit).
+            take: Number of matches to fetch (up to 100).
+
+        Returns:
+            List of match dictionaries containing players, hero selections, and winner.
+        """
+        variables = {"id": steam_account_id, "take": take}
+        data = await self._graphql(PLAYER_MATCHES_QUERY, variables)
+        return data.get("data", {}).get("player", {}).get("matches") or []
+
+    async def fetch_high_rank_pubs(self, skip: int = 0, take: int = 100) -> list[dict[str, Any]]:
+        """Fetch recent Immortal bracket public matches with 10-player data.
+
+        Seeds from the leaderboard divisions and fetches recent matches for top players.
+        """
+        divisions = ["AMERICAS", "EUROPE", "SE_ASIA", "CHINA"]
+        all_matches: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        for div in divisions:
+            try:
+                players = await self.fetch_leaderboard_players(division=div)
+                for player in players:
+                    account_id = player.get("steamAccountId")
+                    if not account_id:
+                        continue
+                    matches = await self.fetch_player_matches(account_id, take=min(take, 50))
+                    for m in matches:
+                        mid = str(m.get("id", ""))
+                        if mid and mid not in seen_ids:
+                            seen_ids.add(mid)
+                            # Assign patch_id based on timestamp
+                            from dota2drafter.processor.tensor_transformer import get_patch_id
+                            m["patch_id"] = get_patch_id(m.get("startDateTime"))
+                            all_matches.append(m)
+                            if len(all_matches) >= take:
+                                return all_matches
+            except Exception as e:
+                logger.warning("Error fetching leaderboard matches for division %s: %s", div, e)
+
+        return all_matches
 
     async def fetch_heroes(self) -> list[dict[str, Any]]:
         """Fetch the current hero roster."""

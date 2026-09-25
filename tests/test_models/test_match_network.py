@@ -513,9 +513,9 @@ def test_separate_projections_gradient_flow():
     loss_value = logits.sum()
     loss_value.backward(retain_graph=True)
 
-    # With contextual embeddings (z), project_policy should have gradients
-    # since z uses project_policy for the hero projection
-    assert model.match_network.joint_embedding.project_policy.weight.grad is not None
+    # project_value should have gradients, project_policy should NOT
+    assert model.match_network.joint_embedding.project_value.weight.grad is not None
+    assert model.match_network.joint_embedding.project_policy.weight.grad is None
 
     # Zero gradients again
     model.zero_grad()
@@ -524,8 +524,9 @@ def test_separate_projections_gradient_flow():
     loss_policy = mlm_logits.sum()
     loss_policy.backward()
 
-    # project_policy should have gradients from policy head too
+    # project_policy should have gradients, project_value should NOT
     assert model.match_network.joint_embedding.project_policy.weight.grad is not None
+    assert model.match_network.joint_embedding.project_value.weight.grad is None
 
 
 def test_set_transformer_head_dual_channel_forward():

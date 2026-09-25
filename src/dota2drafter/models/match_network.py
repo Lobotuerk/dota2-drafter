@@ -89,20 +89,20 @@ class SetTransformerHead(nn.Module):
 
         # cumsum: (B, S) gives 1-based position of each valid item within its batch
         cumsum = mask.long().cumsum(dim=-1)  # (B, S)
-        valid = (cumsum > 0) & (cumsum <= max_items)  # (B, S)
+        # valid positions: mask is True AND cumsum <= max_items
+        valid = mask & (cumsum <= max_items)  # (B, S)
 
-        # scatter_idx: (B, S) where valid positions have their target position, invalid get 0
-        scatter_idx = torch.where(valid, cumsum - 1, torch.zeros(1, dtype=torch.long, device=device))
-
-        # Expand for scatter: (B, S, 1) -> (B, S, d_model)
-        scatter_idx_expanded = scatter_idx.unsqueeze(-1).expand(-1, -1, d_model)
-
-        # Zero out invalid embeddings to prevent them from overwriting valid data
-        embeddings_masked = embeddings * valid.unsqueeze(-1).float()
-
-        # Scatter into result tensor
+        # Scatter only valid items into the result tensor
         result = torch.zeros(batch_size, max_items, d_model, device=device)
-        result.scatter_(1, scatter_idx_expanded, embeddings_masked)
+        batch_idx = torch.arange(batch_size, device=device).unsqueeze(-1).expand(-1, seq_len)
+        idx = torch.where(valid, cumsum - 1, 0)
+
+        # Only scatter where valid is True to prevent overwriting valid data
+        result.index_put_(
+            (batch_idx[valid], idx[valid]),
+            embeddings[valid],
+            accumulate=False
+        )
 
         return result
 
@@ -181,10 +181,10 @@ class SetTransformerHead(nn.Module):
         """
         batch_size = valid_mask.size(0)
         device = valid_mask.device
-        # Create index: (batch_size, 1) positions 0..max_items-1
+        # Cap count at max_items to avoid all-True pad masks
+        capped_count = count.clamp(max=max_items)  # (B, 1)
         positions = torch.arange(max_items, device=device).unsqueeze(0).expand(batch_size, -1)  # (B, max_items)
-        # Pad mask is True where position >= count
-        pad_mask = positions >= count  # (B, max_items)
+        pad_mask = positions >= capped_count  # (B, max_items)
         return pad_mask
 
     def forward(
@@ -235,7 +235,6 @@ class SetTransformerHead(nn.Module):
             empty = pad_mask.all(dim=-1, keepdim=True)  # (B, 1) True=all padding
             safe_pad_mask = pad_mask.clone()
             # For batches where all items are padding, set first position to valid
-            batch_indices = torch.arange(pad_mask.size(0), device=pad_mask.device)
             safe_pad_mask[empty.squeeze(-1), 0] = False
             return safe_pad_mask
 
@@ -243,8 +242,8 @@ class SetTransformerHead(nn.Module):
         dp_pad_mask = _safe_pad_mask(set_masks["d_pick"])
         rb_pad_mask = _safe_pad_mask(set_masks["r_ban"])
         db_pad_mask = _safe_pad_mask(set_masks["d_ban"])
-        all_bans_pad_mask = _safe_pad_mask(torch.cat([rb_pad_mask, db_pad_mask], dim=-1))
-        all_picks_pad_mask = _safe_pad_mask(torch.cat([rp_pad_mask, dp_pad_mask], dim=-1))
+        all_bans_pad_mask = torch.cat([rb_pad_mask, db_pad_mask], dim=-1)
+        all_picks_pad_mask = torch.cat([rp_pad_mask, dp_pad_mask], dim=-1)
 
         # Expand seeds to batch dimension
         seed_rp = self.seed_r_pick.expand(batch_size, 1, self.d_model)
@@ -283,6 +282,17 @@ class SetTransformerHead(nn.Module):
         v_dp, _ = self.pma_d_pick(seed_dp, dp_out, dp_out, key_padding_mask=dp_pad_mask)
         v_rb, _ = self.pma_r_ban(seed_rb, rb_out, rb_out, key_padding_mask=rb_pad_mask)
         v_db, _ = self.pma_d_ban(seed_db, db_out, db_out, key_padding_mask=db_pad_mask)
+
+        # Empty-set masking: zero out pooled outputs for batches with no valid items
+        # Use explicit unsqueeze for correct broadcasting (B,1) -> (B,1,1)
+        r_pick_count = r_pick_valid.sum(dim=-1, keepdim=True).float()  # (B, 1)
+        d_pick_count = d_pick_valid.sum(dim=-1, keepdim=True).float()
+        r_ban_count = r_ban_valid.sum(dim=-1, keepdim=True).float()
+        d_ban_count = d_ban_valid.sum(dim=-1, keepdim=True).float()
+        v_rp = v_rp * (r_pick_count > 0).float().unsqueeze(-1)
+        v_dp = v_dp * (d_pick_count > 0).float().unsqueeze(-1)
+        v_rb = v_rb * (r_ban_count > 0).float().unsqueeze(-1)
+        v_db = v_db * (d_ban_count > 0).float().unsqueeze(-1)
 
         v_rp = v_rp.squeeze(1)  # (B, d_model)
         v_dp = v_dp.squeeze(1)
@@ -685,7 +695,9 @@ class HierarchicalTransformer(nn.Module):
         self._collision_loss = (expected_collision * inhibition_enabled).mean()
         self.inhibition_penalty = role_collision * inhibition_enabled
 
-        logits = self.set_transformer_head(z, x_draft)
+        hero_indices = x_draft[:, :, 2]
+        pure_hero_embeds = self.joint_embedding.get_pure_hero_embeddings(hero_indices, patch_ids, for_value=True)
+        logits = self.set_transformer_head(pure_hero_embeds, x_draft)
 
         return logits, mlm_logits
 

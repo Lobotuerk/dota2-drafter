@@ -98,6 +98,9 @@ def test_model_and_training_config_defaults():
     assert config.training.learning_rate == 1e-4
     assert config.training.batch_size == 16
     assert config.training.checkpoint_metric == "val_auc"
+    assert config.training.stage == 1
+    assert config.training.draft_sample_weight == 5.0
+    assert config.training.pub_data_dir == "data"
     assert config.training.aw_tau_start == 0.15
     assert config.training.aw_tau_end == 0.08
     assert config.training.aw_tau_decay_epochs == 50
@@ -122,6 +125,9 @@ def test_load_model_and_training_from_file(tmp_path):
             "aw_tau_decay_epochs": 30,
             "aw_clip_min": 0.2,
             "aw_clip_max": 8.0,
+            "stage": 2,
+            "draft_sample_weight": 5.0,
+            "pub_data_dir": "custom_pub_data",
         }
     }
     config_file = tmp_path / "config.yaml"
@@ -141,4 +147,7 @@ def test_load_model_and_training_from_file(tmp_path):
     assert config.training.aw_tau_decay_epochs == 30
     assert config.training.aw_clip_min == 0.2
     assert config.training.aw_clip_max == 8.0
+    assert config.training.stage == 2
+    assert config.training.draft_sample_weight == 5.0
+    assert config.training.pub_data_dir == "custom_pub_data"
 

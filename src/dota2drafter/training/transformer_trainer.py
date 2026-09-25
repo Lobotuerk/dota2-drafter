@@ -188,6 +188,13 @@ class TrainingConfig:
     aw_clip_min: float = 0.1
     aw_clip_max: float = 10.0
 
+    # Two-Stage Training Parameters
+    stage: int | None = None
+    draft_sample_weight: float = 5.0
+    pub_data_dir: str = "data"
+    pub_epochs: int | None = None
+    stage1_checkpoint_path: str | Path | None = None
+
 
 @dataclass
 class TrainingMetrics:
@@ -204,7 +211,9 @@ class TrainingMetrics:
     best_mlm_top5_acc: float = float("-inf")
     best_val_auc: float = float("-inf")
     best_val_loss: float = float("inf")
+    best_brier_score: float = float("inf")
     best_checkpoint_value: float = float("-inf")
+    calibrated_temperature: float = 1.0
 
 
 class PlayerComfortDataset(Dataset):
@@ -680,6 +689,653 @@ class TransformerTrainer:
         )
         return w_t
 
+    def _validate_value(self, val_loader: DataLoader) -> tuple[float, dict[str, float]]:
+        """Validate the Value Head on hold-out dataset tracking BCE, ROC-AUC, and Brier Score."""
+        self.model.eval()
+        val_loss = 0.0
+        all_preds: list[torch.Tensor] = []
+        all_targets: list[torch.Tensor] = []
+        val_batches = 0
+
+        with torch.no_grad():
+            for batch_data in val_loader:
+                x_batch = batch_data[0].to(self.device)
+                y_batch = batch_data[2].to(self.device).squeeze(-1).float()
+                patch_batch = (
+                    batch_data[3].to(self.device)
+                    if len(batch_data) > 3 and batch_data[3] is not None
+                    else None
+                )
+
+                logits = self._forward_value(x_batch, patch_batch)
+                loss = F.binary_cross_entropy_with_logits(logits, y_batch)
+
+                val_loss += loss.item()
+                all_preds.append(logits.cpu())
+                all_targets.append(y_batch.cpu())
+                val_batches += 1
+
+        avg_val_loss = val_loss / max(val_batches, 1)
+        if all_preds:
+            all_preds_tensor = torch.cat(all_preds)
+            all_targets_tensor = torch.cat(all_targets)
+            metrics = compute_metrics(all_preds_tensor, all_targets_tensor)
+        else:
+            metrics = {"bce": 0.0, "accuracy": 0.0, "roc_auc": 0.5, "brier_score": 0.0}
+
+        return avg_val_loss, metrics
+
+    def calibrate_temperature(self, val_loader: DataLoader) -> float:
+        """Calibrate temperature scalar T on validation set using Platt scaling via L-BFGS to minimize Brier score.
+
+        Optimizes T on validation logits to minimize F.mse_loss(torch.sigmoid(logits / T), targets).
+        Attaches the fitted scalar temperature to the trainer and model.
+
+        Args:
+            val_loader: DataLoader providing validation draft samples and targets.
+
+        Returns:
+            Fitted scalar temperature value T.
+        """
+        self.model.eval()
+        all_logits: list[torch.Tensor] = []
+        all_targets: list[torch.Tensor] = []
+
+        with torch.no_grad():
+            for batch_data in val_loader:
+                x_batch = batch_data[0].to(self.device)
+                y_batch = batch_data[2].to(self.device).squeeze(-1).float()
+                patch_batch = (
+                    batch_data[3].to(self.device)
+                    if len(batch_data) > 3 and batch_data[3] is not None
+                    else None
+                )
+
+                logits = self._forward_value(x_batch, patch_batch)
+                all_logits.append(logits)
+                all_targets.append(y_batch)
+
+        if not all_logits:
+            logger.warning("Empty validation set provided for temperature calibration; keeping T=1.0")
+            return 1.0
+
+        val_logits = torch.cat(all_logits)
+        val_targets = torch.cat(all_targets)
+
+        temperature_param = nn.Parameter(torch.tensor([1.0], device=self.device, dtype=torch.float32))
+        optimizer = torch.optim.LBFGS([temperature_param], lr=0.05, max_iter=100)
+
+        def closure():
+            optimizer.zero_grad()
+            t_clamped = torch.clamp(temperature_param, min=1e-3)
+            probs = torch.sigmoid(val_logits / t_clamped)
+            loss = F.mse_loss(probs, val_targets)
+            loss.backward()
+            return loss
+
+        optimizer.step(closure)
+
+        calibrated_t = torch.clamp(temperature_param, min=1e-3).detach().item()
+        self.calibrated_temperature = calibrated_t
+        self.metrics.calibrated_temperature = calibrated_t
+
+        match_net = getattr(self.model, "match_network", self.model)
+        match_net.temperature = calibrated_t
+        if hasattr(match_net, "set_transformer_head"):
+            match_net.set_transformer_head.temperature = calibrated_t
+
+        logger.info("Temperature calibration complete. Fitted T = %.4f", calibrated_t)
+        return calibrated_t
+
+    def train_value_head(
+        self,
+        pubs_loader: DataLoader | None,
+        drafts_loader: DataLoader,
+        val_loader: DataLoader,
+    ) -> TrainingMetrics:
+        """Stage 1: Pre-train and calibrate the Value Head (SetTransformerHead).
+
+        Sequential training:
+        - Loop 1: Train on pubs_loader (BCE Loss).
+        - Loop 2: Fine-tune on drafts_loader (BCE Loss * draft_sample_weight, default 5.0).
+        - Checkpoint selection and early stopping monitor patience on minimizing validation Brier Score.
+        - Post-hoc temperature calibration via L-BFGS to directly minimize validation Brier score.
+        """
+        os.makedirs(self.config.checkpoint_dir, exist_ok=True)
+
+        # Freeze policy components: only train SetTransformerHead and JointEmbedding value path
+        match_net = getattr(self.model, "match_network", self.model)
+        for name, param in self.model.named_parameters():
+            if (
+                "set_transformer_head" in name
+                or "project_value" in name
+                or "film_" in name
+                or "w_patch" in name
+            ):
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
+
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        optimizer = torch.optim.AdamW(
+            trainable_params,
+            lr=self.config.learning_rate,
+            weight_decay=1e-2,
+        )
+
+        # Phase 1: Pre-train on pub games
+        pub_epochs = self.config.pub_epochs if self.config.pub_epochs is not None else self.config.num_epochs
+        if pubs_loader is not None and len(pubs_loader) > 0:
+            logger.info("Stage 1 Phase 1: Pre-training Value Head on pub games (%d epochs)...", pub_epochs)
+            patience_counter = 0
+            best_pub_brier = float("inf")
+
+            for epoch in range(1, pub_epochs + 1):
+                self.model.train()
+                train_loss = 0.0
+                train_batches = 0
+
+                for batch_data in tqdm(pubs_loader, desc=f"Stage 1 [Pubs Pre-train] Epoch {epoch}/{pub_epochs}"):
+                    x_batch = batch_data[0].to(self.device)
+                    y_batch = batch_data[2].to(self.device).squeeze(-1).float()
+                    patch_batch = (
+                        batch_data[3].to(self.device)
+                        if len(batch_data) > 3 and batch_data[3] is not None
+                        else None
+                    )
+
+                    logits = self._forward_value(x_batch, patch_batch)
+                    loss = F.binary_cross_entropy_with_logits(logits, y_batch)
+
+                    optimizer.zero_grad()
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+                    optimizer.step()
+
+                    train_loss += loss.item()
+                    train_batches += 1
+
+                avg_train_loss = train_loss / max(train_batches, 1)
+                val_loss, val_metrics = self._validate_value(val_loader)
+                brier = val_metrics["brier_score"]
+                auc = val_metrics["roc_auc"]
+
+                logger.info(
+                    "Stage 1 Pubs Epoch %d/%d - Train BCE: %.4f - Val BCE: %.4f - Val Brier: %.4f - Val AUC: %.4f",
+                    epoch, pub_epochs, avg_train_loss, val_loss, brier, auc,
+                )
+
+                if brier < best_pub_brier - self.config.min_delta:
+                    best_pub_brier = brier
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= self.config.patience:
+                        logger.info("Stage 1 Phase 1 early stopping at epoch %d", epoch)
+                        break
+        else:
+            logger.warning("No pub games DataLoader provided or empty; proceeding directly to draft games fine-tuning.")
+
+        # Phase 2: Fine-tune on draft games with draft_sample_weight
+        draft_epochs = self.config.num_epochs
+        weight = self.config.draft_sample_weight
+        logger.info(
+            "Stage 1 Phase 2: Fine-tuning Value Head on draft games (%d epochs, sample_weight=%.1f)...",
+            draft_epochs, weight,
+        )
+        patience_counter = 0
+        best_brier = float("inf")
+        best_state = None
+
+        for epoch in range(1, draft_epochs + 1):
+            self.model.train()
+            train_loss = 0.0
+            train_batches = 0
+
+            for batch_data in tqdm(drafts_loader, desc=f"Stage 1 [Draft Fine-tune] Epoch {epoch}/{draft_epochs}"):
+                x_batch = batch_data[0].to(self.device)
+                y_batch = batch_data[2].to(self.device).squeeze(-1).float()
+                patch_batch = (
+                    batch_data[3].to(self.device)
+                    if len(batch_data) > 3 and batch_data[3] is not None
+                    else None
+                )
+
+                logits = self._forward_value(x_batch, patch_batch)
+                raw_loss = F.binary_cross_entropy_with_logits(logits, y_batch)
+                loss = weight * raw_loss
+
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+                optimizer.step()
+
+                train_loss += raw_loss.item()
+                train_batches += 1
+
+            avg_train_loss = train_loss / max(train_batches, 1)
+            self.metrics.train_losses.append(avg_train_loss)
+
+            val_loss, val_metrics = self._validate_value(val_loader)
+            brier = val_metrics["brier_score"]
+            auc = val_metrics["roc_auc"]
+
+            self.metrics.val_losses.append(val_loss)
+            self.metrics.val_accuracies.append(val_metrics["accuracy"])
+            self.metrics.val_auc_scores.append(auc)
+            self.metrics.val_brier_scores.append(brier)
+
+            logger.info(
+                "Stage 1 Draft Epoch %d/%d - Train BCE: %.4f - Val BCE: %.4f - Val Brier: %.4f - Val AUC: %.4f",
+                epoch, draft_epochs, avg_train_loss, val_loss, brier, auc,
+            )
+
+            is_better_brier = brier < best_brier - self.config.min_delta
+            auc_acceptable = (auc >= self.metrics.best_val_auc - 0.05) if self.metrics.best_val_auc > float("-inf") else True
+
+            if auc > self.metrics.best_val_auc:
+                self.metrics.best_val_auc = auc
+
+            if is_better_brier and auc_acceptable:
+                best_brier = brier
+                self.metrics.best_brier_score = brier
+                self.metrics.best_epoch = epoch
+                self.metrics.best_checkpoint_value = brier
+                patience_counter = 0
+
+                best_state = {
+                    "model_state": self.model.state_dict(),
+                    "epoch": epoch,
+                    "val_loss": val_loss,
+                    "val_auc": auc,
+                    "val_brier_score": brier,
+                    "stage": 1,
+                }
+                torch.save(best_state, os.path.join(self.config.checkpoint_dir, "stage1_best_model.pt"))
+                torch.save(best_state, os.path.join(self.config.checkpoint_dir, "best_model.pt"))
+                logger.info("  [checkpoint] Saved best Stage 1 Value Head at epoch %d (Brier=%.4f, AUC=%.4f)", epoch, brier, auc)
+            else:
+                patience_counter += 1
+                if patience_counter >= self.config.patience:
+                    logger.info("Stage 1 Phase 2 early stopping at epoch %d", epoch)
+                    break
+
+        if best_state is not None:
+            self.model.load_state_dict(best_state["model_state"])
+
+        logger.info("Running post-hoc temperature calibration via L-BFGS...")
+        calibrated_t = self.calibrate_temperature(val_loader)
+
+        final_checkpoint_path = os.path.join(self.config.checkpoint_dir, "stage1_best_model.pt")
+        final_state = {
+            "model_state": self.model.state_dict(),
+            "epoch": self.metrics.best_epoch,
+            "val_auc": self.metrics.best_val_auc,
+            "val_brier_score": self.metrics.best_brier_score,
+            "temperature": calibrated_t,
+            "calibrated_temperature": calibrated_t,
+            "stage": 1,
+        }
+        torch.save(final_state, final_checkpoint_path)
+        torch.save(final_state, os.path.join(self.config.checkpoint_dir, "best_model.pt"))
+        logger.info("Stage 1 complete. Saved calibrated checkpoint to %s (T=%.4f)", final_checkpoint_path, calibrated_t)
+
+        return self.metrics
+
+    def train_stage_1(
+        self,
+        x_drafts: list[torch.Tensor],
+        y_labels: list[torch.Tensor],
+        radiant_players: list[list[int]] | None = None,
+        dire_players: list[list[int]] | None = None,
+        player_comfort_map: dict[int, torch.Tensor] | None = None,
+        patch_ids: list[torch.Tensor] | None = None,
+        x_pubs: list[torch.Tensor] | None = None,
+        y_pubs: list[torch.Tensor] | None = None,
+        patch_ids_pubs: list[torch.Tensor] | None = None,
+    ) -> TrainingMetrics:
+        """Stage 1 entry point: prepare dataloaders and run train_value_head."""
+        n = len(x_drafts)
+        radiant_players = radiant_players or [[0] * 5 for _ in range(n)]
+        dire_players = dire_players or [[0] * 5 for _ in range(n)]
+
+        latest_patch_id = -1
+        if patch_ids is not None and len(patch_ids) > 0:
+            latest_patch_id = max([p.item() if hasattr(p, 'item') else p for p in patch_ids])
+
+        latest_patch_indices = []
+        older_patch_indices = []
+
+        for i in range(n):
+            if patch_ids is not None:
+                p_val = patch_ids[i].item() if hasattr(patch_ids[i], 'item') else patch_ids[i]
+                if p_val == latest_patch_id:
+                    latest_patch_indices.append(i)
+                else:
+                    older_patch_indices.append(i)
+            else:
+                older_patch_indices.append(i)
+
+        latest_shuffled = torch.randperm(len(latest_patch_indices)).tolist()
+        latest_patch_indices = [latest_patch_indices[i] for i in latest_shuffled]
+
+        older_shuffled = torch.randperm(len(older_patch_indices)).tolist()
+        older_patch_indices = [older_patch_indices[i] for i in older_shuffled]
+
+        val_size = int(len(latest_patch_indices) * 0.4)
+        val_size = max(1, val_size) if latest_patch_indices else 0
+
+        val_indices = latest_patch_indices[:val_size]
+        train_indices = latest_patch_indices[val_size:] + older_patch_indices
+        train_shuffled = torch.randperm(len(train_indices)).tolist()
+        train_indices = [train_indices[i] for i in train_shuffled]
+
+        player_input_dim = getattr(self.model, "player_input_dim", 127)
+        if player_comfort_map:
+            first_tensor = next(iter(player_comfort_map.values()))
+            player_input_dim = first_tensor.size(0)
+
+        train_dataset = PlayerComfortDataset(
+            x_drafts=[x_drafts[i] for i in train_indices],
+            y_labels=[y_labels[i] for i in train_indices],
+            radiant_players=[radiant_players[i] for i in train_indices],
+            dire_players=[dire_players[i] for i in train_indices],
+            player_comfort_map=player_comfort_map,
+            player_input_dim=player_input_dim,
+            augment=self.config.augment,
+            patch_ids=[patch_ids[i] for i in train_indices] if patch_ids else None,
+        )
+
+        val_dataset = PlayerComfortDataset(
+            x_drafts=[x_drafts[i] for i in val_indices],
+            y_labels=[y_labels[i] for i in val_indices],
+            radiant_players=[radiant_players[i] for i in val_indices],
+            dire_players=[dire_players[i] for i in val_indices],
+            player_comfort_map=player_comfort_map,
+            player_input_dim=player_input_dim,
+            augment=False,
+            patch_ids=[patch_ids[i] for i in val_indices] if patch_ids else None,
+        )
+
+        drafts_loader = DataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=self.config.batch_size, shuffle=False)
+
+        pubs_loader = None
+        if x_pubs is not None and len(x_pubs) > 0 and y_pubs is not None and len(y_pubs) > 0:
+            num_pubs = len(x_pubs)
+            pubs_dataset = PlayerComfortDataset(
+                x_drafts=x_pubs,
+                y_labels=y_pubs,
+                radiant_players=[[0] * 5 for _ in range(num_pubs)],
+                dire_players=[[0] * 5 for _ in range(num_pubs)],
+                player_comfort_map=None,
+                player_input_dim=player_input_dim,
+                augment=False,
+                patch_ids=patch_ids_pubs,
+            )
+            pubs_loader = DataLoader(pubs_dataset, batch_size=self.config.batch_size, shuffle=True)
+        else:
+            logger.warning("Pub games dataset not provided or empty; skipping Phase 1.")
+
+        return self.train_value_head(
+            pubs_loader=pubs_loader,
+            drafts_loader=drafts_loader,
+            val_loader=val_loader,
+        )
+
+    def train_stage_2(
+        self,
+        x_drafts: list[torch.Tensor],
+        y_labels: list[torch.Tensor],
+        radiant_players: list[list[int]],
+        dire_players: list[list[int]],
+        player_comfort_map: dict[int, torch.Tensor] | None = None,
+        patch_ids: list[torch.Tensor] | None = None,
+        stage1_checkpoint_path: str | Path | None = None,
+    ) -> TrainingMetrics:
+        """Stage 2: Freeze Value Head and train Policy Head on draft games trajectories."""
+        ckpt_path = (
+            stage1_checkpoint_path
+            or self.config.stage1_checkpoint_path
+            or os.path.join(self.config.checkpoint_dir, "stage1_best_model.pt")
+        )
+        if not os.path.exists(str(ckpt_path)):
+            fallback_ckpt = os.path.join(self.config.checkpoint_dir, "best_model.pt")
+            if os.path.exists(fallback_ckpt):
+                ckpt_path = fallback_ckpt
+
+        if os.path.exists(str(ckpt_path)):
+            logger.info("Loading Stage 1 checkpoint from %s for Stage 2 training...", ckpt_path)
+            ckpt = torch.load(ckpt_path, weights_only=True)
+            self.model.load_state_dict(ckpt["model_state"], strict=False)
+            if "temperature" in ckpt:
+                self.calibrated_temperature = float(ckpt["temperature"])
+                logger.info("Loaded calibrated temperature T=%.4f from Stage 1 checkpoint", self.calibrated_temperature)
+            elif "calibrated_temperature" in ckpt:
+                self.calibrated_temperature = float(ckpt["calibrated_temperature"])
+        else:
+            logger.warning("Stage 1 checkpoint not found at %s. Proceeding with existing weights.", ckpt_path)
+
+        match_net = getattr(self.model, "match_network", self.model)
+        for param in match_net.set_transformer_head.parameters():
+            param.requires_grad = False
+        if hasattr(match_net.joint_embedding, "project_value"):
+            for param in match_net.joint_embedding.project_value.parameters():
+                param.requires_grad = False
+
+        for name, param in self.model.named_parameters():
+            if "set_transformer_head" not in name and "project_value" not in name:
+                param.requires_grad = True
+
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        self.optimizer = torch.optim.AdamW(
+            trainable_params,
+            lr=self.config.learning_rate,
+            weight_decay=1e-2,
+        )
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=self.config.num_epochs
+        )
+
+        n = len(x_drafts)
+        latest_patch_id = -1
+        if patch_ids is not None and len(patch_ids) > 0:
+            latest_patch_id = max([p.item() if hasattr(p, 'item') else p for p in patch_ids])
+
+        latest_patch_indices = []
+        older_patch_indices = []
+
+        for i in range(n):
+            if patch_ids is not None:
+                p_val = patch_ids[i].item() if hasattr(patch_ids[i], 'item') else patch_ids[i]
+                if p_val == latest_patch_id:
+                    latest_patch_indices.append(i)
+                else:
+                    older_patch_indices.append(i)
+            else:
+                older_patch_indices.append(i)
+
+        latest_shuffled = torch.randperm(len(latest_patch_indices)).tolist()
+        latest_patch_indices = [latest_patch_indices[i] for i in latest_shuffled]
+        older_shuffled = torch.randperm(len(older_patch_indices)).tolist()
+        older_patch_indices = [older_patch_indices[i] for i in older_shuffled]
+
+        val_size = int(len(latest_patch_indices) * 0.4)
+        val_size = max(1, val_size) if latest_patch_indices else 0
+
+        val_indices = latest_patch_indices[:val_size]
+        train_indices = latest_patch_indices[val_size:] + older_patch_indices
+        train_shuffled = torch.randperm(len(train_indices)).tolist()
+        train_indices = [train_indices[i] for i in train_shuffled]
+
+        player_input_dim = getattr(self.model, "player_input_dim", 127)
+        if player_comfort_map:
+            first_tensor = next(iter(player_comfort_map.values()))
+            player_input_dim = first_tensor.size(0)
+
+        train_dataset = PlayerComfortDataset(
+            x_drafts=[x_drafts[i] for i in train_indices],
+            y_labels=[y_labels[i] for i in train_indices],
+            radiant_players=[radiant_players[i] for i in train_indices],
+            dire_players=[dire_players[i] for i in train_indices],
+            player_comfort_map=player_comfort_map,
+            player_input_dim=player_input_dim,
+            augment=self.config.augment,
+            patch_ids=[patch_ids[i] for i in train_indices] if patch_ids else None,
+        )
+
+        val_dataset = PlayerComfortDataset(
+            x_drafts=[x_drafts[i] for i in val_indices],
+            y_labels=[y_labels[i] for i in val_indices],
+            radiant_players=[radiant_players[i] for i in val_indices],
+            dire_players=[dire_players[i] for i in val_indices],
+            player_comfort_map=player_comfort_map,
+            player_input_dim=player_input_dim,
+            augment=False,
+            patch_ids=[patch_ids[i] for i in val_indices] if patch_ids else None,
+        )
+
+        train_loader = DataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=self.config.batch_size, shuffle=False)
+
+        os.makedirs(self.config.checkpoint_dir, exist_ok=True)
+        patience_counter = 0
+
+        if self.config.slot_tau_decay_epochs > 0:
+            tau_decay_rate = (self.config.slot_tau_end / self.config.slot_tau_start) ** (
+                1.0 / self.config.slot_tau_decay_epochs
+            )
+        else:
+            tau_decay_rate = 1.0
+
+        if self.config.aw_tau_decay_epochs > 0:
+            aw_tau_decay_rate = (self.config.aw_tau_end / self.config.aw_tau_start) ** (
+                1.0 / self.config.aw_tau_decay_epochs
+            )
+        else:
+            aw_tau_decay_rate = 1.0
+
+        for epoch in range(1, self.config.num_epochs + 1):
+            current_tau = self.config.slot_tau_start * (
+                tau_decay_rate ** min(epoch - 1, self.config.slot_tau_decay_epochs)
+            )
+            current_aw_tau = self.config.aw_tau_start * (
+                aw_tau_decay_rate ** min(epoch - 1, self.config.aw_tau_decay_epochs)
+            )
+
+            if getattr(self.model, "match_network", None) and hasattr(self.model.match_network, "mlm_head"):
+                if hasattr(self.model.match_network.mlm_head, "temperature"):
+                    self.model.match_network.mlm_head.temperature = current_tau
+
+            if hasattr(train_dataset, "reshuffle_augmentations"):
+                train_dataset.reshuffle_augmentations()
+
+            self.model.train()
+            train_loss = 0.0
+            train_batches = 0
+
+            for batch_data in tqdm(train_loader, desc=f"Stage 2 Epoch {epoch}/{self.config.num_epochs} [Train]"):
+                x_batch, player_batch, y_batch = batch_data[:3]
+                patch_batch = batch_data[3] if len(batch_data) > 3 else None
+
+                x_batch = x_batch.to(self.device)
+                player_batch = player_batch.to(self.device)
+                if patch_batch is not None:
+                    patch_batch = patch_batch.to(self.device)
+
+                _, mlm_logits = self.model(x_batch, player_batch, patch_ids=patch_batch)
+
+                ntp_labels = x_batch[:, :, 2].long()
+                w_t = self._compute_advantage_weights(
+                    x_batch=x_batch,
+                    patch_batch=patch_batch,
+                    current_aw_tau=current_aw_tau,
+                )
+
+                mlm_loss = self._compute_weighted_mlm_loss(
+                    mlm_logits=mlm_logits,
+                    ntp_labels=ntp_labels,
+                    weights=w_t,
+                )
+
+                entropy_loss = self.model.get_entropy_loss()
+                collision_loss = self.model.get_collision_loss()
+                composition_loss = self.model.get_composition_loss()
+
+                total_loss = (
+                    1.0 * mlm_loss
+                    + entropy_loss
+                    + 0.05 * collision_loss
+                    + 0.10 * composition_loss
+                )
+
+                self.optimizer.zero_grad()
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+                self.optimizer.step()
+
+                train_loss += total_loss.item()
+                train_batches += 1
+
+            avg_train_loss = train_loss / max(train_batches, 1)
+            self.metrics.train_losses.append(avg_train_loss)
+
+            val_loss, val_metrics = self._validate(val_loader, condition_on_positive_advantage=True)
+            self.metrics.val_losses.append(val_loss)
+            self.metrics.val_accuracies.append(val_metrics["accuracy"])
+            self.metrics.val_auc_scores.append(val_metrics["roc_auc"])
+            self.metrics.val_mlm_accuracies.append(val_metrics["mlm_accuracy"])
+            self.metrics.val_mlm_top5_accuracies.append(val_metrics["mlm_top5_accuracy"])
+            self.metrics.val_brier_scores.append(val_metrics["brier_score"])
+
+            logger.info(
+                "Stage 2 Epoch %d/%d - Policy Loss: %.4f - Pos-Adv Top5: %.4f (P1: %.4f | P2: %.4f | P3: %.4f)",
+                epoch,
+                self.config.num_epochs,
+                avg_train_loss,
+                val_metrics["mlm_top5_accuracy"],
+                val_metrics["p1_top5_accuracy"],
+                val_metrics["p2_top5_accuracy"],
+                val_metrics["p3_top5_accuracy"],
+            )
+
+            current_score = val_metrics["mlm_top5_accuracy"]
+            is_better = current_score > self.metrics.best_mlm_top5_acc + self.config.min_delta
+
+            if current_score > self.metrics.best_mlm_top5_acc:
+                self.metrics.best_mlm_top5_acc = current_score
+
+            if is_better:
+                self.metrics.best_checkpoint_value = current_score
+                self.metrics.best_epoch = epoch
+                patience_counter = 0
+
+                best_state = {
+                    "model_state": self.model.state_dict(),
+                    "epoch": epoch,
+                    "val_loss": val_loss,
+                    "val_auc": val_metrics["roc_auc"],
+                    "mlm_top5_accuracy": current_score,
+                    "checkpoint_metric": "val_top5_acc",
+                    "checkpoint_value": current_score,
+                    "temperature": self.calibrated_temperature,
+                    "stage": 2,
+                }
+                torch.save(best_state, os.path.join(self.config.checkpoint_dir, "best_model.pt"))
+                torch.save(best_state, os.path.join(self.config.checkpoint_dir, "stage2_best_model.pt"))
+                logger.info("  [checkpoint] Saved best Stage 2 Policy Head at epoch %d (Top5=%.4f)", epoch, current_score)
+            else:
+                patience_counter += 1
+                if patience_counter >= self.config.patience:
+                    logger.info("Early stopping at epoch %d", epoch)
+                    break
+
+            self.scheduler.step()
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+
+        return self.metrics
+
     def train(
         self,
         x_drafts: list[torch.Tensor],
@@ -688,8 +1344,54 @@ class TransformerTrainer:
         dire_players: list[list[int]],
         player_comfort_map: dict[int, torch.Tensor] | None = None,
         patch_ids: list[torch.Tensor] | None = None,
+        x_pubs: list[torch.Tensor] | None = None,
+        y_pubs: list[torch.Tensor] | None = None,
+        patch_ids_pubs: list[torch.Tensor] | None = None,
+        stage1_checkpoint_path: str | Path | None = None,
     ) -> TrainingMetrics:
-        """Run the full training loop with label smoothing and augmentation.
+        """Run training pipeline. Dispatches to train_stage_1 or train_stage_2 if stage is configured."""
+        if self.config.stage == 1:
+            return self.train_stage_1(
+                x_drafts=x_drafts,
+                y_labels=y_labels,
+                radiant_players=radiant_players,
+                dire_players=dire_players,
+                player_comfort_map=player_comfort_map,
+                patch_ids=patch_ids,
+                x_pubs=x_pubs,
+                y_pubs=y_pubs,
+                patch_ids_pubs=patch_ids_pubs,
+            )
+        elif self.config.stage == 2:
+            return self.train_stage_2(
+                x_drafts=x_drafts,
+                y_labels=y_labels,
+                radiant_players=radiant_players,
+                dire_players=dire_players,
+                player_comfort_map=player_comfort_map,
+                patch_ids=patch_ids,
+                stage1_checkpoint_path=stage1_checkpoint_path,
+            )
+        else:
+            return self._train_joint(
+                x_drafts=x_drafts,
+                y_labels=y_labels,
+                radiant_players=radiant_players,
+                dire_players=dire_players,
+                player_comfort_map=player_comfort_map,
+                patch_ids=patch_ids,
+            )
+
+    def _train_joint(
+        self,
+        x_drafts: list[torch.Tensor],
+        y_labels: list[torch.Tensor],
+        radiant_players: list[list[int]],
+        dire_players: list[list[int]],
+        player_comfort_map: dict[int, torch.Tensor] | None = None,
+        patch_ids: list[torch.Tensor] | None = None,
+    ) -> TrainingMetrics:
+        """Run the full joint training loop with label smoothing and augmentation.
 
         Args:
             x_drafts: List of draft sequence tensors, each (24, 4).
@@ -975,7 +1677,11 @@ class TransformerTrainer:
 
         return self.metrics
 
-    def _validate(self, val_loader: DataLoader) -> tuple[float, dict[str, float]]:
+    def _validate(
+        self,
+        val_loader: DataLoader,
+        condition_on_positive_advantage: bool = False,
+    ) -> tuple[float, dict[str, float]]:
         """Run validation loop with original (unsmoothed) targets for metrics."""
         self.model.eval()
         val_loss = 0.0
@@ -1040,33 +1746,39 @@ class TransformerTrainer:
                 # NTP target labels: all 24 heroes (h_0 ... h_23)
                 ntp_labels = x_batch[:, :, 2].long()
                 valid_mask = ntp_labels != -1  # evaluates real picks/bans
+
+                if condition_on_positive_advantage or self.config.stage == 2:
+                    advantages = self._compute_signed_advantages(x_batch, patch_batch)
+                    eval_mask = valid_mask & (advantages > 0.0)
+                else:
+                    eval_mask = valid_mask
                 
-                if valid_mask.any():
+                if eval_mask.any():
                     # Compute Top-1 accuracy over valid steps
                     preds = mlm_logits.argmax(dim=-1)
-                    mlm_correct += (preds[valid_mask] == ntp_labels[valid_mask]).sum().item()
+                    mlm_correct += (preds[eval_mask] == ntp_labels[eval_mask]).sum().item()
                     
                     # Compute Top-5 accuracy over valid steps
                     top5_preds = mlm_logits.topk(k=5, dim=-1).indices
                     expanded_labels = ntp_labels.unsqueeze(-1)
                     
                     # Shape: (B, 24)
-                    hits_mask = (top5_preds == expanded_labels).any(dim=-1) & valid_mask
+                    hits_mask = (top5_preds == expanded_labels).any(dim=-1) & eval_mask
                     mlm_top5_correct += hits_mask.sum().item()
-                    mlm_total += valid_mask.sum().item()
+                    mlm_total += eval_mask.sum().item()
                     
                     # Separate hit counts and totals by draft phase
                     # Phase 1: Steps 0-7 (Flex/Meta)
                     p1_hits += hits_mask[:, :8].sum().item()
-                    p1_total += valid_mask[:, :8].sum().item()
+                    p1_total += eval_mask[:, :8].sum().item()
                     
                     # Phase 2: Steps 8-15 (Core Structure)
                     p2_hits += hits_mask[:, 8:16].sum().item()
-                    p2_total += valid_mask[:, 8:16].sum().item()
+                    p2_total += eval_mask[:, 8:16].sum().item()
                     
                     # Phase 3: Steps 16-23 (Counter/Last Picks)
                     p3_hits += hits_mask[:, 16:24].sum().item()
-                    p3_total += valid_mask[:, 16:24].sum().item()
+                    p3_total += eval_mask[:, 16:24].sum().item()
 
         avg_val_loss = val_loss / max(val_batches, 1)
         mlm_accuracy = (mlm_correct / mlm_total) if mlm_total > 0 else 0.0
@@ -1100,6 +1812,7 @@ class TransformerTrainer:
         checkpoint = {
             "model_state": self.model.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
+            "temperature": self.calibrated_temperature,
             "metrics": {
                 "train_losses": self.metrics.train_losses,
                 "val_losses": self.metrics.val_losses,
@@ -1130,6 +1843,13 @@ class TransformerTrainer:
         checkpoint = torch.load(path, weights_only=True)
         self.model.load_state_dict(checkpoint["model_state"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+
+        if "temperature" in checkpoint:
+            self.calibrated_temperature = float(checkpoint["temperature"])
+            self.metrics.calibrated_temperature = self.calibrated_temperature
+        elif "calibrated_temperature" in checkpoint:
+            self.calibrated_temperature = float(checkpoint["calibrated_temperature"])
+            self.metrics.calibrated_temperature = self.calibrated_temperature
 
         if "metrics" in checkpoint:
             m = checkpoint["metrics"]

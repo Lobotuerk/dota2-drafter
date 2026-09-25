@@ -3,6 +3,7 @@
 Includes tests for MLM, prefix training, permutations, and label smoothing.
 """
 
+import math
 import os
 import shutil
 
@@ -741,3 +742,294 @@ def test_brier_score_metric():
     probs = torch.sigmoid(predictions)
     expected = torch.nn.functional.mse_loss(probs, targets).item()
     assert abs(brier - expected) < 1e-6
+
+
+def test_aw_mlm_config_defaults():
+    """Test AW-MLM parameters have proper default values in TrainingConfig."""
+    config = TrainingConfig()
+    assert config.aw_tau_start == 0.15
+    assert config.aw_tau_end == 0.08
+    assert config.aw_tau_decay_epochs == 50
+    assert config.aw_clip_min == 0.1
+    assert config.aw_clip_max == 10.0
+
+
+def test_aw_mlm_advantage_weights_computation():
+    """Verify AW-MLM advantage weights computation, prefix rollout, and team signing."""
+    d_model = 32
+    num_heroes = 20
+    batch_size = 2
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    model = MatchNetwork(
+        d_model=d_model,
+        nhead=2,
+        num_layers=1,
+        dim_feedforward=64,
+        dropout=0.0,
+        num_heroes=num_heroes,
+        player_input_dim=10,
+        h_gnn=h_gnn,
+    )
+
+    config = TrainingConfig(
+        aw_tau_start=0.15,
+        aw_tau_end=0.08,
+        aw_clip_min=0.1,
+        aw_clip_max=10.0,
+        device="cpu",
+    )
+    trainer = TransformerTrainer(model=model, train_config=config)
+
+    x_batch = torch.zeros(batch_size, 24, 4)
+    for t in range(24):
+        x_batch[:, t, 0] = 1.0  # pick
+        x_batch[:, t, 1] = float(t % 2)  # alternate Radiant (0) and Dire (1)
+        x_batch[:, t, 2] = float((t % num_heroes) + 1)
+        x_batch[:, t, 3] = float(t)
+
+    # Compute advantage weights
+    w_t = trainer._compute_advantage_weights(
+        x_batch=x_batch,
+        patch_batch=None,
+        current_aw_tau=0.10,
+    )
+
+    # Verify shapes and bounds
+    assert w_t.shape == (batch_size, 24)
+    assert torch.all(w_t >= config.aw_clip_min)
+    assert torch.all(w_t <= config.aw_clip_max)
+    assert torch.all(torch.isfinite(w_t))
+
+
+def test_aw_mlm_clipping_bounds_and_attenuation():
+    """Verify that extreme advantages are clipped to aw_clip_min (0.1) and aw_clip_max (10.0)."""
+    d_model = 32
+    num_heroes = 20
+    batch_size = 1
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    model = MatchNetwork(
+        d_model=d_model,
+        nhead=2,
+        num_layers=1,
+        dim_feedforward=64,
+        dropout=0.0,
+        num_heroes=num_heroes,
+        player_input_dim=10,
+        h_gnn=h_gnn,
+    )
+
+    config = TrainingConfig(
+        aw_tau_start=0.10,
+        aw_clip_min=0.1,
+        aw_clip_max=10.0,
+        device="cpu",
+    )
+    trainer = TransformerTrainer(model=model, train_config=config)
+
+    # Mock set_transformer_head to output extreme values
+    # For prefix 0, say prob = 0.99 (extreme positive advantage from 0.5 prior)
+    # For prefix 1, say prob = 0.01 (extreme blunder)
+    class MockSetTransformerHead(torch.nn.Module):
+        def forward(self, hero_embeds, x_draft):
+            total = x_draft.size(0)
+            res = torch.zeros(total, device=x_draft.device)
+            for i in range(total):
+                if i % 2 == 0:
+                    res[i] = 100.0  # sigmoid ~ 1.0 -> positive delta
+                else:
+                    res[i] = -100.0  # sigmoid ~ 0.0 -> negative delta
+            return res
+
+    match_net = getattr(trainer.model, "match_network", trainer.model)
+    orig_head = match_net.set_transformer_head
+    match_net.set_transformer_head = MockSetTransformerHead()
+
+    try:
+        x_batch = torch.zeros(batch_size, 24, 4)
+        x_batch[:, :, 0] = 1.0
+        x_batch[:, :, 1] = 0.0  # Radiant
+        x_batch[:, :, 2] = 1.0
+
+        w_t = trainer._compute_advantage_weights(
+            x_batch=x_batch,
+            patch_batch=None,
+            current_aw_tau=0.10,
+        )
+
+        # Check bounds
+        assert w_t.min().item() >= 0.1 - 1e-5
+        assert w_t.max().item() <= 10.0 + 1e-5
+        # Check that blunder weights hit minimum bound (0.1, 90% attenuation)
+        assert w_t.min().item() == pytest.approx(0.1, abs=1e-3)
+        # Check that high advantage hits maximum bound (10.0)
+        assert w_t.max().item() == pytest.approx(10.0, abs=1e-3)
+    finally:
+        match_net.set_transformer_head = orig_head
+
+
+def test_aw_mlm_temperature_annealing_rate():
+    """Verify AW-MLM temperature annealing follows exponential decay schedule."""
+    config = TrainingConfig(
+        aw_tau_start=0.15,
+        aw_tau_end=0.08,
+        aw_tau_decay_epochs=50,
+    )
+    decay_rate = (config.aw_tau_end / config.aw_tau_start) ** (1.0 / config.aw_tau_decay_epochs)
+
+    # Epoch 1 (0 steps decay)
+    tau_1 = config.aw_tau_start * (decay_rate ** 0)
+    assert pytest.approx(tau_1, rel=1e-5) == 0.15
+
+    # Epoch 51 (50 steps decay)
+    tau_51 = config.aw_tau_start * (decay_rate ** 50)
+    assert pytest.approx(tau_51, rel=1e-5) == 0.08
+
+    # Beyond decay epochs (capped at aw_tau_decay_epochs)
+    tau_100 = config.aw_tau_start * (decay_rate ** min(100 - 1, config.aw_tau_decay_epochs))
+    assert pytest.approx(tau_100, rel=1e-5) == 0.08
+
+
+def test_aw_mlm_end_to_end_training_epoch(tmp_path):
+    """Test full training loop with AW-MLM loss objective and patch IDs."""
+    d_model = 32
+    num_heroes = 20
+    batch_size = 4
+    player_input_dim = 10
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    model = MatchNetwork(
+        d_model=d_model,
+        nhead=2,
+        num_layers=1,
+        dim_feedforward=64,
+        num_heroes=num_heroes,
+        player_input_dim=player_input_dim,
+        h_gnn=h_gnn,
+    )
+
+    ckpt_dir = tmp_path / "checkpoints_aw_mlm"
+    config = TrainingConfig(
+        learning_rate=1e-3,
+        num_epochs=2,
+        batch_size=batch_size,
+        device="cpu",
+        checkpoint_dir=str(ckpt_dir),
+        aw_tau_start=0.15,
+        aw_tau_end=0.08,
+        aw_tau_decay_epochs=2,
+        aw_clip_min=0.1,
+        aw_clip_max=10.0,
+    )
+
+    trainer = TransformerTrainer(model=model, train_config=config)
+
+    x_drafts = []
+    y_labels = []
+    radiant_players = []
+    dire_players = []
+    patch_ids = []
+
+    for i in range(8):
+        x = torch.zeros(24, 4)
+        for t in range(24):
+            x[t, 0] = 1.0
+            x[t, 1] = float(t % 2)
+            x[t, 2] = float((t % num_heroes) + 1)
+            x[t, 3] = float(t)
+        x_drafts.append(x)
+        y_labels.append(torch.tensor([1.0 if i < 4 else 0.0]))
+        radiant_players.append([1000 + i * 10 + j for j in range(5)])
+        dire_players.append([2000 + i * 10 + j for j in range(5)])
+        patch_ids.append(torch.tensor(i % 5))
+
+    metrics = trainer.train(
+        x_drafts=x_drafts,
+        y_labels=y_labels,
+        radiant_players=radiant_players,
+        dire_players=dire_players,
+        patch_ids=patch_ids,
+    )
+
+    assert len(metrics.train_losses) == 2
+    assert all(loss > 0 for loss in metrics.train_losses)
+    assert all(torch.isfinite(torch.tensor(loss)) for loss in metrics.train_losses)
+
+
+def test_aw_mlm_prefix_masking_and_signed_advantages():
+    """Verify prefix masking sets hero_idx to -1 for steps > t, and signs advantages."""
+    d_model = 32
+    num_heroes = 120
+    batch_size = 1
+    h_gnn = torch.randn(num_heroes + 1, d_model)
+
+    model = MatchNetwork(
+        d_model=d_model,
+        nhead=2,
+        num_layers=1,
+        dim_feedforward=64,
+        dropout=0.0,
+        num_heroes=num_heroes,
+        player_input_dim=10,
+        h_gnn=h_gnn,
+    )
+
+    trainer = TransformerTrainer(model=model)
+
+    captured_x_prefixes = []
+
+    class InspectSetTransformerHead(torch.nn.Module):
+        def forward(self, hero_embeds, x_draft):
+            captured_x_prefixes.append(x_draft.clone())
+            total = x_draft.size(0)
+            t_idx = torch.arange(total, device=x_draft.device).float()
+            probs = 0.5 + 0.01 * (t_idx + 1)
+            logits = torch.logit(probs)
+            return logits
+
+    match_net = getattr(trainer.model, "match_network", trainer.model)
+    orig_head = match_net.set_transformer_head
+    match_net.set_transformer_head = InspectSetTransformerHead()
+
+    try:
+        x_batch = torch.zeros(batch_size, 24, 4)
+        for t in range(24):
+            x_batch[0, t, 0] = 1.0  # pick
+            # Steps 0-11: Radiant (0.0), Steps 12-23: Dire (1.0)
+            x_batch[0, t, 1] = 0.0 if t < 12 else 1.0
+            x_batch[0, t, 2] = float(t + 1)
+            x_batch[0, t, 3] = float(t)
+
+        w_t = trainer._compute_advantage_weights(
+            x_batch=x_batch,
+            patch_batch=None,
+            current_aw_tau=0.10,
+        )
+
+        assert len(captured_x_prefixes) == 1
+        flat_prefixes = captured_x_prefixes[0]  # (24, 24, 4)
+        for t in range(24):
+            prefix_t = flat_prefixes[t]
+            # Steps <= t should retain hero index
+            for s in range(t + 1):
+                assert prefix_t[s, 2].item() == float(s + 1)
+            # Steps > t must have hero index == -1.0
+            for s in range(t + 1, 24):
+                assert prefix_t[s, 2].item() == -1.0
+
+        # Now verify team signing:
+        # delta_v is +0.01 for all steps
+        # For Radiant (steps 0..11): sign is +1 -> advantage = +0.01 -> w_t = exp(0.01 / 0.10)
+        # For Dire (steps 12..23): sign is -1 -> advantage = -0.01 -> w_t = exp(-0.01 / 0.10)
+        expected_rad_w = math.exp(0.01 / 0.10)
+        expected_dire_w = math.exp(-0.01 / 0.10)
+
+        for t in range(12):
+            assert w_t[0, t].item() == pytest.approx(expected_rad_w, rel=1e-3)
+        for t in range(12, 24):
+            assert w_t[0, t].item() == pytest.approx(expected_dire_w, rel=1e-3)
+    finally:
+        match_net.set_transformer_head = orig_head
+
+

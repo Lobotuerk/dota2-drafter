@@ -98,6 +98,11 @@ def test_model_and_training_config_defaults():
     assert config.training.learning_rate == 1e-4
     assert config.training.batch_size == 16
     assert config.training.checkpoint_metric == "val_auc"
+    assert config.training.aw_tau_start == 0.15
+    assert config.training.aw_tau_end == 0.08
+    assert config.training.aw_tau_decay_epochs == 50
+    assert config.training.aw_clip_min == 0.1
+    assert config.training.aw_clip_max == 10.0
 
 
 def test_load_model_and_training_from_file(tmp_path):
@@ -112,6 +117,11 @@ def test_load_model_and_training_from_file(tmp_path):
             "batch_size": 32,
             "skip_gram_lr": 0.02,
             "checkpoint_metric": "val_loss",
+            "aw_tau_start": 0.20,
+            "aw_tau_end": 0.05,
+            "aw_tau_decay_epochs": 30,
+            "aw_clip_min": 0.2,
+            "aw_clip_max": 8.0,
         }
     }
     config_file = tmp_path / "config.yaml"
@@ -126,4 +136,9 @@ def test_load_model_and_training_from_file(tmp_path):
     assert config.training.batch_size == 32
     assert config.training.skip_gram_lr == 0.02
     assert config.training.checkpoint_metric == "val_loss"
+    assert config.training.aw_tau_start == 0.20
+    assert config.training.aw_tau_end == 0.05
+    assert config.training.aw_tau_decay_epochs == 30
+    assert config.training.aw_clip_min == 0.2
+    assert config.training.aw_clip_max == 8.0
 

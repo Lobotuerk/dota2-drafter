@@ -119,6 +119,11 @@ def parse_args(config=None, args=None) -> argparse.Namespace:
         if config and hasattr(config.training, "checkpoint_metric")
         else "val_auc"
     )
+    aw_tau_start_default = config.training.aw_tau_start if config and hasattr(config.training, "aw_tau_start") else 0.15
+    aw_tau_end_default = config.training.aw_tau_end if config and hasattr(config.training, "aw_tau_end") else 0.08
+    aw_tau_decay_epochs_default = config.training.aw_tau_decay_epochs if config and hasattr(config.training, "aw_tau_decay_epochs") else 50
+    aw_clip_min_default = config.training.aw_clip_min if config and hasattr(config.training, "aw_clip_min") else 0.1
+    aw_clip_max_default = config.training.aw_clip_max if config and hasattr(config.training, "aw_clip_max") else 10.0
 
     parser.add_argument("--d_model", type=int, default=d_model_default, help=f"Transformer d_model (default: {d_model_default})")
     parser.add_argument("--nhead", type=int, default=nhead_default, help=f"Number of attention heads (default: {nhead_default})")
@@ -220,6 +225,36 @@ def parse_args(config=None, args=None) -> argparse.Namespace:
             f"Metric for checkpoint selection and early stopping: 'val_auc', 'val_top5_acc', "
             f"or 'val_loss' (default: '{checkpoint_metric_default}')"
         ),
+    )
+    parser.add_argument(
+        "--aw_tau_start",
+        type=float,
+        default=aw_tau_start_default,
+        help=f"Starting temperature for AW-MLM annealing (default: {aw_tau_start_default})",
+    )
+    parser.add_argument(
+        "--aw_tau_end",
+        type=float,
+        default=aw_tau_end_default,
+        help=f"Ending temperature for AW-MLM annealing (default: {aw_tau_end_default})",
+    )
+    parser.add_argument(
+        "--aw_tau_decay_epochs",
+        type=int,
+        default=aw_tau_decay_epochs_default,
+        help=f"Epochs to decay AW-MLM temperature over (default: {aw_tau_decay_epochs_default})",
+    )
+    parser.add_argument(
+        "--aw_clip_min",
+        type=float,
+        default=aw_clip_min_default,
+        help=f"Minimum clip weight for AW-MLM (default: {aw_clip_min_default})",
+    )
+    parser.add_argument(
+        "--aw_clip_max",
+        type=float,
+        default=aw_clip_max_default,
+        help=f"Maximum clip weight for AW-MLM (default: {aw_clip_max_default})",
     )
     return parser.parse_args(args)
 
@@ -429,6 +464,11 @@ def main() -> None:
             slot_tau_decay_epochs=args.slot_tau_decay_epochs,
             patience=args.patience,
             checkpoint_metric=args.checkpoint_metric,
+            aw_tau_start=args.aw_tau_start,
+            aw_tau_end=args.aw_tau_end,
+            aw_tau_decay_epochs=args.aw_tau_decay_epochs,
+            aw_clip_min=args.aw_clip_min,
+            aw_clip_max=args.aw_clip_max,
         )
 
         if args.wandb_project:

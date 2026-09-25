@@ -167,6 +167,11 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         default=5.0,
         help="Sample weight multiplier for draft games in Stage 1 fine-tuning (default: 5.0)",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose INFO logging during trials (default: False)",
+    )
     return parser.parse_args(args)
 
 
@@ -561,20 +566,28 @@ def make_objective(
                     raise optuna.exceptions.TrialPruned()
         finally:
             if use_wandb:
-                import wandb
-                wandb.finish()
+                try:
+                    import wandb
+                    wandb.finish()
+                except Exception:
+                    pass
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            import gc
+            gc.collect()
 
     return objective
 
 
 def main() -> None:
+    args = parse_args()
+
+    log_level = logging.INFO if args.verbose else logging.WARNING
     logging.basicConfig(
-        level=logging.WARNING, # Quiet down logger output during tuning
+        level=log_level,
         format="%(message)s",
         handlers=[RichHandler(rich_tracebacks=True)],
     )
-    
-    args = parse_args()
 
     data_dir = Path(args.data_dir)
     if not data_dir.exists():

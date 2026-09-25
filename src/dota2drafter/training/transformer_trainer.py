@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 import os
 import random
 import itertools
@@ -397,6 +398,12 @@ class PlayerComfortDataset(Dataset):
                 (4, 5),
             ]
 
+            # Calculate how many permutations to evaluate per match to maintain a sufficient
+            # pool for reshuffle_augmentations without allocating tens of millions of tensors.
+            # Each permutation yields 7 variants (1 full draft + 6 partial crops).
+            needed_variants = self.augment_limit * 2 if self.augment_limit > 0 else 448
+            needed_perms = min(64, max(1, math.ceil(needed_variants / 7)))
+
             for base_idx in range(len(x_drafts)):
                 x_draft = x_drafts[base_idx]
                 y = y_labels[base_idx]
@@ -409,6 +416,8 @@ class PlayerComfortDataset(Dataset):
                         x_draft, y, radiant, dire,
                         self.player_comfort_map, self.player_input_dim,
                     )
+                    if needed_perms < len(perm_samples):
+                        perm_samples = perm_samples[:needed_perms]
 
                     match_augmentations = []
                     for perm_idx in range(len(perm_samples)):
@@ -435,6 +444,8 @@ class PlayerComfortDataset(Dataset):
                         x_draft, y, radiant, dire,
                         self.player_comfort_map, self.player_input_dim,
                     )
+                    if needed_perms < len(perm_samples):
+                        perm_samples = perm_samples[:needed_perms]
 
                     match_augmentations = []
                     for perm_idx in range(len(perm_samples)):

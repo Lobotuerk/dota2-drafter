@@ -56,6 +56,8 @@ def train_embeddings(
     device: str | None = None,
     wilson_threshold: float = 0.50,
     gamma: float = 0.80,
+    include_pubs: bool = True,
+    pub_data_dir: str | Path | None = None,
 ) -> Path:
     """End-to-end embedding pre-training pipeline.
 
@@ -72,6 +74,10 @@ def train_embeddings(
         dgi_lr: Learning rate for DGI optimizer
         batch_size: Batch size for Skip-Gram DataLoader
         device: Device to train on (auto-detected if None)
+        wilson_threshold: Wilson score threshold for graph pruning
+        gamma: Decay factor per major patch
+        include_pubs: Whether to include high-MMR pub games (default: True)
+        pub_data_dir: Optional directory with pub games (default: data_dir)
 
     Returns:
         Path to the saved embedding weights
@@ -80,8 +86,12 @@ def train_embeddings(
     output_path = Path(output_file)
 
     # Step 1: Extract data
-    logger.info("Step 1: Extracting data from %s", data_dir)
-    batches = DataExtractor.load_batches(data_dir)
+    logger.info("Step 1: Extracting data from %s (include_pubs=%s)", data_dir, include_pubs)
+    batches = DataExtractor.load_batches(
+        data_dir,
+        include_pubs=include_pubs,
+        pub_data_dir=pub_data_dir,
+    )
 
     max_hero_idx = 0
     for batch in batches:

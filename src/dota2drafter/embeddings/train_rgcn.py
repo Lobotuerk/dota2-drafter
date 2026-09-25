@@ -132,6 +132,8 @@ def train_rgcn(
     num_layers: int = 2,
     wilson_threshold: float = 0.50,
     gamma: float = 0.80,
+    include_pubs: bool = True,
+    pub_data_dir: str | Path | None = None,
 ) -> Path:
     """Train the HeroRGCN model on the multi-relational hero graph.
 
@@ -152,6 +154,8 @@ def train_rgcn(
         num_layers: Number of RGCN layers (1-2 recommended).
         wilson_threshold: Wilson Score threshold for pruning edges (default 0.50).
         gamma: Decay factor per major patch (default 0.80).
+        include_pubs: Whether to include high-MMR pub games (default: True).
+        pub_data_dir: Optional directory with pub games (default: data_dir).
 
     Returns:
         Path to the saved RGCN model weights.
@@ -160,10 +164,23 @@ def train_rgcn(
     output_path = Path(output_file)
 
     # Step 1: Load data
-    logger.info("Step 1: Loading data from %s", data_dir)
-    extractor = DataExtractor(num_heroes=127)
-    batches = extractor.load_batches(data_dir)
+    logger.info("Step 1: Loading data from %s (include_pubs=%s)", data_dir, include_pubs)
+    batches = DataExtractor.load_batches(
+        data_dir,
+        include_pubs=include_pubs,
+        pub_data_dir=pub_data_dir,
+    )
 
+    max_hero_idx = 0
+    for batch in batches:
+        x_tensors = batch["x"]
+        if x_tensors.dim() == 3:
+            max_hero_idx = max(max_hero_idx, int(x_tensors[:, :, 2].max().item()))
+        else:
+            max_hero_idx = max(max_hero_idx, int(x_tensors[:, 2].max().item()))
+    max_hero_idx = max(max_hero_idx, 127)
+
+    extractor = DataExtractor(num_heroes=max_hero_idx)
     num_heroes = extractor._num_heroes
 
     # Step 2: Build and prune multi-relational graph

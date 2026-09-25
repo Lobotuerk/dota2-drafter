@@ -359,3 +359,75 @@ def test_cli_stage_arguments():
     assert args.draft_sample_weight == 5.0
     assert args.pub_epochs == 10
     assert args.stage1_checkpoint == "/tmp/stage1.pt"
+
+
+def test_stage1_phase1_weight_rollback(dummy_model, dummy_draft_data, tmp_path, monkeypatch):
+    """Verify that Stage 1 Phase 1 restores best pub weights before Phase 2 fine-tuning."""
+    x_drafts, y_labels, radiant_players, dire_players, patch_ids = dummy_draft_data
+
+    x_pubs = [x.clone() for x in x_drafts[:6]]
+    y_pubs = [y.clone() for y in y_labels[:6]]
+
+    config = TrainingConfig(
+        learning_rate=1e-3,
+        num_epochs=1,
+        pub_epochs=2,
+        batch_size=4,
+        device="cpu",
+        checkpoint_dir=str(tmp_path),
+        stage=1,
+    )
+    trainer = TransformerTrainer(model=dummy_model, train_config=config)
+
+    # Mock _validate_value: Epoch 1 -> Brier 0.10, Epoch 2 -> Brier 0.50 (worse)
+    call_count = 0
+    epoch1_weights = None
+    epoch2_weights = None
+
+    orig_validate_value = trainer._validate_value
+
+    def mock_validate_value(loader):
+        nonlocal call_count, epoch1_weights, epoch2_weights
+        call_count += 1
+        loss, metrics = orig_validate_value(loader)
+        if call_count == 1:
+            metrics["brier_score"] = 0.10
+            epoch1_weights = {k: v.clone() for k, v in trainer.model.state_dict().items()}
+        elif call_count == 2:
+            metrics["brier_score"] = 0.50
+            epoch2_weights = {k: v.clone() for k, v in trainer.model.state_dict().items()}
+        return loss, metrics
+
+    monkeypatch.setattr(trainer, "_validate_value", mock_validate_value)
+
+    load_calls = []
+    orig_load_state_dict = trainer.model.load_state_dict
+
+    def spy_load_state_dict(state_dict, strict=True):
+        load_calls.append({k: v.clone() for k, v in state_dict.items()})
+        return orig_load_state_dict(state_dict, strict=strict)
+
+    monkeypatch.setattr(trainer.model, "load_state_dict", spy_load_state_dict)
+
+    trainer.train_stage_1(
+        x_drafts=x_drafts,
+        y_labels=y_labels,
+        radiant_players=radiant_players,
+        dire_players=dire_players,
+        patch_ids=patch_ids,
+        x_pubs=x_pubs,
+        y_pubs=y_pubs,
+    )
+
+    assert epoch1_weights is not None
+    assert epoch2_weights is not None
+    assert len(load_calls) >= 1
+
+    # Verify that epoch 2 weights differed from epoch 1
+    has_diff = any(not torch.allclose(epoch1_weights[k], epoch2_weights[k]) for k in epoch1_weights)
+    assert has_diff, "Epoch 1 and Epoch 2 weights should differ after training steps"
+
+    # First load_state_dict call is Phase 1 rollback to best pub epoch (epoch 1)
+    phase1_restored = load_calls[0]
+    for k in epoch1_weights:
+        assert torch.allclose(phase1_restored[k], epoch1_weights[k]), f"Mismatch in {k} - rollback failed!"

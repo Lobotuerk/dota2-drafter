@@ -64,23 +64,54 @@ class DataExtractor:
         return (center - spread) / denominator
 
     @staticmethod
-    def load_batches(data_dir: str | Path) -> list[dict[str, Any]]:
-        """Load all .pt batch files from the data directory.
+    def load_batches(
+        data_dir: str | Path,
+        include_pubs: bool = True,
+        pub_data_dir: str | Path | None = None,
+    ) -> list[dict[str, Any]]:
+        """Load .pt match batch files from the data directory.
 
-        Returns a list of dicts with keys 'x', 'y', 'match_ids'.
+        Loads drafts_batch_*.pt files, and if include_pubs is True, also loads
+        games_batch_*.pt files from data_dir (or pub_data_dir if provided).
+
+        Returns a list of dicts with keys 'x', 'y', 'match_ids' (and optional 'patch_ids').
         """
         data_path = Path(data_dir)
-        batch_files = sorted(data_path.glob("drafts_batch_*.pt"))
+        draft_files = sorted(data_path.glob("drafts_batch_*.pt")) if data_path.exists() else []
 
-        if not batch_files:
+        pub_files: list[Path] = []
+        if include_pubs:
+            pub_paths = [data_path]
+            if pub_data_dir:
+                custom_pub_path = Path(pub_data_dir)
+                if custom_pub_path != data_path:
+                    pub_paths.append(custom_pub_path)
+
+            seen_pub_files: set[Path] = set()
+            for p_path in pub_paths:
+                if p_path.exists():
+                    for f in sorted(p_path.glob("games_batch_*.pt")):
+                        resolved = f.resolve()
+                        if resolved not in seen_pub_files:
+                            seen_pub_files.add(resolved)
+                            pub_files.append(f)
+
+        all_files = draft_files + pub_files
+        if not all_files:
             raise FileNotFoundError(f"No batch files found in {data_path}")
 
         batches: list[dict[str, Any]] = []
-        for batch_file in batch_files:
+        for batch_file in all_files:
             batch = torch.load(batch_file, weights_only=True)
             batches.append(batch)
             logger.debug("Loaded %s: %d matches", batch_file.name, batch["x"].shape[0])
 
+        logger.info(
+            "Loaded %d total batches (%d pro draft batches, %d high-MMR pub batches)",
+            len(batches),
+            len(draft_files),
+            len(pub_files),
+        )
         return batches
 
     def extract_skip_gram_pairs(

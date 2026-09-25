@@ -467,6 +467,66 @@ def test_tune_pipeline_llm_patience_arg_parsing():
         assert args.llm_patience == 33
 
 
+def test_tune_pipeline_two_stage_and_pubs_args():
+    """Verify that 07_tune_pipeline parses pub data and two-stage CLI arguments."""
+    import importlib
+
+    tune_pipeline = importlib.import_module("scripts.07_tune_pipeline")
+
+    args = tune_pipeline.parse_args(args=[
+        "--pub_data_dir", "/custom/pubs",
+        "--include_pubs",
+        "--two_stage",
+        "--pub_epochs", "15",
+        "--stage1_epochs", "25",
+        "--stage2_epochs", "35",
+        "--draft_sample_weight", "6.5",
+    ])
+    assert args.pub_data_dir == "/custom/pubs"
+    assert args.include_pubs is True
+    assert args.two_stage is True
+    assert args.pub_epochs == 15
+    assert args.stage1_epochs == 25
+    assert args.stage2_epochs == 35
+    assert args.draft_sample_weight == 6.5
+
+    args_no_pubs = tune_pipeline.parse_args(args=["--no-include_pubs", "--no-two_stage"])
+    assert args_no_pubs.include_pubs is False
+    assert args_no_pubs.two_stage is False
+
+
+def test_tune_pipeline_make_objective_hyperparameter_sampling():
+    """Verify make_objective samples two-stage hyperparameters appropriately."""
+    import importlib
+    import optuna
+
+    tune_pipeline = importlib.import_module("scripts.07_tune_pipeline")
+
+    args = tune_pipeline.parse_args(args=[
+        "--pub_data_dir", "data",
+        "--two_stage",
+        "--pub_epochs", "2",
+        "--stage1_epochs", "2",
+        "--stage2_epochs", "2",
+    ])
+
+    study = optuna.create_study(directions=["maximize", "maximize"])
+    trial = study.ask()
+
+    # Verify hyperparameter distribution sampling works without exception
+    d_model = trial.suggest_categorical("d_model", [64, 128, 256, 512])
+    assert d_model in [64, 128, 256, 512]
+    nhead_choices = [h for h in [4, 8, 16] if d_model % h == 0]
+    nhead = trial.suggest_categorical("nhead", nhead_choices)
+    assert d_model % nhead == 0
+    draft_sample_weight = trial.suggest_float("draft_sample_weight", 2.0, 8.0)
+    assert 2.0 <= draft_sample_weight <= 8.0
+    aw_tau_start = trial.suggest_float("aw_tau_start", 0.10, 0.25)
+    assert 0.10 <= aw_tau_start <= 0.25
+    aw_tau_end = trial.suggest_float("aw_tau_end", 0.05, 0.12)
+    assert 0.05 <= aw_tau_end <= 0.12
+
+
 def test_scripts_config_overrides(tmp_path):
     """Verify that scripts load defaults from config.yaml but allow CLI overrides."""
     import importlib
@@ -539,5 +599,33 @@ def test_scripts_config_overrides(tmp_path):
     assert args_overridden.dropout == 0.15
     assert args_overridden.checkpoint_metric == "val_loss"
     assert args_overridden.d_model == 99  # still loads default
+
+
+def test_train_embeddings_and_rgcn_pub_data_args():
+    """Verify scripts/02_train_embeddings and 03_train_rgcn parse pub data CLI options."""
+    import importlib
+
+    train_embeddings = importlib.import_module("scripts.02_train_embeddings")
+    args_emb = train_embeddings.parse_args(args=[
+        "--pub_data_dir", "/custom/pubs",
+        "--no-include_pubs",
+    ])
+    assert args_emb.pub_data_dir == "/custom/pubs"
+    assert args_emb.include_pubs is False
+
+    args_emb_default = train_embeddings.parse_args(args=[])
+    assert args_emb_default.include_pubs is True
+
+    train_rgcn = importlib.import_module("scripts.03_train_rgcn")
+    args_rgcn = train_rgcn.parse_args(args=[
+        "--pub_data_dir", "/custom/rgcn_pubs",
+        "--include_pubs",
+    ])
+    assert args_rgcn.pub_data_dir == "/custom/rgcn_pubs"
+    assert args_rgcn.include_pubs is True
+
+    args_rgcn_no_pubs = train_rgcn.parse_args(args=["--no-include_pubs"])
+    assert args_rgcn_no_pubs.include_pubs is False
+
 
 

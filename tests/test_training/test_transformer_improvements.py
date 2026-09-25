@@ -18,6 +18,8 @@ from dota2drafter.training.transformer_trainer import (
     TransformerTrainer,
     apply_prefix_truncation,
     augment_draft_permutations,
+    augment_pub_permutations,
+    is_pub_draft,
 )
 
 
@@ -156,6 +158,101 @@ def test_augment_draft_permutations():
         assert x_permuted.shape == (24, 4)
         assert player_comfort.shape == (10, player_input_dim)
         assert torch.equal(y, y_label)
+
+
+def test_is_pub_draft():
+    """Verify is_pub_draft accurately distinguishes Ranked All Pick from Captains Mode."""
+    # 1. Pub Draft: 5 Radiant picks, 5 Dire picks, 14 padding
+    pub_draft = torch.zeros(24, 4)
+    for s in range(5):
+        pub_draft[s] = torch.tensor([1.0, 0.0, float(s + 1), float(s)])
+    for s in range(5, 10):
+        pub_draft[s] = torch.tensor([1.0, 1.0, float(s + 1), float(s)])
+    for s in range(10, 24):
+        pub_draft[s] = torch.tensor([0.0, 0.0, -1.0, float(s)])
+
+    assert is_pub_draft(pub_draft) is True
+
+    # 2. CM Draft: slot 0 is a ban (hero >= 0, is_pick == 0.0)
+    cm_draft = pub_draft.clone()
+    cm_draft[0] = torch.tensor([0.0, 0.0, 10.0, 0.0])
+    assert is_pub_draft(cm_draft) is False
+
+
+def test_augment_pub_permutations():
+    """Verify augment_pub_permutations generates 64 valid intra-team pick permutations."""
+    player_input_dim = 10
+    pub_draft = torch.zeros(24, 4)
+    for s in range(5):
+        pub_draft[s] = torch.tensor([1.0, 0.0, float(s + 1), float(s)])
+    for s in range(5, 10):
+        pub_draft[s] = torch.tensor([1.0, 1.0, float(s + 1), float(s)])
+    for s in range(10, 24):
+        pub_draft[s] = torch.tensor([0.0, 0.0, -1.0, float(s)])
+
+    y_label = torch.tensor([1.0])
+    radiant_players = [1, 2, 3, 4, 5]
+    dire_players = [6, 7, 8, 9, 10]
+
+    samples = augment_pub_permutations(
+        x_draft=pub_draft,
+        y_label=y_label,
+        radiant_players=radiant_players,
+        dire_players=dire_players,
+        player_input_dim=player_input_dim,
+    )
+
+    assert len(samples) == 64
+
+    for x_perm, comfort, y in samples:
+        assert x_perm.shape == (24, 4)
+        assert comfort.shape == (10, player_input_dim)
+        assert torch.equal(y, y_label)
+
+        # Radiant picks are preserved in slots 0..4
+        assert torch.all(x_perm[0:5, 0] == 1.0)
+        assert torch.all(x_perm[0:5, 1] == 0.0)
+        assert torch.all(x_perm[0:5, 2] >= 1.0)
+        # Dire picks are preserved in slots 5..9
+        assert torch.all(x_perm[5:10, 0] == 1.0)
+        assert torch.all(x_perm[5:10, 1] == 1.0)
+        assert torch.all(x_perm[5:10, 2] >= 1.0)
+        # Padding slots 10..23 remain untouched
+        assert torch.all(x_perm[10:24, 2] == -1.0)
+        assert torch.all(x_perm[10:24, 0] == 0.0)
+
+
+def test_player_comfort_dataset_pub_augmentation():
+    """Verify PlayerComfortDataset correctly recognizes and augments pub drafts."""
+    pub_draft = torch.zeros(24, 4)
+    for s in range(5):
+        pub_draft[s] = torch.tensor([1.0, 0.0, float(s + 1), float(s)])
+    for s in range(5, 10):
+        pub_draft[s] = torch.tensor([1.0, 1.0, float(s + 1), float(s)])
+    for s in range(10, 24):
+        pub_draft[s] = torch.tensor([0.0, 0.0, -1.0, float(s)])
+
+    ds_pub = PlayerComfortDataset(
+        x_drafts=[pub_draft],
+        y_labels=[torch.tensor([1.0])],
+        radiant_players=[[1, 2, 3, 4, 5]],
+        dire_players=[[6, 7, 8, 9, 10]],
+        player_input_dim=10,
+        augment=True,
+    )
+    # 64 permutations * (1 full + 6 crops) = 448
+    assert len(ds_pub) == 448
+
+    # Test limited augmentation
+    ds_pub_limited = PlayerComfortDataset(
+        x_drafts=[pub_draft],
+        y_labels=[torch.tensor([1.0])],
+        radiant_players=[[1, 2, 3, 4, 5]],
+        dire_players=[[6, 7, 8, 9, 10]],
+        player_input_dim=10,
+        augment=15,
+    )
+    assert len(ds_pub_limited) == 15
 
 
 def test_player_comfort_dataset_augmentation():

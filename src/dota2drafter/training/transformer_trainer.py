@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import random
@@ -157,6 +158,108 @@ def augment_draft_permutations(
     return samples
 
 
+def is_pub_draft(x_draft: torch.Tensor) -> bool:
+    """Check if x_draft is in pub match format (no bans, picks in slots 0..9, padding in 10..23)."""
+    has_bans = ((x_draft[:, 0] == 0.0) & (x_draft[:, 2] >= 0.0)).any().item()
+    return not has_bans and (x_draft[0, 0] == 1.0).item()
+
+
+def augment_pub_permutations(
+    x_draft: torch.Tensor,
+    y_label: torch.Tensor,
+    radiant_players: list[int],
+    dire_players: list[int],
+    player_comfort_map: dict[int, torch.Tensor] | None = None,
+    player_input_dim: int = 127,
+) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Apply intra-team pick permutation augmentation for high-MMR pub matches.
+
+    Ranked All Pick matches have 5 Radiant picks in slots 0..4, 5 Dire picks
+    in slots 5..9, no bans, and padding in slots 10..23.
+    Generates 64 valid, distinct permutations of intra-team pick orders
+    while keeping slots 10..23 preserved as padding.
+
+    Args:
+        x_draft: Pub draft tensor of shape (24, 4).
+        y_label: Label tensor of shape (1,).
+        radiant_players: List of Radiant player account IDs.
+        dire_players: List of Dire player account IDs.
+        player_comfort_map: Optional mapping of account_id -> comfort tensor.
+        player_input_dim: Number of features per comfort vector.
+
+    Returns:
+        List of (x_draft, player_comfort, y) tuples including 64 permutation combinations.
+    """
+    comfort_map = player_comfort_map or {}
+
+    comfort_rows: list[torch.Tensor] = []
+    for account_id in radiant_players:
+        if account_id == 0:
+            comfort_rows.append(torch.zeros(player_input_dim))
+        elif account_id in comfort_map:
+            comfort_rows.append(comfort_map[account_id])
+        else:
+            comfort_rows.append(torch.zeros(player_input_dim))
+    for account_id in dire_players:
+        if account_id == 0:
+            comfort_rows.append(torch.zeros(player_input_dim))
+        elif account_id in comfort_map:
+            comfort_rows.append(comfort_map[account_id])
+        else:
+            comfort_rows.append(torch.zeros(player_input_dim))
+    player_comfort = torch.stack(comfort_rows)
+
+    # 8 distinct permutations for Radiant picks (indices 0..4)
+    # Covering intra-round swaps: round 1 (0, 1), round 2 (2, 3), and cross-round swaps
+    radiant_perms = [
+        [0, 1, 2, 3, 4],  # Identity
+        [1, 0, 2, 3, 4],  # Swap round 1
+        [0, 1, 3, 2, 4],  # Swap round 2
+        [1, 0, 3, 2, 4],  # Swap both round 1 and 2
+        [4, 1, 2, 3, 0],  # Swap first and last pick
+        [0, 4, 2, 3, 1],  # Swap second and last pick
+        [2, 3, 0, 1, 4],  # Swap round 1 and round 2 pairs
+        [3, 2, 1, 0, 4],  # Reverse first 4 picks
+    ]
+
+    # 8 distinct relative permutations for Dire picks (indices 5..9)
+    dire_perms = [
+        [5, 6, 7, 8, 9],  # Identity
+        [6, 5, 7, 8, 9],  # Swap round 1
+        [5, 6, 8, 7, 9],  # Swap round 2
+        [6, 5, 8, 7, 9],  # Swap both round 1 and 2
+        [9, 6, 7, 8, 5],  # Swap first and last pick
+        [5, 9, 7, 8, 6],  # Swap second and last pick
+        [7, 8, 5, 6, 9],  # Swap round 1 and round 2 pairs
+        [8, 7, 6, 5, 9],  # Reverse first 4 picks
+    ]
+
+    samples = []
+    # Cartesian product: 8 x 8 = 64 distinct permutation combinations
+    for r_perm, d_perm in itertools.product(radiant_perms, dire_perms):
+        x_permuted = x_draft.clone()
+        # Permute Radiant picks
+        x_permuted[0:5] = x_draft[r_perm].clone()
+        for s in range(5):
+            x_permuted[s, 3] = float(s)
+
+        # Permute Dire picks
+        x_permuted[5:10] = x_draft[d_perm].clone()
+        for s in range(5, 10):
+            x_permuted[s, 3] = float(s)
+
+        # Slots 10..23 remain untouched padding
+
+        # Permute player comfort rows correspondingly so players match their heroes
+        p_comfort_perm = player_comfort.clone()
+        p_comfort_perm[0:5] = player_comfort[r_perm].clone()
+        p_comfort_perm[5:10] = player_comfort[d_perm].clone()
+
+        samples.append((x_permuted, p_comfort_perm, y_label))
+
+    return samples
+
+
 @dataclass
 class TrainingConfig:
     """Configuration for the Transformer training loop."""
@@ -282,7 +385,18 @@ class PlayerComfortDataset(Dataset):
             for idx in range(len(x_drafts)):
                 self.samples.append(self._build_player_comfort_sample(idx))
         else:
-            truncation_points = [6, 8, 11, 17, 21, 23]
+            cm_truncation_points = [6, 8, 11, 17, 21, 23]
+            # Balanced crop stages for pub games: (num_radiant_picks, num_dire_picks)
+            # Simulating partial draft stages: 1v1, 2v2, 3v3, 4v4, 5v4, 4v5
+            pub_crop_stages = [
+                (1, 1),
+                (2, 2),
+                (3, 3),
+                (4, 4),
+                (5, 4),
+                (4, 5),
+            ]
+
             for base_idx in range(len(x_drafts)):
                 x_draft = x_drafts[base_idx]
                 y = y_labels[base_idx]
@@ -290,24 +404,50 @@ class PlayerComfortDataset(Dataset):
                 dire = dire_players[base_idx]
                 patch_id = self.patch_ids[base_idx] if self.patch_ids else torch.tensor(0, dtype=torch.long)
 
-                perm_samples = augment_draft_permutations(
-                    x_draft, y, radiant, dire,
-                    self.player_comfort_map, self.player_input_dim,
-                )
+                if is_pub_draft(x_draft):
+                    perm_samples = augment_pub_permutations(
+                        x_draft, y, radiant, dire,
+                        self.player_comfort_map, self.player_input_dim,
+                    )
 
-                match_augmentations = []
-                for perm_idx in range(len(perm_samples)):
-                    x_permuted, player_comfort, y_label = perm_samples[perm_idx]
+                    match_augmentations = []
+                    for perm_idx in range(len(perm_samples)):
+                        x_permuted, player_comfort, y_label = perm_samples[perm_idx]
+                        match_augmentations.append((x_permuted, player_comfort, y_label, patch_id))
 
-                    match_augmentations.append((x_permuted, player_comfort, y_label, patch_id))
+                        for n_r, n_d in pub_crop_stages:
+                            x_cropped = x_permuted.clone()
+                            # Mask remaining Radiant pick slots (n_r..4)
+                            for s in range(n_r, 5):
+                                x_cropped[s, 0] = 0.0
+                                x_cropped[s, 1] = 0.0
+                                x_cropped[s, 2] = -1.0
+                            # Mask remaining Dire pick slots (5+n_d..9)
+                            for s in range(5 + n_d, 10):
+                                x_cropped[s, 0] = 0.0
+                                x_cropped[s, 1] = 0.0
+                                x_cropped[s, 2] = -1.0
+                            match_augmentations.append((x_cropped, player_comfort, y_label, patch_id))
 
-                    for t in truncation_points:
-                        x_truncated = x_permuted.clone()
-                        x_truncated[t:, :] = 0.0
-                        x_truncated[t:, 2] = -1.0  # Assign explicit hero padding sentinel
-                        match_augmentations.append((x_truncated, player_comfort, y_label, patch_id))
-                
-                self.all_augmented_samples.append(match_augmentations)
+                    self.all_augmented_samples.append(match_augmentations)
+                else:
+                    perm_samples = augment_draft_permutations(
+                        x_draft, y, radiant, dire,
+                        self.player_comfort_map, self.player_input_dim,
+                    )
+
+                    match_augmentations = []
+                    for perm_idx in range(len(perm_samples)):
+                        x_permuted, player_comfort, y_label = perm_samples[perm_idx]
+                        match_augmentations.append((x_permuted, player_comfort, y_label, patch_id))
+
+                        for t in cm_truncation_points:
+                            x_truncated = x_permuted.clone()
+                            x_truncated[t:, :] = 0.0
+                            x_truncated[t:, 2] = -1.0  # Assign explicit hero padding sentinel
+                            match_augmentations.append((x_truncated, player_comfort, y_label, patch_id))
+
+                    self.all_augmented_samples.append(match_augmentations)
 
             self.reshuffle_augmentations()
 
@@ -829,8 +969,11 @@ class TransformerTrainer:
             logger.info("Stage 1 Phase 1: Pre-training Value Head on pub games (%d epochs)...", pub_epochs)
             patience_counter = 0
             best_pub_brier = float("inf")
+            best_pub_state = None
 
             for epoch in range(1, pub_epochs + 1):
+                if hasattr(pubs_loader.dataset, "reshuffle_augmentations"):
+                    pubs_loader.dataset.reshuffle_augmentations()
                 self.model.train()
                 train_loss = 0.0
                 train_batches = 0
@@ -868,11 +1011,19 @@ class TransformerTrainer:
                 if brier < best_pub_brier - self.config.min_delta:
                     best_pub_brier = brier
                     patience_counter = 0
+                    best_pub_state = copy.deepcopy(self.model.state_dict())
                 else:
                     patience_counter += 1
                     if patience_counter >= self.config.patience:
                         logger.info("Stage 1 Phase 1 early stopping at epoch %d", epoch)
                         break
+
+            if best_pub_state is not None:
+                self.model.load_state_dict(best_pub_state)
+                logger.info(
+                    "Restored best Stage 1 Phase 1 weights (Val Brier: %.4f) before Phase 2 fine-tuning.",
+                    best_pub_brier,
+                )
         else:
             logger.warning("No pub games DataLoader provided or empty; proceeding directly to draft games fine-tuning.")
 
@@ -888,6 +1039,8 @@ class TransformerTrainer:
         best_state = None
 
         for epoch in range(1, draft_epochs + 1):
+            if hasattr(drafts_loader.dataset, "reshuffle_augmentations"):
+                drafts_loader.dataset.reshuffle_augmentations()
             self.model.train()
             train_loss = 0.0
             train_batches = 0
@@ -1070,7 +1223,7 @@ class TransformerTrainer:
                 dire_players=[[0] * 5 for _ in range(num_pubs)],
                 player_comfort_map=None,
                 player_input_dim=player_input_dim,
-                augment=False,
+                augment=self.config.augment,
                 patch_ids=patch_ids_pubs,
             )
             pubs_loader = DataLoader(pubs_dataset, batch_size=self.config.batch_size, shuffle=True)

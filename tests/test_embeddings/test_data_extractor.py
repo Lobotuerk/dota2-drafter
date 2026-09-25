@@ -350,3 +350,46 @@ def test_threshold_pruning() -> None:
     # All remaining edges should have weight > 0.50
     if graph.edge_weight.shape[0] > 0:
         assert (graph.edge_weight > 0.50).all()
+
+
+def test_load_batches_with_pubs(tmp_path: Path) -> None:
+    """Verify load_batches loads both drafts_batch_*.pt and games_batch_*.pt."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    torch.save(
+        {"x": torch.zeros(5, 24, 4), "y": torch.zeros(5, 1), "match_ids": list(range(5))},
+        data_dir / "drafts_batch_0000.pt",
+    )
+    torch.save(
+        {"x": torch.zeros(8, 24, 4), "y": torch.zeros(8, 1), "match_ids": list(range(5, 13))},
+        data_dir / "games_batch_0000.pt",
+    )
+
+    batches = DataExtractor.load_batches(data_dir, include_pubs=True)
+    assert len(batches) == 2
+
+    # When include_pubs is False, only drafts_batch_*.pt are loaded
+    draft_only = DataExtractor.load_batches(data_dir, include_pubs=False)
+    assert len(draft_only) == 1
+    assert draft_only[0]["x"].shape[0] == 5
+
+
+def test_load_batches_custom_pub_dir(tmp_path: Path) -> None:
+    """Verify load_batches loads pubs from a separate pub_data_dir."""
+    draft_dir = tmp_path / "drafts"
+    draft_dir.mkdir()
+    pub_dir = tmp_path / "pubs"
+    pub_dir.mkdir()
+
+    torch.save(
+        {"x": torch.zeros(4, 24, 4), "y": torch.zeros(4, 1), "match_ids": [1, 2, 3, 4]},
+        draft_dir / "drafts_batch_0001.pt",
+    )
+    torch.save(
+        {"x": torch.zeros(6, 24, 4), "y": torch.zeros(6, 1), "match_ids": [5, 6, 7, 8, 9, 10]},
+        pub_dir / "games_batch_0001.pt",
+    )
+
+    batches = DataExtractor.load_batches(draft_dir, include_pubs=True, pub_data_dir=pub_dir)
+    assert len(batches) == 2

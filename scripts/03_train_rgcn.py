@@ -115,6 +115,23 @@ def parse_args(config=None, args=None) -> argparse.Namespace:
     parser.add_argument(
         "--num_heroes", type=int, default=127, help="Number of heroes (default: 127)"
     )
+    pub_data_dir_default = (
+        config.training.pub_data_dir
+        if config and hasattr(config.training, "pub_data_dir")
+        else "data"
+    )
+    parser.add_argument(
+        "--pub_data_dir",
+        type=str,
+        default=pub_data_dir_default,
+        help=f"Directory with high-MMR pub games (games_batch_*.pt) (default: {pub_data_dir_default})",
+    )
+    parser.add_argument(
+        "--include_pubs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether to include high-MMR pub games in RGCN graph training (default: True)",
+    )
     return parser.parse_args(args)
 
 
@@ -170,6 +187,8 @@ def main() -> None:
             num_layers=args.num_layers,
             wilson_threshold=args.wilson_threshold,
             gamma=args.gamma,
+            include_pubs=args.include_pubs,
+            pub_data_dir=args.pub_data_dir,
         )
         console.print(f"[bold green]Saved RGCN model to: {result}[/bold green]")
 
@@ -197,7 +216,11 @@ def main() -> None:
         # Build the hero graph and extract embeddings
         data_dir = Path(args.data_dir)
         extractor = DataExtractor(num_heroes=args.num_heroes)
-        batches = extractor.load_batches(data_dir)
+        batches = extractor.load_batches(
+            data_dir,
+            include_pubs=args.include_pubs,
+            pub_data_dir=args.pub_data_dir,
+        )
         hero_graph = extractor.build_pruned_hero_graph(
             batches,
             wilson_threshold=args.wilson_threshold,

@@ -38,8 +38,8 @@ state:
 
 # Graph construction settings
 graph:
-  wilson_threshold: 0.42 # Optuna best found
-  gamma: 0.72 # Optuna best found
+  wilson_threshold: 0.45 # Optuna best found
+  gamma: 0.73 # Optuna best found
 
 # Model architecture defaults
 model:
@@ -58,7 +58,7 @@ training:
   augment: 25 # Optuna best found
   batch_size: 128
   skip_gram_lr: 0.01
-  dgi_lr: 0.01
+  dgi_lr: 6.5e-3
   rgcn_lr: 0.0015
   checkpoint_metric: "val_auc"
   aw_tau_start: 0.15

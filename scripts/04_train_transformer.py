@@ -124,6 +124,17 @@ def parse_args(config=None, args=None) -> argparse.Namespace:
     aw_tau_decay_epochs_default = config.training.aw_tau_decay_epochs if config and hasattr(config.training, "aw_tau_decay_epochs") else 50
     aw_clip_min_default = config.training.aw_clip_min if config and hasattr(config.training, "aw_clip_min") else 0.1
     aw_clip_max_default = config.training.aw_clip_max if config and hasattr(config.training, "aw_clip_max") else 10.0
+    stage_default = config.training.stage if config and hasattr(config.training, "stage") else 1
+    draft_sample_weight_default = (
+        config.training.draft_sample_weight
+        if config and hasattr(config.training, "draft_sample_weight")
+        else 5.0
+    )
+    pub_data_dir_default = (
+        config.training.pub_data_dir
+        if config and hasattr(config.training, "pub_data_dir")
+        else "data"
+    )
 
     parser.add_argument("--d_model", type=int, default=d_model_default, help=f"Transformer d_model (default: {d_model_default})")
     parser.add_argument("--nhead", type=int, default=nhead_default, help=f"Number of attention heads (default: {nhead_default})")
@@ -142,6 +153,37 @@ def parse_args(config=None, args=None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--patience", type=int, default=25, help="Early stopping patience (default: 25)"
+    )
+    parser.add_argument(
+        "--stage",
+        type=int,
+        default=stage_default,
+        choices=[1, 2],
+        help=f"Two-stage pipeline stage: 1 for Value Head, 2 for Policy Head (default: {stage_default})",
+    )
+    parser.add_argument(
+        "--pub_data_dir",
+        type=str,
+        default=pub_data_dir_default,
+        help=f"Directory for high-MMR pub games batches (default: {pub_data_dir_default})",
+    )
+    parser.add_argument(
+        "--draft_sample_weight",
+        type=float,
+        default=draft_sample_weight_default,
+        help=f"Sample weight multiplier for draft games in Stage 1 fine-tuning (default: {draft_sample_weight_default})",
+    )
+    parser.add_argument(
+        "--pub_epochs",
+        type=int,
+        default=None,
+        help="Number of epochs for pub games pre-training in Stage 1 (default: num_epochs)",
+    )
+    parser.add_argument(
+        "--stage1_checkpoint",
+        type=str,
+        default=None,
+        help="Path to Stage 1 checkpoint for Stage 2 training (default: checkpoint_dir/stage1_best_model.pt)",
     )
     parser.add_argument(
         "--learning_rate", type=float, default=learning_rate_default, help=f"Learning rate (default: {learning_rate_default})"
@@ -303,6 +345,38 @@ def load_data(data_dir: str):
     return x_drafts, y_labels, radiant_players, dire_players, None
 
 
+def load_pub_data(data_dir: str):
+    """Load high-MMR pub match batches from the data directory (games_batch_*.pt)."""
+    x_pubs, y_pubs = [], []
+    patch_ids_list = []
+    data_path = Path(data_dir)
+
+    pub_files = sorted(data_path.glob("games_batch_*.pt"))
+    if not pub_files:
+        console.print(f"[bold yellow]Warning:[/bold yellow] No pub game batches (games_batch_*.pt) found in {data_dir}.")
+        return [], [], None
+
+    for pt_file in pub_files:
+        try:
+            batch = torch.load(pt_file, weights_only=True)
+        except Exception as e:
+            console.print(f"[bold yellow]Warning:[/bold yellow] Could not load {pt_file}: {e}, skipping.")
+            continue
+
+        for i in range(len(batch["x"])):
+            x_pubs.append(batch["x"][i])
+            y_pubs.append(batch["y"][i])
+            if "patch_ids" in batch:
+                patch_ids_list.append(
+                    batch["patch_ids"][i].item()
+                    if hasattr(batch["patch_ids"][i], "item")
+                    else batch["patch_ids"][i]
+                )
+
+    patch_ids = patch_ids_list if patch_ids_list else None
+    return x_pubs, y_pubs, patch_ids
+
+
 def load_h_gnn(
         rgcn_path: Path,
         frozen_embeddings_path: Path,
@@ -448,6 +522,17 @@ def main() -> None:
         else:
             augment_val = args.augment
 
+        # Load pub games for Stage 1 if requested
+        x_pubs, y_pubs, patch_ids_pubs = [], [], None
+        if args.stage == 1:
+            console.print(f"[bold blue]Loading high-MMR pub games from {args.pub_data_dir}...[/bold blue]")
+            x_pubs, y_pubs, patch_ids_pubs = load_pub_data(args.pub_data_dir)
+            if not x_pubs:
+                console.print(
+                    f"[bold yellow]Warning:[/bold yellow] No pub games found in {args.pub_data_dir}. "
+                    "Stage 1 will proceed directly to fine-tuning on draft games."
+                )
+
         config = TrainingConfig(
             learning_rate=args.learning_rate,
             lr_backbone=args.lr_backbone,
@@ -469,6 +554,11 @@ def main() -> None:
             aw_tau_decay_epochs=args.aw_tau_decay_epochs,
             aw_clip_min=args.aw_clip_min,
             aw_clip_max=args.aw_clip_max,
+            stage=args.stage,
+            draft_sample_weight=args.draft_sample_weight,
+            pub_data_dir=args.pub_data_dir,
+            pub_epochs=args.pub_epochs,
+            stage1_checkpoint_path=args.stage1_checkpoint,
         )
 
         if args.wandb_project:
@@ -478,9 +568,8 @@ def main() -> None:
             except ImportError:
                 console.print("[bold yellow]Warning:[/bold yellow] wandb package not found. Install it to log metrics.")
 
-        console.print("[bold blue]Training transformer model...[/bold blue]")
+        console.print(f"[bold blue]Training transformer model (Stage {args.stage})...[/bold blue]")
         trainer = TransformerTrainer(model, config)
-
 
         metrics = trainer.train(
             x_drafts=x_drafts,
@@ -489,6 +578,10 @@ def main() -> None:
             dire_players=dire_players,
             player_comfort_map=player_comfort_map,
             patch_ids=patch_ids,
+            x_pubs=x_pubs if args.stage == 1 else None,
+            y_pubs=y_pubs if args.stage == 1 else None,
+            patch_ids_pubs=patch_ids_pubs if args.stage == 1 else None,
+            stage1_checkpoint_path=args.stage1_checkpoint,
         )
 
         if args.wandb_project:

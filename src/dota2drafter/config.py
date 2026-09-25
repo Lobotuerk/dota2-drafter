@@ -76,6 +76,9 @@ class TrainingConfig:
     aw_tau_decay_epochs: int = 50
     aw_clip_min: float = 0.1
     aw_clip_max: float = 10.0
+    stage: int = 1
+    draft_sample_weight: float = 5.0
+    pub_data_dir: str = "data"
 
 
 @dataclass
@@ -181,6 +184,9 @@ def _load_training(data: dict[str, Any], config: PipelineConfig) -> TrainingConf
         aw_tau_decay_epochs=int(data.get("aw_tau_decay_epochs", config.training.aw_tau_decay_epochs)),
         aw_clip_min=float(data.get("aw_clip_min", config.training.aw_clip_min)),
         aw_clip_max=float(data.get("aw_clip_max", config.training.aw_clip_max)),
+        stage=int(data.get("stage", config.training.stage)),
+        draft_sample_weight=float(data.get("draft_sample_weight", config.training.draft_sample_weight)),
+        pub_data_dir=str(data.get("pub_data_dir", config.training.pub_data_dir)),
     )
 
 

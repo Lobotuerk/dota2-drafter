@@ -26,8 +26,8 @@ This specification outlines the decoupling of the `MatchNetwork` training into a
   - Utilize Advantage-Weighted Masked Language Modeling (AW-MLM) for the policy cross-entropy loss, using the frozen, calibrated Value Head to estimate step-wise advantage.
 - **Validation & Checkpointing:**
   - Redefine the validation tracking for top-5 match accuracy: it must be conditioned on positive advantage.
-  - Specifically, compute the estimated marginal advantage `V(s_t) - V(s_{t-1})` at each step inside `_validate()`.
-  - Only evaluate next-token prediction accuracy and top-5 accuracy on draft steps where this estimated advantage is strictly positive (> 0).
+  - Specifically, compute the signed marginal advantage `\delta_t = \sigma(t) \cdot (V(s_t) - V(s_{t-1}))` at each step inside `_validate()`, where `\sigma(t) = +1.0` for Radiant steps and `-1.0` for Dire steps.
+  - Only evaluate next-token prediction accuracy and top-5 accuracy on draft steps where this signed estimated advantage is strictly positive (`\delta_t > 0`).
   - Checkpointing criteria will converge on this positive-advantage-conditioned top-5 match accuracy.
 
 ## 3. Implementation Steps

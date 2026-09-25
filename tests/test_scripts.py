@@ -428,6 +428,31 @@ def test_train_transformer_patience_arg_parsing():
         assert args.patience == 12
 
 
+def test_train_transformer_aw_mlm_arg_parsing():
+    """Verify that 04_train_transformer parses AW-MLM parameters correctly."""
+    import importlib
+    import sys
+    from unittest.mock import patch
+
+    train_transformer = importlib.import_module("scripts.04_train_transformer")
+
+    test_args = [
+        "04_train_transformer.py",
+        "--aw_tau_start", "0.25",
+        "--aw_tau_end", "0.05",
+        "--aw_tau_decay_epochs", "40",
+        "--aw_clip_min", "0.2",
+        "--aw_clip_max", "8.0",
+    ]
+    with patch.object(sys, "argv", test_args):
+        args = train_transformer.parse_args()
+        assert args.aw_tau_start == 0.25
+        assert args.aw_tau_end == 0.05
+        assert args.aw_tau_decay_epochs == 40
+        assert args.aw_clip_min == 0.2
+        assert args.aw_clip_max == 8.0
+
+
 def test_tune_pipeline_llm_patience_arg_parsing():
     """Verify that 07_tune_pipeline parses --llm_patience correctly."""
     import importlib

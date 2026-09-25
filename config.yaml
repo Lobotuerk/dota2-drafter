@@ -61,3 +61,8 @@ training:
   dgi_lr: 0.01
   rgcn_lr: 0.0015
   checkpoint_metric: "val_auc"
+  aw_tau_start: 0.15
+  aw_tau_end: 0.08
+  aw_tau_decay_epochs: 50
+  aw_clip_min: 0.1
+  aw_clip_max: 10.0

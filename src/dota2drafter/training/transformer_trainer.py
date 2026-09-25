@@ -181,6 +181,13 @@ class TrainingConfig:
     slot_tau_decay_epochs: int = 100
     checkpoint_metric: str = "val_auc"
 
+    # AW-MLM Parameters
+    aw_tau_start: float = 0.15
+    aw_tau_end: float = 0.08
+    aw_tau_decay_epochs: int = 50
+    aw_clip_min: float = 0.1
+    aw_clip_max: float = 10.0
+
 
 @dataclass
 class TrainingMetrics:
@@ -523,6 +530,118 @@ class TransformerTrainer:
             self.optimizer, T_max=self.config.num_epochs
         )
 
+    @staticmethod
+    def _compute_weighted_mlm_loss(
+        mlm_logits: torch.Tensor,
+        ntp_labels: torch.Tensor,
+        weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute weighted cross-entropy loss for masked language modeling."""
+        ce_elements = torch.nn.functional.cross_entropy(
+            mlm_logits.transpose(1, 2),
+            ntp_labels,
+            ignore_index=-1,
+            reduction="none",
+            label_smoothing=0.0,
+        )
+        weighted_ce = ce_elements * weights
+        valid_elements = (ntp_labels != -1).sum().float()
+        return weighted_ce.sum() / torch.clamp(valid_elements, min=1.0)
+
+    def _compute_advantage_weights(
+        self,
+        x_batch: torch.Tensor,
+        patch_batch: torch.Tensor | None,
+        current_aw_tau: float,
+    ) -> torch.Tensor:
+        """Compute advantage weights for Advantage-Weighted Masked Language Modeling (AW-MLM).
+
+        Generates prefix slices of the draft, computes Radiant win probability for each prefix
+        via the frozen SetTransformerHead proxy, determines signed marginal advantages per step,
+        and applies temperature scaling and clipping.
+
+        Args:
+            x_batch: Draft tensor of shape (batch_size, seq_len, 4).
+            patch_batch: Optional patch indices of shape (batch_size,).
+            current_aw_tau: Current annealed temperature parameter tau.
+
+        Returns:
+            Tensor of advantage weights w_t with shape (batch_size, seq_len).
+        """
+        match_net = getattr(self.model, "match_network", self.model)
+        if not (hasattr(match_net, "joint_embedding") and hasattr(match_net, "set_transformer_head")):
+            return torch.ones(x_batch.size(0), x_batch.size(1), device=x_batch.device)
+
+        batch_size, seq_len, num_features = x_batch.shape
+
+        with torch.no_grad():
+            # 1. Expand x_batch to create prefix slices for each step t in [0, seq_len - 1]
+            x_prefixes = x_batch.unsqueeze(1).repeat(1, seq_len, 1, 1)
+
+            # 2. For each prefix step t, mask out subsequent steps (> t) by setting hero index to -1.0
+            t_idx = torch.arange(seq_len, device=x_batch.device).view(1, seq_len, 1)
+            s_idx = torch.arange(seq_len, device=x_batch.device).view(1, 1, seq_len)
+            mask_after_t = s_idx > t_idx
+
+            hero_col = x_prefixes[..., 2]
+            x_prefixes[..., 2] = torch.where(
+                mask_after_t,
+                torch.tensor(-1.0, device=x_batch.device),
+                hero_col,
+            )
+
+            # 3. Reshape to (batch_size * seq_len, seq_len, 4)
+            x_prefixes_flat = x_prefixes.view(batch_size * seq_len, seq_len, num_features)
+            prefix_hero_indices = x_prefixes_flat[:, :, 2]
+
+            # 4. Expand patch_ids if provided
+            patch_ids_expanded = (
+                patch_batch.repeat_interleave(seq_len)
+                if patch_batch is not None
+                else None
+            )
+
+            # 5. Pass through joint_embedding and frozen set_transformer_head
+            was_training = match_net.set_transformer_head.training
+            match_net.set_transformer_head.eval()
+            try:
+                pure_hero_embeds = match_net.joint_embedding.get_pure_hero_embeddings(
+                    prefix_hero_indices,
+                    patch_ids=patch_ids_expanded,
+                    for_value=True,
+                )
+                v_logits = match_net.set_transformer_head(pure_hero_embeds, x_prefixes_flat)
+            finally:
+                if was_training:
+                    match_net.set_transformer_head.train()
+
+            # 6. Apply sigmoid activation to get win probabilities V(s_t) for Radiant team
+            v_probs = torch.sigmoid(v_logits).view(batch_size, seq_len)
+
+            # 7. Compute marginal advantage V(s_t) - V(s_{t-1}) with prior V(s_{-1}) = 0.5
+            v_prev = torch.cat(
+                [torch.full((batch_size, 1), 0.5, device=x_batch.device), v_probs[:, :-1]],
+                dim=1,
+            )
+            delta_v = v_probs - v_prev
+
+            # 8. Sign advantage based on acting team:
+            # If Dire (1.0), multiply by -1 (Dire's advantage is decrease in Radiant's win probability)
+            acting_team = x_batch[:, :, 1]
+            team_sign = torch.where(acting_team == 1.0, -1.0, 1.0)
+            advantages = delta_v * team_sign
+
+            # 9. Temperature scaling and clipping
+            tau = max(current_aw_tau, 1e-6)
+            w_t = torch.exp(advantages / tau)
+            w_t = torch.clamp(
+                w_t,
+                min=self.config.aw_clip_min,
+                max=self.config.aw_clip_max,
+            )
+
+        return w_t
+
     def train(
         self,
         x_drafts: list[torch.Tensor],
@@ -625,10 +744,21 @@ class TransformerTrainer:
         else:
             tau_decay_rate = 1.0
 
+        # Calculate decay rate for AW-MLM temperature
+        if self.config.aw_tau_decay_epochs > 0:
+            aw_tau_decay_rate = (self.config.aw_tau_end / self.config.aw_tau_start) ** (
+                1.0 / self.config.aw_tau_decay_epochs
+            )
+        else:
+            aw_tau_decay_rate = 1.0
+
         for epoch in range(1, self.config.num_epochs + 1):
             # Anneal the temperature
             current_tau = self.config.slot_tau_start * (
                 tau_decay_rate ** min(epoch - 1, self.config.slot_tau_decay_epochs)
+            )
+            current_aw_tau = self.config.aw_tau_start * (
+                aw_tau_decay_rate ** min(epoch - 1, self.config.aw_tau_decay_epochs)
             )
             # Inject dynamic temperature into the MLM Head if present
             if getattr(self.model, "match_network", None) and hasattr(self.model.match_network, "mlm_head"):
@@ -674,24 +804,18 @@ class TransformerTrainer:
                 # NTP loss: targets are the true heroes at all sequence positions
                 ntp_labels = x_batch[:, :, 2].long()
                 
-                # Step-Weighted Cross Entropy:
-                # w_t = 0.5 + 1.0 * (t / 23) => 0.5 at Step 0, 1.5 at Last Pick
-                seq_len = mlm_logits.size(1)
-                t_idx = torch.arange(seq_len, device=self.device).float()
-                step_weights = 0.5 + 1.0 * (t_idx / max(1.0, float(seq_len - 1)))
-                
-                ce_elements = torch.nn.functional.cross_entropy(
-                    mlm_logits.transpose(1, 2), 
-                    ntp_labels, 
-                    ignore_index=-1,
-                    reduction="none",
-                    label_smoothing=0.0
+                # AW-MLM: Dynamically compute advantage weights
+                w_t = self._compute_advantage_weights(
+                    x_batch=x_batch,
+                    patch_batch=patch_batch,
+                    current_aw_tau=current_aw_tau,
                 )
                 
-                weighted_ce = ce_elements * step_weights.unsqueeze(0)
-                valid_elements = (ntp_labels != -1).sum().float()
-                
-                mlm_loss = weighted_ce.sum() / torch.clamp(valid_elements, min=1.0)
+                mlm_loss = self._compute_weighted_mlm_loss(
+                    mlm_logits=mlm_logits,
+                    ntp_labels=ntp_labels,
+                    weights=w_t,
+                )
                 
                 # Slot attention entropy regularization
                 entropy_loss = self.model.get_entropy_loss()

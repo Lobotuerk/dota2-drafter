@@ -71,6 +71,11 @@ class TrainingConfig:
     dgi_lr: float = 1e-2
     rgcn_lr: float = 1.5e-3
     checkpoint_metric: str = "val_auc"
+    aw_tau_start: float = 0.15
+    aw_tau_end: float = 0.08
+    aw_tau_decay_epochs: int = 50
+    aw_clip_min: float = 0.1
+    aw_clip_max: float = 10.0
 
 
 @dataclass
@@ -171,6 +176,11 @@ def _load_training(data: dict[str, Any], config: PipelineConfig) -> TrainingConf
         dgi_lr=data.get("dgi_lr", config.training.dgi_lr),
         rgcn_lr=data.get("rgcn_lr", config.training.rgcn_lr),
         checkpoint_metric=data.get("checkpoint_metric", config.training.checkpoint_metric),
+        aw_tau_start=float(data.get("aw_tau_start", config.training.aw_tau_start)),
+        aw_tau_end=float(data.get("aw_tau_end", config.training.aw_tau_end)),
+        aw_tau_decay_epochs=int(data.get("aw_tau_decay_epochs", config.training.aw_tau_decay_epochs)),
+        aw_clip_min=float(data.get("aw_clip_min", config.training.aw_clip_min)),
+        aw_clip_max=float(data.get("aw_clip_max", config.training.aw_clip_max)),
     )
 
 

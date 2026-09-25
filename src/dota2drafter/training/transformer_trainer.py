@@ -192,6 +192,7 @@ class TrainingMetrics:
     val_auc_scores: list[float] = field(default_factory=list)
     val_mlm_accuracies: list[float] = field(default_factory=list)
     val_mlm_top5_accuracies: list[float] = field(default_factory=list)
+    val_brier_scores: list[float] = field(default_factory=list)
     best_epoch: int = 0
     best_mlm_top5_acc: float = float("-inf")
     best_val_auc: float = float("-inf")
@@ -396,7 +397,7 @@ def compute_metrics(
         targets: Ground truth labels, shape (B,) or (B, 1).
 
     Returns:
-        Dictionary with 'accuracy', 'roc_auc', 'bce' keys.
+        Dictionary with 'accuracy', 'roc_auc', 'bce', 'brier_score' keys.
     """
     bce_loss = nn.functional.binary_cross_entropy_with_logits(predictions, targets).item()
 
@@ -407,7 +408,11 @@ def compute_metrics(
 
     auc = _compute_roc_auc(predictions, targets)
 
-    return {"bce": bce_loss, "accuracy": accuracy, "roc_auc": auc}
+    # Brier score: mean squared error between predicted probabilities and actual binary labels
+    probs = torch.sigmoid(predictions)
+    brier_score = F.mse_loss(probs, targets).item()
+
+    return {"bce": bce_loss, "accuracy": accuracy, "roc_auc": auc, "brier_score": brier_score}
 
 
 def _compute_roc_auc(predictions: torch.Tensor, targets: torch.Tensor) -> float:
@@ -718,6 +723,7 @@ class TransformerTrainer:
             self.metrics.val_auc_scores.append(val_metrics["roc_auc"])
             self.metrics.val_mlm_accuracies.append(val_metrics["mlm_accuracy"])
             self.metrics.val_mlm_top5_accuracies.append(val_metrics["mlm_top5_accuracy"])
+            self.metrics.val_brier_scores.append(val_metrics["brier_score"])
 
             logger.info(
                 "Epoch %d/%d - Train Loss: %.4f - Val Loss: %.4f - Val AUC: %.4f - Top5: %.4f (P1: %.4f | P2: %.4f | P3: %.4f)",
@@ -913,7 +919,7 @@ class TransformerTrainer:
             all_targets_tensor = torch.cat(all_targets)
             metrics = compute_metrics(all_preds_tensor, all_targets_tensor)
         else:
-            metrics = {"bce": 0.0, "accuracy": 0.0, "roc_auc": 0.5}
+            metrics = {"bce": 0.0, "accuracy": 0.0, "roc_auc": 0.5, "brier_score": 0.0}
             
         metrics["mlm_accuracy"] = mlm_accuracy
         metrics["mlm_top5_accuracy"] = mlm_top5_accuracy

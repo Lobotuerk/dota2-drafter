@@ -523,6 +523,24 @@ class TransformerTrainer:
             self.optimizer, T_max=self.config.num_epochs
         )
 
+    @staticmethod
+    def _compute_weighted_mlm_loss(
+        mlm_logits: torch.Tensor,
+        ntp_labels: torch.Tensor,
+        weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute weighted cross-entropy loss for masked language modeling."""
+        ce_elements = torch.nn.functional.cross_entropy(
+            mlm_logits.transpose(1, 2),
+            ntp_labels,
+            ignore_index=-1,
+            reduction="none",
+            label_smoothing=0.0,
+        )
+        weighted_ce = ce_elements * weights
+        valid_elements = (ntp_labels != -1).sum().float()
+        return weighted_ce.sum() / torch.clamp(valid_elements, min=1.0)
+
     def train(
         self,
         x_drafts: list[torch.Tensor],
@@ -680,18 +698,11 @@ class TransformerTrainer:
                 t_idx = torch.arange(seq_len, device=self.device).float()
                 step_weights = 0.5 + 1.0 * (t_idx / max(1.0, float(seq_len - 1)))
                 
-                ce_elements = torch.nn.functional.cross_entropy(
-                    mlm_logits.transpose(1, 2), 
-                    ntp_labels, 
-                    ignore_index=-1,
-                    reduction="none",
-                    label_smoothing=0.0
+                mlm_loss = self._compute_weighted_mlm_loss(
+                    mlm_logits=mlm_logits,
+                    ntp_labels=ntp_labels,
+                    weights=step_weights.unsqueeze(0),
                 )
-                
-                weighted_ce = ce_elements * step_weights.unsqueeze(0)
-                valid_elements = (ntp_labels != -1).sum().float()
-                
-                mlm_loss = weighted_ce.sum() / torch.clamp(valid_elements, min=1.0)
                 
                 # Slot attention entropy regularization
                 entropy_loss = self.model.get_entropy_loss()

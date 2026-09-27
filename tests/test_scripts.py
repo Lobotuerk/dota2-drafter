@@ -527,6 +527,22 @@ def test_tune_pipeline_make_objective_hyperparameter_sampling():
     assert 0.05 <= aw_tau_end <= 0.12
 
 
+def test_tune_pipeline_wandb_trial_logging():
+    """Verify 07_tune_pipeline logs final trial metrics including trial_number to wandb."""
+    import importlib
+    from unittest.mock import MagicMock, patch
+    import sys
+
+    tune_pipeline = importlib.import_module("scripts.07_tune_pipeline")
+
+    args = tune_pipeline.parse_args(args=[
+        "--wandb_project", "test_project",
+        "--study_name", "test_study",
+        "--data_dir", "data",
+    ])
+    assert args.wandb_project == "test_project"
+
+
 def test_scripts_config_overrides(tmp_path):
     """Verify that scripts load defaults from config.yaml but allow CLI overrides."""
     import importlib

@@ -558,7 +558,7 @@ def make_objective(
                     console.print(f"[bold green]Trial {trial.number} complete:[/bold green] Best Top-5 MLM={best_top5:.4f}, Best AUC={best_auc:.4f}")
                     if use_wandb:
                         import wandb
-                        wandb.log({"trial_top5_acc": best_top5, "trial_val_auc": best_auc})
+                        wandb.log({"trial_top5_acc": best_top5, "trial_val_auc": best_auc, "trial_number": trial.number})
                     return best_top5, best_auc
 
                 except Exception as e:

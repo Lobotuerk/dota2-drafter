@@ -17,6 +17,17 @@ try:
 except ImportError:
     wandb = None
 
+
+def _get_wandb():
+    global wandb
+    if wandb is None:
+        try:
+            import wandb as _w
+            wandb = _w
+        except ImportError:
+            pass
+    return wandb
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -976,6 +987,16 @@ class TransformerTrainer:
 
         # Phase 1: Pre-train on pub games
         pub_epochs = self.config.pub_epochs if self.config.pub_epochs is not None else self.config.num_epochs
+        wb = _get_wandb()
+        if wb is not None and wb.run is not None:
+            try:
+                wb.define_metric("stage1_pub_epoch")
+                wb.define_metric("stage1_pub/*", step_metric="stage1_pub_epoch")
+                wb.define_metric("stage1_draft_epoch")
+                wb.define_metric("stage1_draft/*", step_metric="stage1_draft_epoch")
+            except Exception:
+                pass
+
         if pubs_loader is not None and len(pubs_loader) > 0:
             logger.info("Stage 1 Phase 1: Pre-training Value Head on pub games (%d epochs)...", pub_epochs)
             patience_counter = 0
@@ -1018,6 +1039,19 @@ class TransformerTrainer:
                     "Stage 1 Pubs Epoch %d/%d - Train BCE: %.4f - Val BCE: %.4f - Val Brier: %.4f - Val AUC: %.4f",
                     epoch, pub_epochs, avg_train_loss, val_loss, brier, auc,
                 )
+
+                if wb is not None and wb.run is not None:
+                    wb.log(
+                        {
+                            "stage1_pub_epoch": epoch,
+                            "stage1_pub/epoch": epoch,
+                            "stage1_pub/train_loss": avg_train_loss,
+                            "stage1_pub/val_loss": val_loss,
+                            "stage1_pub/val_brier": brier,
+                            "stage1_pub/val_auc": auc,
+                            "stage1_pub/val_acc": val_metrics.get("accuracy", 0.0),
+                        }
+                    )
 
                 if brier < best_pub_brier - self.config.min_delta:
                     best_pub_brier = brier
@@ -1094,6 +1128,19 @@ class TransformerTrainer:
                 epoch, draft_epochs, avg_train_loss, val_loss, brier, auc,
             )
 
+            if wb is not None and wb.run is not None:
+                wb.log(
+                    {
+                        "stage1_draft_epoch": epoch,
+                        "stage1_draft/epoch": epoch,
+                        "stage1_draft/train_loss": avg_train_loss,
+                        "stage1_draft/val_loss": val_loss,
+                        "stage1_draft/val_brier": brier,
+                        "stage1_draft/val_auc": auc,
+                        "stage1_draft/val_acc": val_metrics.get("accuracy", 0.0),
+                    }
+                )
+
             is_better_brier = brier < best_brier - self.config.min_delta
             auc_acceptable = (auc >= self.metrics.best_val_auc - 0.05) if self.metrics.best_val_auc > float("-inf") else True
 
@@ -1129,6 +1176,15 @@ class TransformerTrainer:
 
         logger.info("Running post-hoc temperature calibration via L-BFGS...")
         calibrated_t = self.calibrate_temperature(val_loader)
+        if wb is not None and wb.run is not None:
+            wb.log(
+                {
+                    "stage1/calibrated_temperature": calibrated_t,
+                    "stage1/best_val_brier": self.metrics.best_brier_score,
+                    "stage1/best_val_auc": self.metrics.best_val_auc,
+                    "stage1/best_epoch": self.metrics.best_epoch,
+                }
+            )
 
         final_checkpoint_path = os.path.join(self.config.checkpoint_dir, "stage1_best_model.pt")
         final_state = {
@@ -1379,6 +1435,14 @@ class TransformerTrainer:
         else:
             aw_tau_decay_rate = 1.0
 
+        wb = _get_wandb()
+        if wb is not None and wb.run is not None:
+            try:
+                wb.define_metric("stage2_epoch")
+                wb.define_metric("stage2/*", step_metric="stage2_epoch")
+            except Exception:
+                pass
+
         for epoch in range(1, self.config.num_epochs + 1):
             current_tau = self.config.slot_tau_start * (
                 tau_decay_rate ** min(epoch - 1, self.config.slot_tau_decay_epochs)
@@ -1463,6 +1527,25 @@ class TransformerTrainer:
                 val_metrics["p3_top5_accuracy"],
             )
 
+            if wb is not None and wb.run is not None:
+                wb.log(
+                    {
+                        "stage2_epoch": epoch,
+                        "stage2/epoch": epoch,
+                        "stage2/train_loss": avg_train_loss,
+                        "stage2/val_loss": val_loss,
+                        "stage2/val_top5_acc": val_metrics["mlm_top5_accuracy"],
+                        "stage2/val_p1_top5_acc": val_metrics["p1_top5_accuracy"],
+                        "stage2/val_p2_top5_acc": val_metrics["p2_top5_accuracy"],
+                        "stage2/val_p3_top5_acc": val_metrics["p3_top5_accuracy"],
+                        "stage2/val_mlm_acc": val_metrics["mlm_accuracy"],
+                        "stage2/val_auc": val_metrics["roc_auc"],
+                        "stage2/val_brier": val_metrics["brier_score"],
+                        "stage2/val_acc": val_metrics["accuracy"],
+                        "stage2/aw_tau": current_aw_tau,
+                    }
+                )
+
             current_score = val_metrics["mlm_top5_accuracy"]
             is_better = current_score > self.metrics.best_mlm_top5_acc + self.config.min_delta
 
@@ -1497,6 +1580,14 @@ class TransformerTrainer:
             self.scheduler.step()
             if self.device.type == "cuda":
                 torch.cuda.empty_cache()
+
+        if wb is not None and wb.run is not None:
+            wb.log(
+                {
+                    "stage2/best_top5_acc": self.metrics.best_mlm_top5_acc,
+                    "stage2/best_epoch": self.metrics.best_epoch,
+                }
+            )
 
         return self.metrics
 
@@ -1766,8 +1857,9 @@ class TransformerTrainer:
                 val_metrics["p3_top5_accuracy"],
             )
 
-            if wandb is not None and wandb.run is not None:
-                wandb.log(
+            wb = _get_wandb()
+            if wb is not None and wb.run is not None:
+                wb.log(
                     {
                         "epoch": epoch,
                         "train_loss": avg_train_loss,

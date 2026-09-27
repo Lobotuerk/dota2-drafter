@@ -431,3 +431,141 @@ def test_stage1_phase1_weight_rollback(dummy_model, dummy_draft_data, tmp_path, 
     phase1_restored = load_calls[0]
     for k in epoch1_weights:
         assert torch.allclose(phase1_restored[k], epoch1_weights[k]), f"Mismatch in {k} - rollback failed!"
+
+
+def test_stage1_wandb_logging_both_phases(dummy_model, dummy_draft_data, tmp_path, monkeypatch):
+    """Verify WandB per-epoch logging across Stage 1 Part 1 (pubs) and Part 2 (drafts)."""
+    from unittest.mock import MagicMock
+    import dota2drafter.training.transformer_trainer as tt_mod
+
+    x_drafts, y_labels, radiant_players, dire_players, patch_ids = dummy_draft_data
+    x_pubs = [x.clone() for x in x_drafts[:4]]
+    y_pubs = [y.clone() for y in y_labels[:4]]
+
+    mock_wandb = MagicMock()
+    mock_wandb.run = MagicMock()
+    monkeypatch.setattr(tt_mod, "wandb", mock_wandb)
+
+    config = TrainingConfig(
+        learning_rate=1e-3,
+        num_epochs=2,
+        pub_epochs=2,
+        batch_size=4,
+        device="cpu",
+        checkpoint_dir=str(tmp_path),
+        stage=1,
+    )
+    trainer = TransformerTrainer(model=dummy_model, train_config=config)
+
+    trainer.train_stage_1(
+        x_drafts=x_drafts,
+        y_labels=y_labels,
+        radiant_players=radiant_players,
+        dire_players=dire_players,
+        patch_ids=patch_ids,
+        x_pubs=x_pubs,
+        y_pubs=y_pubs,
+    )
+
+    # Verify define_metric calls for step metrics
+    mock_wandb.define_metric.assert_any_call("stage1_pub_epoch")
+    mock_wandb.define_metric.assert_any_call("stage1_pub/*", step_metric="stage1_pub_epoch")
+    mock_wandb.define_metric.assert_any_call("stage1_draft_epoch")
+    mock_wandb.define_metric.assert_any_call("stage1_draft/*", step_metric="stage1_draft_epoch")
+
+    # Collect logged payloads
+    logged_payloads = [call[0][0] for call in mock_wandb.log.call_args_list]
+
+    # Verify Phase 1 (Pubs) epochs were logged
+    pub_epoch_logs = [p for p in logged_payloads if "stage1_pub_epoch" in p]
+    assert len(pub_epoch_logs) == 2
+    assert pub_epoch_logs[0]["stage1_pub_epoch"] == 1
+    assert pub_epoch_logs[1]["stage1_pub_epoch"] == 2
+    assert "stage1_pub/train_loss" in pub_epoch_logs[0]
+    assert "stage1_pub/val_brier" in pub_epoch_logs[0]
+    assert "stage1_pub/val_auc" in pub_epoch_logs[0]
+
+    # Verify Phase 2 (Drafts) epochs were logged
+    draft_epoch_logs = [p for p in logged_payloads if "stage1_draft_epoch" in p]
+    assert len(draft_epoch_logs) == 2
+    assert draft_epoch_logs[0]["stage1_draft_epoch"] == 1
+    assert draft_epoch_logs[1]["stage1_draft_epoch"] == 2
+    assert "stage1_draft/train_loss" in draft_epoch_logs[0]
+    assert "stage1_draft/val_brier" in draft_epoch_logs[0]
+    assert "stage1_draft/val_auc" in draft_epoch_logs[0]
+
+    # Verify post-calibration summary logged
+    calib_logs = [p for p in logged_payloads if "stage1/calibrated_temperature" in p]
+    assert len(calib_logs) == 1
+    assert "stage1/best_val_brier" in calib_logs[0]
+    assert "stage1/best_val_auc" in calib_logs[0]
+
+
+def test_stage2_wandb_logging(dummy_model, dummy_draft_data, tmp_path, monkeypatch):
+    """Verify WandB per-epoch logging during Stage 2 Policy Head training."""
+    from unittest.mock import MagicMock
+    import dota2drafter.training.transformer_trainer as tt_mod
+
+    x_drafts, y_labels, radiant_players, dire_players, patch_ids = dummy_draft_data
+
+    # Save a fake stage 1 checkpoint for stage 2 to load
+    s1_ckpt = tmp_path / "stage1_best_model.pt"
+    torch.save(
+        {
+            "model_state": dummy_model.state_dict(),
+            "epoch": 1,
+            "val_auc": 0.55,
+            "val_brier_score": 0.20,
+            "temperature": 1.0,
+            "calibrated_temperature": 1.0,
+            "stage": 1,
+        },
+        s1_ckpt,
+    )
+
+    mock_wandb = MagicMock()
+    mock_wandb.run = MagicMock()
+    monkeypatch.setattr(tt_mod, "wandb", mock_wandb)
+
+    config = TrainingConfig(
+        learning_rate=1e-3,
+        num_epochs=2,
+        batch_size=4,
+        device="cpu",
+        checkpoint_dir=str(tmp_path),
+        stage=2,
+        stage1_checkpoint_path=s1_ckpt,
+    )
+    trainer = TransformerTrainer(model=dummy_model, train_config=config)
+
+    trainer.train_stage_2(
+        x_drafts=x_drafts,
+        y_labels=y_labels,
+        radiant_players=radiant_players,
+        dire_players=dire_players,
+        patch_ids=patch_ids,
+        stage1_checkpoint_path=s1_ckpt,
+    )
+
+    # Verify define_metric call
+    mock_wandb.define_metric.assert_any_call("stage2_epoch")
+    mock_wandb.define_metric.assert_any_call("stage2/*", step_metric="stage2_epoch")
+
+    # Collect logged payloads
+    logged_payloads = [call[0][0] for call in mock_wandb.log.call_args_list]
+
+    # Verify Stage 2 epoch logs
+    stage2_epoch_logs = [p for p in logged_payloads if "stage2_epoch" in p]
+    assert len(stage2_epoch_logs) == 2
+    assert stage2_epoch_logs[0]["stage2_epoch"] == 1
+    assert stage2_epoch_logs[1]["stage2_epoch"] == 2
+    assert "stage2/train_loss" in stage2_epoch_logs[0]
+    assert "stage2/val_top5_acc" in stage2_epoch_logs[0]
+    assert "stage2/val_loss" in stage2_epoch_logs[0]
+    assert "stage2/aw_tau" in stage2_epoch_logs[0]
+
+    # Verify final stage 2 summary log
+    summary_logs = [p for p in logged_payloads if "stage2/best_top5_acc" in p]
+    assert len(summary_logs) == 1
+    assert "stage2/best_epoch" in summary_logs[0]
+

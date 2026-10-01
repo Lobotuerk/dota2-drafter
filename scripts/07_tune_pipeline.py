@@ -316,49 +316,49 @@ def make_objective(
     def objective(trial: optuna.Trial) -> tuple[float, float]:
         # --- 1. Sample Hyperparameters ---
         # Embedding Size (shared across embeddings, RGCN, and Transformer)
-        d_model = trial.suggest_categorical("d_model", [64, 128, 256])
+        # d_model = trial.suggest_categorical("d_model", [64, 128, 256])
+        d_model = 128 # Optuna
         
         # Ensure attention head count divides d_model neatly
-        nhead_choices = [4, 8]
+        nhead_choices = [8, 16, 32]
         nhead = trial.suggest_categorical("nhead", nhead_choices)
 
         # Feed-forward size for the transformer
-        dim_feedforward = trial.suggest_categorical("dim_feedforward", [1024, 2048])
+        dim_feedforward = trial.suggest_categorical("dim_feedforward", [512, 1024, 2048, 4096])
         
         # GNN and Transformer layers
         # num_layers_rgcn = trial.suggest_int("num_layers_rgcn", 1, 4, step=1)
         num_layers_rgcn = 3
-        num_layers_transformer = trial.suggest_int("num_layers_transformer", 7, 13, step=1)
+        num_layers_transformer = trial.suggest_int("num_layers_transformer", 6, 24, step=1)
         
         # Transformer-specific regularization and scheduling
         dropout = trial.suggest_float("dropout", 0.0, 0.3)
         learning_rate = trial.suggest_float("learning_rate", 5e-6, 5e-4, log=True)
-        lr_head = trial.suggest_float("lr_head", 1e-5, 1e-3, log=True)
-        lr_backbone = trial.suggest_float("lr_backbone", 1e-6, 1e-4, log=True)
-        label_smoothing_eps = trial.suggest_float("label_smoothing_eps", 0.0, 0.25)
+        lr_head = trial.suggest_float("lr_head", 1e-7, 1e-4, log=True)
+        lr_backbone = trial.suggest_float("lr_backbone", 1e-8, 1e-5, log=True)
 
         # Two-stage specific hyperparameters
         if args.two_stage:
-            draft_sample_weight = trial.suggest_float("draft_sample_weight", 2.0, 8.0)
-            aw_tau_start = trial.suggest_float("aw_tau_start", 0.10, 0.25)
-            aw_tau_end = trial.suggest_float("aw_tau_end", 0.05, 0.12)
+            draft_sample_weight = trial.suggest_float("draft_sample_weight", 2.0, 10.0)
+            aw_tau_start = trial.suggest_float("aw_tau_start", 0.10, 0.30)
+            aw_tau_end = trial.suggest_float("aw_tau_end", 0.01, 0.12)
         else:
             step_loss_gamma = trial.suggest_float("step_loss_gamma", 0.0, 1.5)
         
         # Graph building parameters
-        wilson_threshold = trial.suggest_float("wilson_threshold", 0.40, 0.60)
+        wilson_threshold = trial.suggest_float("wilson_threshold", 0.30, 0.60)
         gamma = trial.suggest_float("gamma", 0.60, 0.90)
 
-        # Augmentation settings: 0 (disabled), 5, 10
-        augment = trial.suggest_categorical("augment", [0, 5, 25])
+        # Augmentation settings:
+        augment = trial.suggest_categorical("augment", [0, 5, 10, 15, 20, 25, 30, 35, 40])
 
         # Batch size for the transformer training loader
-        batch_size = trial.suggest_categorical("batch_size", [64, 128])
+        batch_size = trial.suggest_categorical("batch_size", [64, 128, 256, 512])
 
         # Learning rates for the different pre-training stages
-        skip_gram_lr = trial.suggest_float("skip_gram_lr", 5e-4, 2e-2, log=True)
-        dgi_lr = trial.suggest_float("dgi_lr", 5e-4, 2e-2, log=True)
-        rgcn_lr = trial.suggest_float("rgcn_lr", 5e-5, 5e-3, log=True)
+        skip_gram_lr = trial.suggest_float("skip_gram_lr", 5e-4, 2e-1, log=True)
+        dgi_lr = trial.suggest_float("dgi_lr", 5e-5, 2e-2, log=True)
+        rgcn_lr = trial.suggest_float("rgcn_lr", 5e-7, 5.5e-3, log=True)
 
         console.print(f"\n[bold magenta]Starting Trial {trial.number}[/bold magenta]")
         console.print(f"Parameters: d_model={d_model}, dim_feedforward={dim_feedforward}, nhead={nhead}, rgcn_layers={num_layers_rgcn}, transformer_layers={num_layers_transformer}, augment={augment}, batch_size={batch_size}")
@@ -483,7 +483,6 @@ def make_objective(
                             batch_size=batch_size,
                             device=str(device),
                             checkpoint_dir=str(ckpt_dir),
-                            label_smoothing_eps=label_smoothing_eps,
                             augment=augment,
                             patience=args.llm_patience,
                             stage=1,
@@ -509,7 +508,6 @@ def make_objective(
                             batch_size=batch_size,
                             device=str(device),
                             checkpoint_dir=str(ckpt_dir),
-                            label_smoothing_eps=label_smoothing_eps,
                             augment=augment,
                             patience=args.llm_patience,
                             aw_tau_start=aw_tau_start,
@@ -544,7 +542,6 @@ def make_objective(
                             batch_size=batch_size,
                             device=str(device),
                             checkpoint_dir=str(ckpt_dir),
-                            label_smoothing_eps=label_smoothing_eps,
                             augment=augment,
                             patience=args.llm_patience,
                         )

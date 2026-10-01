@@ -30,7 +30,6 @@ Match Network and Transformer training parameters.
 | `checkpoint_dir` | `"./checkpoints"` | Directory for saving best model checkpoints |
 | `patience` | `10` | Early stopping patience |
 | `min_delta` | `1e-4` | Minimum change to qualify as an improvement |
-| `label_smoothing_eps` | `0.15` | Label smoothing epsilon value (configurable via CLI as `--label_smoothing_eps`) |
 
 ## TrainingMetrics
 

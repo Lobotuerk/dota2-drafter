@@ -111,7 +111,6 @@ def parse_args(config=None, args=None) -> argparse.Namespace:
     batch_size_default = config.training.batch_size if config else 16
     wilson_threshold_default = config.graph.wilson_threshold if config else 0.50
     gamma_default = config.graph.gamma if config else 0.80
-    label_smoothing_eps_default = config.training.label_smoothing_eps if config else 0.15
     step_loss_gamma_default = config.training.step_loss_gamma if config else 0.0
     augment_default = str(config.training.augment) if config else "false"
     checkpoint_metric_default = (
@@ -223,9 +222,6 @@ def parse_args(config=None, args=None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--gamma", type=float, default=gamma_default, help=f"Decay factor per major patch (default: {gamma_default})"
-    )
-    parser.add_argument(
-        "--label_smoothing_eps", type=float, default=label_smoothing_eps_default, help=f"Label smoothing epsilon value (default: {label_smoothing_eps_default})"
     )
     parser.add_argument(
         "--step_loss_gamma",
@@ -553,7 +549,6 @@ def main() -> None:
             batch_size=args.batch_size,
             device=str(device),
             checkpoint_dir=args.checkpoint_dir,
-            label_smoothing_eps=args.label_smoothing_eps,
             augment=augment_val,
             slot_tau_start=args.slot_tau_start,
             slot_tau_end=args.slot_tau_end,

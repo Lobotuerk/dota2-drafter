@@ -287,7 +287,6 @@ class TrainingConfig:
     checkpoint_dir: str = "./checkpoints"
     patience: int = 25
     min_delta: float = 1e-4
-    label_smoothing_eps: float = 0.15
     augment: int | str | bool = "false"
 
     # Temperature Annealing parameters for slot routing
@@ -624,9 +623,8 @@ class TransformerTrainer:
 
     Components:
     - DataLoader yielding (x_draft, player_matrices, y).
-    - Training loop with label smoothing support.
+    - Training loop with metrics tracking: Accuracy, ROC-AUC, BCE.
     - Validation loop evaluating performance on a hold-out set.
-    - Metrics tracking: Accuracy, ROC-AUC, BCE.
     - Checkpointing logic to save the best model weights per epoch.
     - MLM pre-training support.
     """
@@ -718,7 +716,6 @@ class TransformerTrainer:
             ntp_labels,
             ignore_index=-1,
             reduction="none",
-            label_smoothing=0.0,
         )
         weighted_ce = ce_elements * weights
         valid_elements = (ntp_labels != -1).sum().float()
@@ -1768,7 +1765,7 @@ class TransformerTrainer:
         player_comfort_map: dict[int, torch.Tensor] | None = None,
         patch_ids: list[torch.Tensor] | None = None,
     ) -> TrainingMetrics:
-        """Run the full joint training loop with label smoothing and augmentation.
+        """Run the full joint training loop with augmentation.
 
         Args:
             x_drafts: List of draft sequence tensors, each (24, 4).
@@ -1889,8 +1886,6 @@ class TransformerTrainer:
             train_loss = 0.0
             train_batches = 0
 
-            eps = self.config.label_smoothing_eps
-
             for batch_data in tqdm(train_loader, desc=f"Epoch {epoch}/{self.config.num_epochs} [Train]"):
                 x_batch, player_batch, y_batch = batch_data[:3]
                 patch_batch = batch_data[3] if len(batch_data) > 3 else None
@@ -1904,19 +1899,16 @@ class TransformerTrainer:
                 # Pass clean x_batch directly; HierarchicalTransformer right-shifts internally
                 logits, mlm_logits = self.model(x_batch, player_batch, patch_ids=patch_batch)
 
-                # Label smoothing for win probability loss
-                y_smoothed = y_batch * (1.0 - eps) + (eps / 2.0)
-
                 if self.config.step_loss_gamma > 0.0:
                     loss_elements = F.binary_cross_entropy_with_logits(
-                        logits, y_smoothed, reduction="none"
+                        logits, y_batch, reduction="none"
                     )
                     # t is the active draft length for each sample in the batch
                     t = torch.sum(torch.sum(torch.abs(x_batch), dim=-1) > 0, dim=-1).float()
                     weights = (t / 24.0) ** self.config.step_loss_gamma
                     loss = torch.mean(weights * loss_elements)
                 else:
-                    loss = self.criterion(logits, y_smoothed)
+                    loss = self.criterion(logits, y_batch)
                 
                 # NTP loss: targets are the true heroes at all sequence positions
                 ntp_labels = x_batch[:, :, 2].long()

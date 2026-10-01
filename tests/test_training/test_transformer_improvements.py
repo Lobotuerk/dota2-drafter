@@ -1,6 +1,6 @@
 """Unit and integration tests for the Transformer improvements.
 
-Includes tests for MLM, prefix training, permutations, and label smoothing.
+Includes tests for MLM, prefix training, and permutations.
 """
 
 import math
@@ -458,13 +458,13 @@ def test_checkpoint_metric_selection(tmp_path):
     assert "mlm_top5_accuracy" in saved_ckpt
 
 
-def test_label_smoothing_training():
-    """Test regular training with label smoothing executes successfully."""
+def test_joint_training_executes():
+    """Test regular joint training executes successfully."""
     d_model = 32
     num_heroes = 60
     batch_size = 4
     player_input_dim = 10
-    checkpoint_dir = "./checkpoints_smooth_test"
+    checkpoint_dir = "./checkpoints_joint_test"
 
     if os.path.exists(checkpoint_dir):
         shutil.rmtree(checkpoint_dir)
@@ -489,7 +489,6 @@ def test_label_smoothing_training():
         device="cpu",
         checkpoint_dir=checkpoint_dir,
         patience=5,
-        label_smoothing_eps=0.15,
         slot_tau_decay_epochs=0,
     )
 
@@ -630,12 +629,7 @@ def test_step_weighted_loss():
         h_gnn=h_gnn,
     )
 
-    # 1. Test standard loss (gamma = 0.0)
-    config_std = TrainingConfig(
-        step_loss_gamma=0.0,
-        device="cpu",
-    )
-
+    # 1. Test standard loss (unweighted vs step-weighted)
     # Create dummy batch:
     # Batch size = 2
     # Sample 0: Full draft (24 steps active)
@@ -655,11 +649,9 @@ def test_step_weighted_loss():
     y_batch = torch.tensor([1.0, 0.0])
 
     logits, mlm_logits = model(x_batch, player_batch)
-    eps = config_std.label_smoothing_eps
-    y_smoothed = y_batch * (1.0 - eps) + (eps / 2.0)
 
     # Calculate standard unweighted loss manually
-    loss_std_manual = F.binary_cross_entropy_with_logits(logits, y_smoothed, reduction="mean")
+    loss_std_manual = F.binary_cross_entropy_with_logits(logits, y_batch, reduction="mean")
 
     # Now calculate via trainer with step weighting (gamma = 1.0)
     config_weighted = TrainingConfig(
@@ -668,7 +660,7 @@ def test_step_weighted_loss():
     )
 
     # Calculate weighted loss manually
-    loss_elements = F.binary_cross_entropy_with_logits(logits, y_smoothed, reduction="none")
+    loss_elements = F.binary_cross_entropy_with_logits(logits, y_batch, reduction="none")
     # Sample 0 weight: (24/24)^1 = 1.0
     # Sample 1 weight: (6/24)^1 = 0.25
     expected_loss_weighted = torch.mean(
@@ -752,12 +744,11 @@ def test_ntp_loss_and_priors():
     # At position 1, the model should predict h_1 given h_0
     # etc.
     
-    # Calculate NTP loss manually with label smoothing
+    # Calculate NTP loss manually
     manual_loss = F.cross_entropy(
         mlm_logits.reshape(-1, mlm_logits.size(-1)),
         ntp_labels.reshape(-1),
         ignore_index=-1,
-        label_smoothing=0.10
     )
     
     # Verify loss is valid

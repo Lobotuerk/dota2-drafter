@@ -64,7 +64,6 @@ class ModelConfig:
 class TrainingConfig:
     learning_rate: float = 1e-4
     step_loss_gamma: float = 0.0
-    label_smoothing_eps: float = 0.15
     augment: int | str | bool = 0
     batch_size: int = 16
     skip_gram_lr: float = 1e-2
@@ -173,7 +172,6 @@ def _load_training(data: dict[str, Any], config: PipelineConfig) -> TrainingConf
     return TrainingConfig(
         learning_rate=data.get("learning_rate", config.training.learning_rate),
         step_loss_gamma=data.get("step_loss_gamma", config.training.step_loss_gamma),
-        label_smoothing_eps=data.get("label_smoothing_eps", config.training.label_smoothing_eps),
         augment=data.get("augment", config.training.augment),
         batch_size=data.get("batch_size", config.training.batch_size),
         skip_gram_lr=data.get("skip_gram_lr", config.training.skip_gram_lr),

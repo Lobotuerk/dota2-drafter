@@ -52,7 +52,7 @@ The Transformer is trained using a parallel dual-objective setup to combat Task 
 ### 3.1. The Value Head (Win-Probability)
 * **Goal:** Predict the final outcome of the match.
 * **Mechanism:** Uses a **SetTransformerHead** that operates over the set of drafted heroes. The head first groups Radiant and Dire picks independently, processing each set through Set Attention Blocks (SAB) and Pooling by Multihead Attention (PMA) to produce order-invariant set representations. It then performs explicit cross-attention between the Radiant and Dire sets (`r2d_attn`, `d2r_attn`) to model compositional synergies and antagonist counters — capturing, for example, how a specific Radiant lineup counters a particular Dire composition. The concatenated cross-attended representation is routed through a final MLP to output a sigmoid scalar predicting the Radiant Win Probability.
-* **Optimization:** Evaluated using `BCEWithLogitsLoss`, combined with aggressive label smoothing (`eps=0.15`) and heavy weight decay (`0.1`) to prevent memorization of a noisy, high-variance dataset.
+* **Optimization:** Evaluated using `BCEWithLogitsLoss`, combined with heavy weight decay (`0.1`) to prevent memorization of a noisy, high-variance dataset.
 
 ### 3.2. The Policy Head (Masked Language Modeling)
 * **Goal:** Predict what a professional team is most likely to do at a given step.

@@ -38,34 +38,35 @@ state:
 
 # Graph construction settings
 graph:
-  wilson_threshold: 0.45 # Optuna best found
-  gamma: 0.73 # Optuna best found
+  wilson_threshold: 0.48 # Optuna best found
+  gamma: 0.75 # Optuna best found
 
 # Model architecture defaults
 model:
-  d_model: 128
-  nhead: 4
+  d_model: 128 # Optuna best found
+  nhead: 8 # Optuna best found
   dim_feedforward: 2048 # Optuna best found
   num_layers_rgcn: 3
-  num_layers_transformer: 13
-  dropout: 0.1
+  num_layers_transformer: 7
+  dropout: 0.18
 
 # Training configuration defaults
 training:
-  learning_rate: 0.0001
+  learning_rate: 5.6e-05
   step_loss_gamma: 0.23
   label_smoothing_eps: 0.2
   augment: 25 # Optuna best found
   batch_size: 128
-  skip_gram_lr: 0.01
+  skip_gram_lr: 0.0195
   dgi_lr: 6.5e-3
-  rgcn_lr: 0.0015
+  rgcn_lr: 0.00011
   checkpoint_metric: "val_auc"
-  aw_tau_start: 0.15
-  aw_tau_end: 0.08
+  aw_tau_start: 0.23
+  aw_tau_end: 0.1
   aw_tau_decay_epochs: 50
   aw_clip_min: 0.1
   aw_clip_max: 10.0
   stage: 1
   draft_sample_weight: 5.0
   pub_data_dir: "./data"
+  pub_patience: 5

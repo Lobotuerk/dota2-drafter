@@ -150,6 +150,12 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Number of epochs for pub games pre-training in Stage 1 (default: 10)",
     )
     parser.add_argument(
+        "--pub_patience",
+        type=int,
+        default=5,
+        help="Early stopping patience for pub games pre-training in Stage 1 (default: 5)",
+    )
+    parser.add_argument(
         "--stage1_epochs",
         type=int,
         default=None,
@@ -472,6 +478,7 @@ def make_objective(
                             lr_backbone=lr_backbone,
                             num_epochs=stage1_epochs,
                             pub_epochs=args.pub_epochs,
+                            pub_patience=args.pub_patience,
                             draft_sample_weight=draft_sample_weight,
                             batch_size=batch_size,
                             device=str(device),

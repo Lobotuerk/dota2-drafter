@@ -478,6 +478,7 @@ def test_tune_pipeline_two_stage_and_pubs_args():
         "--include_pubs",
         "--two_stage",
         "--pub_epochs", "15",
+        "--pub_patience", "7",
         "--stage1_epochs", "25",
         "--stage2_epochs", "35",
         "--draft_sample_weight", "6.5",
@@ -486,6 +487,7 @@ def test_tune_pipeline_two_stage_and_pubs_args():
     assert args.include_pubs is True
     assert args.two_stage is True
     assert args.pub_epochs == 15
+    assert args.pub_patience == 7
     assert args.stage1_epochs == 25
     assert args.stage2_epochs == 35
     assert args.draft_sample_weight == 6.5

@@ -135,6 +135,11 @@ def parse_args(config=None, args=None) -> argparse.Namespace:
         if config and hasattr(config.training, "pub_data_dir")
         else "data"
     )
+    pub_patience_default = (
+        config.training.pub_patience
+        if config and hasattr(config.training, "pub_patience")
+        else 5
+    )
 
     parser.add_argument("--d_model", type=int, default=d_model_default, help=f"Transformer d_model (default: {d_model_default})")
     parser.add_argument("--nhead", type=int, default=nhead_default, help=f"Number of attention heads (default: {nhead_default})")
@@ -178,6 +183,12 @@ def parse_args(config=None, args=None) -> argparse.Namespace:
         type=int,
         default=None,
         help="Number of epochs for pub games pre-training in Stage 1 (default: num_epochs)",
+    )
+    parser.add_argument(
+        "--pub_patience",
+        type=int,
+        default=pub_patience_default,
+        help=f"Early stopping patience for pub games pre-training in Stage 1 (default: {pub_patience_default})",
     )
     parser.add_argument(
         "--stage1_checkpoint",
@@ -558,6 +569,7 @@ def main() -> None:
             draft_sample_weight=args.draft_sample_weight,
             pub_data_dir=args.pub_data_dir,
             pub_epochs=args.pub_epochs,
+            pub_patience=args.pub_patience,
             stage1_checkpoint_path=args.stage1_checkpoint,
         )
 

@@ -101,6 +101,7 @@ def test_model_and_training_config_defaults():
     assert config.training.stage == 1
     assert config.training.draft_sample_weight == 5.0
     assert config.training.pub_data_dir == "data"
+    assert config.training.pub_patience == 5
     assert config.training.aw_tau_start == 0.15
     assert config.training.aw_tau_end == 0.08
     assert config.training.aw_tau_decay_epochs == 50
@@ -128,6 +129,7 @@ def test_load_model_and_training_from_file(tmp_path):
             "stage": 2,
             "draft_sample_weight": 5.0,
             "pub_data_dir": "custom_pub_data",
+            "pub_patience": 3,
         }
     }
     config_file = tmp_path / "config.yaml"
@@ -150,4 +152,5 @@ def test_load_model_and_training_from_file(tmp_path):
     assert config.training.stage == 2
     assert config.training.draft_sample_weight == 5.0
     assert config.training.pub_data_dir == "custom_pub_data"
+    assert config.training.pub_patience == 3
 

@@ -308,6 +308,7 @@ class TrainingConfig:
     draft_sample_weight: float = 5.0
     pub_data_dir: str = "data"
     pub_epochs: int | None = None
+    pub_patience: int | None = None
     stage1_checkpoint_path: str | Path | None = None
 
 
@@ -322,6 +323,9 @@ class TrainingMetrics:
     val_mlm_accuracies: list[float] = field(default_factory=list)
     val_mlm_top5_accuracies: list[float] = field(default_factory=list)
     val_brier_scores: list[float] = field(default_factory=list)
+    val_p1_brier_scores: list[float] = field(default_factory=list)
+    val_p2_brier_scores: list[float] = field(default_factory=list)
+    val_p3_brier_scores: list[float] = field(default_factory=list)
     best_epoch: int = 0
     best_mlm_top5_acc: float = float("-inf")
     best_val_auc: float = float("-inf")
@@ -852,12 +856,22 @@ class TransformerTrainer:
         return w_t
 
     def _validate_value(self, val_loader: DataLoader) -> tuple[float, dict[str, float]]:
-        """Validate the Value Head on hold-out dataset tracking BCE, ROC-AUC, and Brier Score."""
+        """Validate the Value Head on hold-out dataset tracking BCE, ROC-AUC, and full/partial Brier Scores."""
         self.model.eval()
         val_loss = 0.0
         all_preds: list[torch.Tensor] = []
         all_targets: list[torch.Tensor] = []
         val_batches = 0
+
+        p1_brier_sum = 0.0
+        p1_total = 0
+        p2_brier_sum = 0.0
+        p2_total = 0
+        p3_brier_sum = 0.0
+        p3_total = 0
+
+        match_net = getattr(self.model, "match_network", self.model)
+        has_value_head = hasattr(match_net, "joint_embedding") and hasattr(match_net, "set_transformer_head")
 
         with torch.no_grad():
             for batch_data in val_loader:
@@ -877,6 +891,74 @@ class TransformerTrainer:
                 all_targets.append(y_batch.cpu())
                 val_batches += 1
 
+                if has_value_head:
+                    batch_size, seq_len, num_features = x_batch.shape
+
+                    # 1. Expand x_batch to create prefix slices for each step t in [0, seq_len - 1]
+                    x_prefixes = x_batch.unsqueeze(1).repeat(1, seq_len, 1, 1)
+
+                    # 2. For each prefix step t, mask out subsequent steps (> t) by setting hero index to -1.0
+                    t_idx = torch.arange(seq_len, device=x_batch.device).view(1, seq_len, 1)
+                    s_idx = torch.arange(seq_len, device=x_batch.device).view(1, 1, seq_len)
+                    mask_after_t = s_idx > t_idx
+
+                    hero_col = x_prefixes[..., 2]
+                    x_prefixes[..., 2] = torch.where(
+                        mask_after_t,
+                        torch.tensor(-1.0, device=x_batch.device),
+                        hero_col,
+                    )
+
+                    x_prefixes_flat = x_prefixes.view(batch_size * seq_len, seq_len, num_features)
+                    patch_ids_expanded = (
+                        patch_batch.repeat_interleave(seq_len)
+                        if patch_batch is not None
+                        else None
+                    )
+
+                    # Chunk forward pass to prevent OOM
+                    total_prefixes = batch_size * seq_len
+                    chunk_size = 512
+                    all_prefix_logits = []
+                    for start_idx in range(0, total_prefixes, chunk_size):
+                        end_idx = min(start_idx + chunk_size, total_prefixes)
+                        chunk_x = x_prefixes_flat[start_idx:end_idx]
+                        chunk_patch = (
+                            patch_ids_expanded[start_idx:end_idx]
+                            if patch_ids_expanded is not None
+                            else None
+                        )
+                        all_prefix_logits.append(self._forward_value(chunk_x, chunk_patch))
+                    prefix_logits = torch.cat(all_prefix_logits, dim=0)
+                    prefix_probs = torch.sigmoid(prefix_logits).view(batch_size, seq_len)
+
+                    # Squared errors against ground-truth match outcome y_batch
+                    y_expanded = y_batch.view(batch_size, 1).expand(-1, seq_len)
+                    sq_errors = (prefix_probs - y_expanded) ** 2
+
+                    # Only evaluate steps with valid hero actions
+                    valid_steps = (x_batch[:, :, 2] >= 0.0)
+
+                    # Phase 1: Steps 0-7
+                    p1_end = min(seq_len, 8)
+                    p1_mask = valid_steps[:, :p1_end]
+                    p1_brier_sum += (sq_errors[:, :p1_end] * p1_mask).sum().item()
+                    p1_total += p1_mask.sum().item()
+
+                    # Phase 2: Steps 8-15
+                    if seq_len > 8:
+                        p2_end = min(seq_len, 16)
+                        p2_mask = valid_steps[:, 8:p2_end]
+                        p2_brier_sum += (sq_errors[:, 8:p2_end] * p2_mask).sum().item()
+                        p2_total += p2_mask.sum().item()
+
+                    # Phase 3: Steps 16-23
+                    if seq_len > 16:
+                        p3_end = min(seq_len, 24)
+                        p3_mask = valid_steps[:, 16:p3_end]
+                        p3_brier_sum += (sq_errors[:, 16:p3_end] * p3_mask).sum().item()
+                        p3_total += p3_mask.sum().item()
+
         avg_val_loss = val_loss / max(val_batches, 1)
         if all_preds:
             all_preds_tensor = torch.cat(all_preds)
@@ -884,6 +966,11 @@ class TransformerTrainer:
             metrics = compute_metrics(all_preds_tensor, all_targets_tensor)
         else:
             metrics = {"bce": 0.0, "accuracy": 0.0, "roc_auc": 0.5, "brier_score": 0.0}
+
+        base_brier = metrics["brier_score"]
+        metrics["p1_brier_score"] = (p1_brier_sum / p1_total) if p1_total > 0 else base_brier
+        metrics["p2_brier_score"] = (p2_brier_sum / p2_total) if p2_total > 0 else base_brier
+        metrics["p3_brier_score"] = (p3_brier_sum / p3_total) if p3_total > 0 else base_brier
 
         return avg_val_loss, metrics
 
@@ -987,6 +1074,11 @@ class TransformerTrainer:
 
         # Phase 1: Pre-train on pub games
         pub_epochs = self.config.pub_epochs if self.config.pub_epochs is not None else self.config.num_epochs
+        pub_patience = (
+            self.config.pub_patience
+            if getattr(self.config, "pub_patience", None) is not None
+            else self.config.patience
+        )
         wb = _get_wandb()
         if wb is not None and wb.run is not None:
             try:
@@ -998,7 +1090,7 @@ class TransformerTrainer:
                 pass
 
         if pubs_loader is not None and len(pubs_loader) > 0:
-            logger.info("Stage 1 Phase 1: Pre-training Value Head on pub games (%d epochs)...", pub_epochs)
+            logger.info("Stage 1 Phase 1: Pre-training Value Head on pub games (%d epochs, patience=%d)...", pub_epochs, pub_patience)
             patience_counter = 0
             best_pub_brier = float("inf")
             best_pub_state = None
@@ -1034,10 +1126,13 @@ class TransformerTrainer:
                 val_loss, val_metrics = self._validate_value(val_loader)
                 brier = val_metrics["brier_score"]
                 auc = val_metrics["roc_auc"]
+                p1_brier = val_metrics.get("p1_brier_score", brier)
+                p2_brier = val_metrics.get("p2_brier_score", brier)
+                p3_brier = val_metrics.get("p3_brier_score", brier)
 
                 logger.info(
-                    "Stage 1 Pubs Epoch %d/%d - Train BCE: %.4f - Val BCE: %.4f - Val Brier: %.4f - Val AUC: %.4f",
-                    epoch, pub_epochs, avg_train_loss, val_loss, brier, auc,
+                    "Stage 1 Pubs Epoch %d/%d - Train BCE: %.4f - Val BCE: %.4f - Val Brier: %.4f (P1: %.4f | P2: %.4f | P3: %.4f) - Val AUC: %.4f",
+                    epoch, pub_epochs, avg_train_loss, val_loss, brier, p1_brier, p2_brier, p3_brier, auc,
                 )
 
                 if wb is not None and wb.run is not None:
@@ -1048,6 +1143,9 @@ class TransformerTrainer:
                             "stage1_pub/train_loss": avg_train_loss,
                             "stage1_pub/val_loss": val_loss,
                             "stage1_pub/val_brier": brier,
+                            "stage1_pub/val_p1_brier": p1_brier,
+                            "stage1_pub/val_p2_brier": p2_brier,
+                            "stage1_pub/val_p3_brier": p3_brier,
                             "stage1_pub/val_auc": auc,
                             "stage1_pub/val_acc": val_metrics.get("accuracy", 0.0),
                         }
@@ -1059,7 +1157,7 @@ class TransformerTrainer:
                     best_pub_state = copy.deepcopy(self.model.state_dict())
                 else:
                     patience_counter += 1
-                    if patience_counter >= self.config.patience:
+                    if patience_counter >= pub_patience:
                         logger.info("Stage 1 Phase 1 early stopping at epoch %d", epoch)
                         break
 
@@ -1117,15 +1215,21 @@ class TransformerTrainer:
             val_loss, val_metrics = self._validate_value(val_loader)
             brier = val_metrics["brier_score"]
             auc = val_metrics["roc_auc"]
+            p1_brier = val_metrics.get("p1_brier_score", brier)
+            p2_brier = val_metrics.get("p2_brier_score", brier)
+            p3_brier = val_metrics.get("p3_brier_score", brier)
 
             self.metrics.val_losses.append(val_loss)
             self.metrics.val_accuracies.append(val_metrics["accuracy"])
             self.metrics.val_auc_scores.append(auc)
             self.metrics.val_brier_scores.append(brier)
+            self.metrics.val_p1_brier_scores.append(p1_brier)
+            self.metrics.val_p2_brier_scores.append(p2_brier)
+            self.metrics.val_p3_brier_scores.append(p3_brier)
 
             logger.info(
-                "Stage 1 Draft Epoch %d/%d - Train BCE: %.4f - Val BCE: %.4f - Val Brier: %.4f - Val AUC: %.4f",
-                epoch, draft_epochs, avg_train_loss, val_loss, brier, auc,
+                "Stage 1 Draft Epoch %d/%d - Train BCE: %.4f - Val BCE: %.4f - Val Brier: %.4f (P1: %.4f | P2: %.4f | P3: %.4f) - Val AUC: %.4f",
+                epoch, draft_epochs, avg_train_loss, val_loss, brier, p1_brier, p2_brier, p3_brier, auc,
             )
 
             if wb is not None and wb.run is not None:
@@ -1136,6 +1240,9 @@ class TransformerTrainer:
                         "stage1_draft/train_loss": avg_train_loss,
                         "stage1_draft/val_loss": val_loss,
                         "stage1_draft/val_brier": brier,
+                        "stage1_draft/val_p1_brier": p1_brier,
+                        "stage1_draft/val_p2_brier": p2_brier,
+                        "stage1_draft/val_p3_brier": p3_brier,
                         "stage1_draft/val_auc": auc,
                         "stage1_draft/val_acc": val_metrics.get("accuracy", 0.0),
                     }
@@ -1160,6 +1267,9 @@ class TransformerTrainer:
                     "val_loss": val_loss,
                     "val_auc": auc,
                     "val_brier_score": brier,
+                    "val_p1_brier_score": p1_brier,
+                    "val_p2_brier_score": p2_brier,
+                    "val_p3_brier_score": p3_brier,
                     "stage": 1,
                 }
                 torch.save(best_state, os.path.join(self.config.checkpoint_dir, "stage1_best_model.pt"))
@@ -1192,6 +1302,9 @@ class TransformerTrainer:
             "epoch": self.metrics.best_epoch,
             "val_auc": self.metrics.best_val_auc,
             "val_brier_score": self.metrics.best_brier_score,
+            "val_p1_brier_score": self.metrics.val_p1_brier_scores[-1] if self.metrics.val_p1_brier_scores else None,
+            "val_p2_brier_score": self.metrics.val_p2_brier_scores[-1] if self.metrics.val_p2_brier_scores else None,
+            "val_p3_brier_score": self.metrics.val_p3_brier_scores[-1] if self.metrics.val_p3_brier_scores else None,
             "temperature": calibrated_t,
             "calibrated_temperature": calibrated_t,
             "stage": 1,
@@ -1450,6 +1563,7 @@ class TransformerTrainer:
             current_aw_tau = self.config.aw_tau_start * (
                 aw_tau_decay_rate ** min(epoch - 1, self.config.aw_tau_decay_epochs)
             )
+            self._current_aw_tau = current_aw_tau
 
             if getattr(self.model, "match_network", None) and hasattr(self.model.match_network, "mlm_head"):
                 if hasattr(self.model.match_network.mlm_head, "temperature"):
@@ -1517,10 +1631,11 @@ class TransformerTrainer:
             self.metrics.val_brier_scores.append(val_metrics["brier_score"])
 
             logger.info(
-                "Stage 2 Epoch %d/%d - Policy Loss: %.4f - Pos-Adv Top5: %.4f (P1: %.4f | P2: %.4f | P3: %.4f)",
+                "Stage 2 Epoch %d/%d - Train Policy Loss: %.4f - Val Policy Loss: %.4f - Pos-Adv Top5: %.4f (P1: %.4f | P2: %.4f | P3: %.4f)",
                 epoch,
                 self.config.num_epochs,
                 avg_train_loss,
+                val_loss,
                 val_metrics["mlm_top5_accuracy"],
                 val_metrics["p1_top5_accuracy"],
                 val_metrics["p2_top5_accuracy"],
@@ -1546,11 +1661,14 @@ class TransformerTrainer:
                     }
                 )
 
-            current_score = val_metrics["mlm_top5_accuracy"]
-            is_better = current_score > self.metrics.best_mlm_top5_acc + self.config.min_delta
+            current_score = val_loss
+            is_better = current_score < self.metrics.best_val_loss - self.config.min_delta
 
-            if current_score > self.metrics.best_mlm_top5_acc:
-                self.metrics.best_mlm_top5_acc = current_score
+            if current_score < self.metrics.best_val_loss:
+                self.metrics.best_val_loss = current_score
+
+            if val_metrics["mlm_top5_accuracy"] > self.metrics.best_mlm_top5_acc:
+                self.metrics.best_mlm_top5_acc = val_metrics["mlm_top5_accuracy"]
 
             if is_better:
                 self.metrics.best_checkpoint_value = current_score
@@ -1562,15 +1680,18 @@ class TransformerTrainer:
                     "epoch": epoch,
                     "val_loss": val_loss,
                     "val_auc": val_metrics["roc_auc"],
-                    "mlm_top5_accuracy": current_score,
-                    "checkpoint_metric": "val_top5_acc",
+                    "mlm_top5_accuracy": val_metrics["mlm_top5_accuracy"],
+                    "checkpoint_metric": "val_loss",
                     "checkpoint_value": current_score,
                     "temperature": self.calibrated_temperature,
                     "stage": 2,
                 }
                 torch.save(best_state, os.path.join(self.config.checkpoint_dir, "best_model.pt"))
                 torch.save(best_state, os.path.join(self.config.checkpoint_dir, "stage2_best_model.pt"))
-                logger.info("  [checkpoint] Saved best Stage 2 Policy Head at epoch %d (Top5=%.4f)", epoch, current_score)
+                logger.info(
+                    "  [checkpoint] Saved best Stage 2 Policy Head at epoch %d (Val Loss=%.4f, Top5=%.4f)",
+                    epoch, current_score, val_metrics["mlm_top5_accuracy"]
+                )
             else:
                 patience_counter += 1
                 if patience_counter >= self.config.patience:
@@ -1584,6 +1705,7 @@ class TransformerTrainer:
         if wb is not None and wb.run is not None:
             wb.log(
                 {
+                    "stage2/best_val_loss": self.metrics.best_val_loss,
                     "stage2/best_top5_acc": self.metrics.best_mlm_top5_acc,
                     "stage2/best_epoch": self.metrics.best_epoch,
                 }
@@ -1971,28 +2093,50 @@ class TransformerTrainer:
                 # Pass clean x_batch directly; HierarchicalTransformer right-shifts internally
                 logits, mlm_logits = self.model(x_batch, player_batch, patch_ids=patch_batch)
 
-                if self.config.step_loss_gamma > 0.0:
-                    loss_elements = F.binary_cross_entropy_with_logits(
-                        logits, y_batch, reduction="none"
-                    )
-                    # t is the active draft length for each sample in the batch
-                    t = torch.sum(torch.sum(torch.abs(x_batch), dim=-1) > 0, dim=-1).float()
-                    weights = (t / 24.0) ** self.config.step_loss_gamma
-                    loss = torch.mean(weights * loss_elements)
-                else:
-                    loss = self.criterion(logits, y_batch)
-
                 # Slot attention entropy regularization
                 entropy_loss = self.model.get_entropy_loss()
                 collision_loss = self.model.get_collision_loss()
                 composition_loss = self.model.get_composition_loss()
 
-                val_loss += (
-                    loss
-                    + entropy_loss
-                    + 0.20 * collision_loss
-                    + 1.0 * composition_loss
-                ).item()
+                if self.config.stage == 2:
+                    current_aw_tau = getattr(self, "_current_aw_tau", self.config.aw_tau_start)
+                    w_t = self._compute_advantage_weights(
+                        x_batch=x_batch,
+                        patch_batch=patch_batch,
+                        current_aw_tau=current_aw_tau,
+                    )
+                    ntp_labels = x_batch[:, :, 2].long()
+                    mlm_loss = self._compute_weighted_mlm_loss(
+                        mlm_logits=mlm_logits,
+                        ntp_labels=ntp_labels,
+                        weights=w_t,
+                    )
+                    batch_loss = (
+                        1.0 * mlm_loss
+                        + entropy_loss
+                        + 0.05 * collision_loss
+                        + 0.10 * composition_loss
+                    )
+                else:
+                    if self.config.step_loss_gamma > 0.0:
+                        loss_elements = F.binary_cross_entropy_with_logits(
+                            logits, y_batch, reduction="none"
+                        )
+                        # t is the active draft length for each sample in the batch
+                        t = torch.sum(torch.sum(torch.abs(x_batch), dim=-1) > 0, dim=-1).float()
+                        weights = (t / 24.0) ** self.config.step_loss_gamma
+                        loss = torch.mean(weights * loss_elements)
+                    else:
+                        loss = self.criterion(logits, y_batch)
+
+                    batch_loss = (
+                        loss
+                        + entropy_loss
+                        + 0.20 * collision_loss
+                        + 1.0 * composition_loss
+                    )
+
+                val_loss += batch_loss.item()
 
                 all_preds.append(logits.cpu())
                 all_targets.append(y_batch.cpu())

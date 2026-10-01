@@ -237,6 +237,10 @@ def test_stage2_freezing_and_policy_only_training(dummy_model, dummy_draft_data,
 
     # Check stage 2 checkpoint was written
     assert (tmp_path / "stage2_best_model.pt").exists()
+    ckpt = torch.load(tmp_path / "stage2_best_model.pt", weights_only=False)
+    assert ckpt["checkpoint_metric"] == "val_loss"
+    assert "val_loss" in ckpt
+    assert "mlm_top5_accuracy" in ckpt
 
 
 def test_stage2_validation_positive_advantage_conditioning(dummy_model):
@@ -352,12 +356,14 @@ def test_cli_stage_arguments():
         "--pub_data_dir", "/tmp/pubs",
         "--draft_sample_weight", "5.0",
         "--pub_epochs", "10",
+        "--pub_patience", "4",
         "--stage1_checkpoint", "/tmp/stage1.pt",
     ])
     assert args.stage == 2
     assert args.pub_data_dir == "/tmp/pubs"
     assert args.draft_sample_weight == 5.0
     assert args.pub_epochs == 10
+    assert args.pub_patience == 4
     assert args.stage1_checkpoint == "/tmp/stage1.pt"
 
 
@@ -483,6 +489,9 @@ def test_stage1_wandb_logging_both_phases(dummy_model, dummy_draft_data, tmp_pat
     assert pub_epoch_logs[1]["stage1_pub_epoch"] == 2
     assert "stage1_pub/train_loss" in pub_epoch_logs[0]
     assert "stage1_pub/val_brier" in pub_epoch_logs[0]
+    assert "stage1_pub/val_p1_brier" in pub_epoch_logs[0]
+    assert "stage1_pub/val_p2_brier" in pub_epoch_logs[0]
+    assert "stage1_pub/val_p3_brier" in pub_epoch_logs[0]
     assert "stage1_pub/val_auc" in pub_epoch_logs[0]
 
     # Verify Phase 2 (Drafts) epochs were logged
@@ -492,6 +501,9 @@ def test_stage1_wandb_logging_both_phases(dummy_model, dummy_draft_data, tmp_pat
     assert draft_epoch_logs[1]["stage1_draft_epoch"] == 2
     assert "stage1_draft/train_loss" in draft_epoch_logs[0]
     assert "stage1_draft/val_brier" in draft_epoch_logs[0]
+    assert "stage1_draft/val_p1_brier" in draft_epoch_logs[0]
+    assert "stage1_draft/val_p2_brier" in draft_epoch_logs[0]
+    assert "stage1_draft/val_p3_brier" in draft_epoch_logs[0]
     assert "stage1_draft/val_auc" in draft_epoch_logs[0]
 
     # Verify post-calibration summary logged
@@ -568,4 +580,149 @@ def test_stage2_wandb_logging(dummy_model, dummy_draft_data, tmp_path, monkeypat
     summary_logs = [p for p in logged_payloads if "stage2/best_top5_acc" in p]
     assert len(summary_logs) == 1
     assert "stage2/best_epoch" in summary_logs[0]
+
+
+def test_stage1_phase1_pub_patience_early_stopping(dummy_model, dummy_draft_data, tmp_path, monkeypatch):
+    """Verify that Stage 1 Phase 1 stops early according to pub_patience."""
+    x_drafts, y_labels, radiant_players, dire_players, patch_ids = dummy_draft_data
+
+    x_pubs = [x.clone() for x in x_drafts[:6]]
+    y_pubs = [y.clone() for y in y_labels[:6]]
+
+    config = TrainingConfig(
+        learning_rate=1e-3,
+        num_epochs=1,
+        pub_epochs=10,
+        pub_patience=2,
+        patience=25,
+        batch_size=4,
+        device="cpu",
+        checkpoint_dir=str(tmp_path),
+        stage=1,
+    )
+    trainer = TransformerTrainer(model=dummy_model, train_config=config)
+
+    # Mock _validate_value: Epoch 1 -> Brier 0.20, Epoch 2 & 3 -> Brier 0.30 (no improvement)
+    pub_epoch_calls = 0
+    orig_validate_value = trainer._validate_value
+
+    def mock_validate_value(loader):
+        nonlocal pub_epoch_calls
+        pub_epoch_calls += 1
+        loss, metrics = orig_validate_value(loader)
+        if pub_epoch_calls == 1:
+            metrics["brier_score"] = 0.20
+        else:
+            metrics["brier_score"] = 0.30
+        return loss, metrics
+
+    monkeypatch.setattr(trainer, "_validate_value", mock_validate_value)
+
+    trainer.train_stage_1(
+        x_drafts=x_drafts,
+        y_labels=y_labels,
+        radiant_players=radiant_players,
+        dire_players=dire_players,
+        patch_ids=patch_ids,
+        x_pubs=x_pubs,
+        y_pubs=y_pubs,
+    )
+
+    # Phase 1 should run epoch 1 (best), epoch 2 (fail 1), epoch 3 (fail 2 -> early stop!)
+    # Plus Phase 2 has 1 draft epoch, plus calibrate_temperature does not call _validate_value.
+    # Total calls to _validate_value should be 3 (phase 1) + 1 (phase 2) = 4, definitely < 10 pub epochs.
+    assert pub_epoch_calls == 4, f"Expected 4 validation calls (3 in Phase 1, 1 in Phase 2), got {pub_epoch_calls}"
+
+
+def test_stage1_partial_draft_brier_scores(dummy_model, dummy_draft_data, tmp_path):
+    """Verify _validate_value computes p1, p2, and p3 brier scores on partial draft steps."""
+    x_drafts, y_labels, radiant_players, dire_players, patch_ids = dummy_draft_data
+
+    config = TrainingConfig(
+        learning_rate=1e-3,
+        num_epochs=1,
+        batch_size=4,
+        device="cpu",
+        checkpoint_dir=str(tmp_path),
+        stage=1,
+    )
+    trainer = TransformerTrainer(model=dummy_model, train_config=config)
+
+    x_tensor = torch.stack(x_drafts[:8])
+    y_tensor = torch.stack(y_labels[:8])
+    dummy_patch = torch.zeros(8, dtype=torch.long)
+    dummy_comfort = torch.zeros(8, 10, 10)
+    dataset = TensorDataset(x_tensor, dummy_comfort, y_tensor, dummy_patch)
+    loader = DataLoader(dataset, batch_size=4)
+
+    val_loss, metrics = trainer._validate_value(loader)
+
+    assert "brier_score" in metrics
+    assert "p1_brier_score" in metrics
+    assert "p2_brier_score" in metrics
+    assert "p3_brier_score" in metrics
+    assert isinstance(metrics["p1_brier_score"], float)
+    assert isinstance(metrics["p2_brier_score"], float)
+    assert isinstance(metrics["p3_brier_score"], float)
+    assert 0.0 <= metrics["p1_brier_score"] <= 1.0
+    assert 0.0 <= metrics["p2_brier_score"] <= 1.0
+    assert 0.0 <= metrics["p3_brier_score"] <= 1.0
+
+
+def test_stage2_val_loss_patience_early_stopping(dummy_model, dummy_draft_data, tmp_path, monkeypatch):
+    """Verify that Stage 2 early stopping triggers on val_loss and saves best_model.pt."""
+    x_drafts, y_labels, radiant_players, dire_players, patch_ids = dummy_draft_data
+
+    # Fake stage 1 checkpoint
+    stage1_path = tmp_path / "stage1_best_model.pt"
+    dummy_state = {
+        "model_state": dummy_model.state_dict(),
+        "temperature": 1.0,
+        "stage": 1,
+    }
+    torch.save(dummy_state, stage1_path)
+
+    config = TrainingConfig(
+        learning_rate=1e-3,
+        num_epochs=10,
+        patience=2,
+        batch_size=4,
+        device="cpu",
+        checkpoint_dir=str(tmp_path),
+        stage=2,
+        stage1_checkpoint_path=str(stage1_path),
+    )
+    trainer = TransformerTrainer(model=dummy_model, train_config=config)
+
+    orig_validate = trainer._validate
+    call_count = 0
+
+    # Mock _validate so that val_loss gets worse after epoch 1:
+    # Epoch 1: val_loss = 1.0, Epoch 2: 2.0 (fail 1), Epoch 3: 3.0 (fail 2 -> early stop!)
+    def mock_validate(loader, condition_on_positive_advantage=True):
+        nonlocal call_count
+        call_count += 1
+        _, metrics = orig_validate(loader, condition_on_positive_advantage=condition_on_positive_advantage)
+        val_loss = float(call_count)
+        return val_loss, metrics
+
+    monkeypatch.setattr(trainer, "_validate", mock_validate)
+
+    metrics = trainer.train_stage_2(
+        x_drafts=x_drafts,
+        y_labels=y_labels,
+        radiant_players=radiant_players,
+        dire_players=dire_players,
+        patch_ids=patch_ids,
+        stage1_checkpoint_path=stage1_path,
+    )
+
+    # 1 best + 2 fails = 3 epochs total before early stopping
+    assert call_count == 3
+    assert len(metrics.val_losses) == 3
+    assert metrics.best_epoch == 1
+    assert metrics.best_checkpoint_value == 1.0
+
+
+
 

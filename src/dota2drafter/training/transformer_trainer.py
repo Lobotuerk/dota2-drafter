@@ -1025,6 +1025,12 @@ class TransformerTrainer:
         self.calibrated_temperature = calibrated_t
         self.metrics.calibrated_temperature = calibrated_t
 
+        with torch.no_grad():
+            t_clamped = torch.clamp(temperature_param, min=1e-3)
+            calibrated_brier = F.mse_loss(torch.sigmoid(val_logits / t_clamped), val_targets).item()
+            if calibrated_brier < self.metrics.best_brier_score:
+                self.metrics.best_brier_score = calibrated_brier
+
         match_net = getattr(self.model, "match_network", self.model)
         match_net.temperature = calibrated_t
         if hasattr(match_net, "set_transformer_head"):
@@ -2001,10 +2007,14 @@ class TransformerTrainer:
                 current_score = val_loss
                 is_better = current_score < self.metrics.best_val_loss - self.config.min_delta
                 score_str = f"Val Loss={current_score:.4f}"
+            elif metric_choice in ("val_brier", "val_brier_score", "brier", "brier_score"):
+                current_score = val_metrics["brier_score"]
+                is_better = current_score < self.metrics.best_brier_score - self.config.min_delta
+                score_str = f"Val Brier={current_score:.4f}"
             else:
                 raise ValueError(
                     f"Unsupported checkpoint_metric '{self.config.checkpoint_metric}'. "
-                    "Expected one of: 'val_auc', 'val_top5_acc', 'val_loss'"
+                    "Expected one of: 'val_auc', 'val_top5_acc', 'val_loss', 'val_brier'"
                 )
 
             # Update tracked best values
@@ -2014,6 +2024,8 @@ class TransformerTrainer:
                 self.metrics.best_mlm_top5_acc = val_metrics["mlm_top5_accuracy"]
             if val_loss < self.metrics.best_val_loss:
                 self.metrics.best_val_loss = val_loss
+            if val_metrics["brier_score"] < self.metrics.best_brier_score:
+                self.metrics.best_brier_score = val_metrics["brier_score"]
 
             if is_better:
                 self.metrics.best_checkpoint_value = current_score

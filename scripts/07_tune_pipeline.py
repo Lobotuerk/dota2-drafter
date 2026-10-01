@@ -3,7 +3,7 @@
 
 Tunes embedding pre-training (Stage 2), Relational GNN (Stage 3), and Hierarchical Transformer (Stage 4)
 jointly by wrapping them into a single objective function. Operates on multiple objectives (e.g.,
-maximizing both Top-5 MLM Accuracy and win-rate ROC-AUC score).
+minimizing Stage 1 Brier Score and maximizing Stage 2 Top-5 MLM accuracy).
 
 Usage::
 
@@ -527,10 +527,17 @@ def make_objective(
                         )
 
                         best_top5 = metrics_s2.best_mlm_top5_acc
-                        best_auc = (
-                            metrics_s1.best_val_auc
-                            if metrics_s1.best_val_auc > 0
-                            else (max(metrics_s1.val_auc_scores) if metrics_s1.val_auc_scores else 0.5)
+                        if best_top5 == float("-inf"):
+                            best_top5 = (
+                                max(metrics_s2.val_mlm_top5_accuracies)
+                                if metrics_s2.val_mlm_top5_accuracies
+                                else 0.0
+                            )
+
+                        best_brier = (
+                            metrics_s1.best_brier_score
+                            if metrics_s1.best_brier_score < float("inf")
+                            else (min(metrics_s1.val_brier_scores) if metrics_s1.val_brier_scores else 0.25)
                         )
                     else:
                         config = TrainingConfig(
@@ -557,13 +564,32 @@ def make_objective(
                         )
 
                         best_top5 = metrics.best_mlm_top5_acc
-                        best_auc = max(metrics.val_auc_scores) if metrics.val_auc_scores else 0.5
+                        if best_top5 == float("-inf"):
+                            best_top5 = (
+                                max(metrics.val_mlm_top5_accuracies)
+                                if metrics.val_mlm_top5_accuracies
+                                else 0.0
+                            )
 
-                    console.print(f"[bold green]Trial {trial.number} complete:[/bold green] Best Top-5 MLM={best_top5:.4f}, Best AUC={best_auc:.4f}")
+                        best_brier = (
+                            metrics.best_brier_score
+                            if metrics.best_brier_score < float("inf")
+                            else (min(metrics.val_brier_scores) if metrics.val_brier_scores else 0.25)
+                        )
+
+                    console.print(
+                        f"[bold green]Trial {trial.number} complete:[/bold green] Stage 1 Best Brier={best_brier:.4f}, Stage 2 Best Top-5 MLM={best_top5:.4f}"
+                    )
                     if use_wandb:
                         import wandb
-                        wandb.log({"trial_top5_acc": best_top5, "trial_val_auc": best_auc, "trial_number": trial.number})
-                    return best_top5, best_auc
+                        wandb.log({
+                            "trial_stage1_brier": best_brier,
+                            "trial_brier_score": best_brier,
+                            "trial_stage2_top5_acc": best_top5,
+                            "trial_top5_acc": best_top5,
+                            "trial_number": trial.number,
+                        })
+                    return best_brier, best_top5
 
                 except Exception as e:
                     console.print(f"[bold red]Stage 3 (Transformer) failed:[/bold red] {e}")
@@ -627,12 +653,12 @@ def main() -> None:
 
     # --- Setup Optuna Multi-Objective Study ---
     console.print(f"[bold blue]Initializing multi-objective study '{args.study_name}'...[/bold blue]")
-    
-    # Maximize both Top-5 MLM accuracy and ROC-AUC
+
+    # Multi-objective: Minimize Stage 1 Brier score, Maximize Stage 2 Top-5 MLM accuracy
     study = optuna.create_study(
         study_name=args.study_name,
         storage=args.storage,
-        directions=["maximize", "maximize"],
+        directions=["minimize", "maximize"],
         load_if_exists=True,
     )
 
@@ -662,7 +688,7 @@ def main() -> None:
     best_trials = study.best_trials
     for trial in best_trials:
         console.print(f"\n[bold]Trial {trial.number}:[/bold]")
-        console.print(f"  Values (Top-5 MLM Acc, ROC-AUC): {trial.values}")
+        console.print(f"  Values (Stage 1 Brier Score, Stage 2 Top-5 MLM Acc): {trial.values}")
         console.print("  Best Parameters:")
         for k, v in trial.params.items():
             console.print(f"    {k}: {v}")

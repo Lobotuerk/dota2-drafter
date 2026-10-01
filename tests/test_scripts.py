@@ -512,7 +512,7 @@ def test_tune_pipeline_make_objective_hyperparameter_sampling():
         "--stage2_epochs", "2",
     ])
 
-    study = optuna.create_study(directions=["maximize", "maximize"])
+    study = optuna.create_study(directions=["minimize", "maximize"])
     trial = study.ask()
 
     # Verify hyperparameter distribution sampling works without exception
@@ -527,6 +527,19 @@ def test_tune_pipeline_make_objective_hyperparameter_sampling():
     assert 0.10 <= aw_tau_start <= 0.25
     aw_tau_end = trial.suggest_float("aw_tau_end", 0.05, 0.12)
     assert 0.05 <= aw_tau_end <= 0.12
+
+
+def test_tune_pipeline_study_directions():
+    """Verify 07_tune_pipeline creates Optuna study minimizing Brier and maximizing Top-5."""
+    import importlib
+    import optuna
+
+    tune_pipeline = importlib.import_module("scripts.07_tune_pipeline")
+    study = optuna.create_study(
+        study_name="test_directions",
+        directions=["minimize", "maximize"],
+    )
+    assert study.directions == [optuna.study.StudyDirection.MINIMIZE, optuna.study.StudyDirection.MAXIMIZE]
 
 
 def test_tune_pipeline_wandb_trial_logging():

@@ -308,6 +308,7 @@ class TrainingConfig:
     pub_data_dir: str = "data"
     pub_epochs: int | None = None
     pub_patience: int | None = None
+    seed: int = 42
     stage1_checkpoint_path: str | Path | None = None
 
 
@@ -721,6 +722,63 @@ class TransformerTrainer:
         valid_elements = (ntp_labels != -1).sum().float()
         return weighted_ce.sum() / torch.clamp(valid_elements, min=1.0)
 
+    def _split_train_val(
+        self,
+        n: int,
+        patch_ids: list[torch.Tensor] | None = None,
+        val_ratio: float = 0.4,
+    ) -> tuple[list[int], list[int]]:
+        """Split match indices into deterministic train and validation sets.
+
+        Uses a dedicated deterministic torch.Generator to ensure that Stage 1
+        and Stage 2 partition matches identically, preventing data leakage across
+        the two stages.
+
+        Args:
+            n: Total number of match samples.
+            patch_ids: Optional list of patch ID tensors per match.
+            val_ratio: Fraction of latest-patch matches reserved for validation (default: 0.4).
+
+        Returns:
+            Tuple of (train_indices, val_indices).
+        """
+        seed = getattr(self.config, "seed", 42)
+        gen = torch.Generator().manual_seed(seed)
+
+        latest_patch_id = -1
+        if patch_ids is not None and len(patch_ids) > 0:
+            latest_patch_id = max([p.item() if hasattr(p, "item") else p for p in patch_ids])
+
+        latest_patch_indices = []
+        older_patch_indices = []
+
+        for i in range(n):
+            if patch_ids is not None:
+                p_val = patch_ids[i].item() if hasattr(patch_ids[i], "item") else patch_ids[i]
+                if p_val == latest_patch_id:
+                    latest_patch_indices.append(i)
+                else:
+                    older_patch_indices.append(i)
+            else:
+                older_patch_indices.append(i)
+
+        latest_shuffled = torch.randperm(len(latest_patch_indices), generator=gen).tolist()
+        latest_patch_indices = [latest_patch_indices[i] for i in latest_shuffled]
+
+        older_shuffled = torch.randperm(len(older_patch_indices), generator=gen).tolist()
+        older_patch_indices = [older_patch_indices[i] for i in older_shuffled]
+
+        val_size = int(len(latest_patch_indices) * val_ratio)
+        val_size = max(1, val_size) if latest_patch_indices else 0
+
+        val_indices = latest_patch_indices[:val_size]
+        train_indices = latest_patch_indices[val_size:] + older_patch_indices
+
+        train_shuffled = torch.randperm(len(train_indices), generator=gen).tolist()
+        train_indices = [train_indices[i] for i in train_shuffled]
+
+        return train_indices, val_indices
+
     def _forward_value(
         self,
         x_batch: torch.Tensor,
@@ -1061,7 +1119,8 @@ class TransformerTrainer:
             if (
                 "set_transformer_head" in name
                 or "project_value" in name
-                or "film_" in name
+                or "film_gamma_value" in name
+                or "film_beta_value" in name
                 or "w_patch" in name
             ):
                 param.requires_grad = True
@@ -1119,6 +1178,12 @@ class TransformerTrainer:
 
                     optimizer.zero_grad()
                     loss.backward()
+
+                    # Gradient masking: enforce zero/None gradients on frozen policy/backbone components
+                    for name, param in self.model.named_parameters():
+                        if not param.requires_grad:
+                            param.grad = None
+
                     torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
                     optimizer.step()
 
@@ -1206,6 +1271,12 @@ class TransformerTrainer:
 
                 optimizer.zero_grad()
                 loss.backward()
+
+                # Gradient masking: enforce zero/None gradients on frozen policy/backbone components
+                for name, param in self.model.named_parameters():
+                    if not param.requires_grad:
+                        param.grad = None
+
                 torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
                 optimizer.step()
 
@@ -1335,36 +1406,7 @@ class TransformerTrainer:
         radiant_players = radiant_players or [[0] * 5 for _ in range(n)]
         dire_players = dire_players or [[0] * 5 for _ in range(n)]
 
-        latest_patch_id = -1
-        if patch_ids is not None and len(patch_ids) > 0:
-            latest_patch_id = max([p.item() if hasattr(p, 'item') else p for p in patch_ids])
-
-        latest_patch_indices = []
-        older_patch_indices = []
-
-        for i in range(n):
-            if patch_ids is not None:
-                p_val = patch_ids[i].item() if hasattr(patch_ids[i], 'item') else patch_ids[i]
-                if p_val == latest_patch_id:
-                    latest_patch_indices.append(i)
-                else:
-                    older_patch_indices.append(i)
-            else:
-                older_patch_indices.append(i)
-
-        latest_shuffled = torch.randperm(len(latest_patch_indices)).tolist()
-        latest_patch_indices = [latest_patch_indices[i] for i in latest_shuffled]
-
-        older_shuffled = torch.randperm(len(older_patch_indices)).tolist()
-        older_patch_indices = [older_patch_indices[i] for i in older_shuffled]
-
-        val_size = int(len(latest_patch_indices) * 0.4)
-        val_size = max(1, val_size) if latest_patch_indices else 0
-
-        val_indices = latest_patch_indices[:val_size]
-        train_indices = latest_patch_indices[val_size:] + older_patch_indices
-        train_shuffled = torch.randperm(len(train_indices)).tolist()
-        train_indices = [train_indices[i] for i in train_shuffled]
+        train_indices, val_indices = self._split_train_val(n=n, patch_ids=patch_ids)
 
         player_input_dim = getattr(self.model, "player_input_dim", 127)
         if player_comfort_map:
@@ -1453,56 +1495,71 @@ class TransformerTrainer:
             logger.warning("Stage 1 checkpoint not found at %s. Proceeding with existing weights.", ckpt_path)
 
         match_net = getattr(self.model, "match_network", self.model)
-        for param in match_net.set_transformer_head.parameters():
-            param.requires_grad = False
-        if hasattr(match_net.joint_embedding, "project_value"):
-            for param in match_net.joint_embedding.project_value.parameters():
-                param.requires_grad = False
 
+        # Warm-start knowledge transfer: initialize policy FiLM from trained value FiLM
+        if hasattr(match_net, "joint_embedding"):
+            joint = match_net.joint_embedding
+            if (
+                hasattr(joint, "film_gamma_value")
+                and hasattr(joint, "film_gamma_policy")
+                and hasattr(joint, "film_beta_value")
+                and hasattr(joint, "film_beta_policy")
+            ):
+                with torch.no_grad():
+                    joint.film_gamma_policy.load_state_dict(joint.film_gamma_value.state_dict())
+                    joint.film_beta_policy.load_state_dict(joint.film_beta_value.state_dict())
+                logger.info(
+                    "Warm-started policy FiLM (film_gamma_policy, film_beta_policy) from trained value FiLM."
+                )
+
+        # 100% freeze the critic (SetTransformerHead, project_value, film_gamma_value, film_beta_value)
+        critic_names = ("set_transformer_head", "project_value", "film_gamma_value", "film_beta_value")
         for name, param in self.model.named_parameters():
-            if "set_transformer_head" not in name and "project_value" not in name:
+            if any(cn in name for cn in critic_names):
+                param.requires_grad = False
+            else:
                 param.requires_grad = True
 
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        self.optimizer = torch.optim.AdamW(
-            trainable_params,
-            lr=self.config.learning_rate,
-            weight_decay=1e-2,
-        )
+
+        lr_backbone = self.config.lr_backbone
+        lr_head = self.config.lr_head
+
+        if lr_backbone is not None or lr_head is not None:
+            actual_lr_backbone = lr_backbone if lr_backbone is not None else self.config.learning_rate
+            actual_lr_head = lr_head if lr_head is not None else self.config.learning_rate
+
+            backbone_params = []
+            head_params = []
+            for name, param in self.model.named_parameters():
+                if not param.requires_grad:
+                    continue
+                if "mlm_head" in name:
+                    head_params.append(param)
+                else:
+                    backbone_params.append(param)
+
+            param_groups = [
+                {"params": backbone_params, "lr": actual_lr_backbone, "initial_lr": actual_lr_backbone},
+                {"params": head_params, "lr": actual_lr_head, "initial_lr": actual_lr_head},
+            ]
+            self.optimizer = torch.optim.AdamW(
+                param_groups,
+                lr=self.config.learning_rate,
+                weight_decay=1e-2,
+            )
+        else:
+            self.optimizer = torch.optim.AdamW(
+                trainable_params,
+                lr=self.config.learning_rate,
+                weight_decay=1e-2,
+            )
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer, T_max=self.config.num_epochs
         )
 
         n = len(x_drafts)
-        latest_patch_id = -1
-        if patch_ids is not None and len(patch_ids) > 0:
-            latest_patch_id = max([p.item() if hasattr(p, 'item') else p for p in patch_ids])
-
-        latest_patch_indices = []
-        older_patch_indices = []
-
-        for i in range(n):
-            if patch_ids is not None:
-                p_val = patch_ids[i].item() if hasattr(patch_ids[i], 'item') else patch_ids[i]
-                if p_val == latest_patch_id:
-                    latest_patch_indices.append(i)
-                else:
-                    older_patch_indices.append(i)
-            else:
-                older_patch_indices.append(i)
-
-        latest_shuffled = torch.randperm(len(latest_patch_indices)).tolist()
-        latest_patch_indices = [latest_patch_indices[i] for i in latest_shuffled]
-        older_shuffled = torch.randperm(len(older_patch_indices)).tolist()
-        older_patch_indices = [older_patch_indices[i] for i in older_shuffled]
-
-        val_size = int(len(latest_patch_indices) * 0.4)
-        val_size = max(1, val_size) if latest_patch_indices else 0
-
-        val_indices = latest_patch_indices[:val_size]
-        train_indices = latest_patch_indices[val_size:] + older_patch_indices
-        train_shuffled = torch.randperm(len(train_indices)).tolist()
-        train_indices = [train_indices[i] for i in train_shuffled]
+        train_indices, val_indices = self._split_train_val(n=n, patch_ids=patch_ids)
 
         player_input_dim = getattr(self.model, "player_input_dim", 127)
         if player_comfort_map:
@@ -1616,6 +1673,12 @@ class TransformerTrainer:
 
                 self.optimizer.zero_grad()
                 total_loss.backward()
+
+                # Gradient masking: enforce zero/None gradients on 100% frozen critic
+                for name, param in self.model.named_parameters():
+                    if any(cn in name for cn in critic_names):
+                        param.grad = None
+
                 torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
                 self.optimizer.step()
 
@@ -1784,43 +1847,7 @@ class TransformerTrainer:
             TrainingMetrics with full training history.
         """
         n = len(x_drafts)
-        
-        # Filter validation set to ONLY include matches from the latest patch
-        latest_patch_id = -1
-        if patch_ids is not None and len(patch_ids) > 0:
-            latest_patch_id = max([p.item() if hasattr(p, 'item') else p for p in patch_ids])
-            
-        latest_patch_indices = []
-        older_patch_indices = []
-        
-        for i in range(n):
-            if patch_ids is not None:
-                p_val = patch_ids[i].item() if hasattr(patch_ids[i], 'item') else patch_ids[i]
-                if p_val == latest_patch_id:
-                    latest_patch_indices.append(i)
-                else:
-                    older_patch_indices.append(i)
-            else:
-                older_patch_indices.append(i)
-                
-        # Shuffle indices
-        # torch.manual_seed(42)
-        latest_shuffled = torch.randperm(len(latest_patch_indices)).tolist()
-        latest_patch_indices = [latest_patch_indices[i] for i in latest_shuffled]
-        
-        older_shuffled = torch.randperm(len(older_patch_indices)).tolist()
-        older_patch_indices = [older_patch_indices[i] for i in older_shuffled]
-        
-        val_size = int(len(latest_patch_indices) * 0.4)
-        val_size = max(1, val_size) if latest_patch_indices else 0
-        
-        val_indices = latest_patch_indices[:val_size]
-        train_indices = latest_patch_indices[val_size:] + older_patch_indices
-            
-        # Shuffle training set one more time so old and new patches are mixed
-        # torch.manual_seed(42)  # Removed to prevent identical shuffle on every epoch!
-        train_shuffled = torch.randperm(len(train_indices)).tolist()
-        train_indices = [train_indices[i] for i in train_shuffled]
+        train_indices, val_indices = self._split_train_val(n=n, patch_ids=patch_ids)
 
         player_input_dim = getattr(self.model, "player_input_dim", 127)
         if player_comfort_map:

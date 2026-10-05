@@ -79,6 +79,7 @@ class TrainingConfig:
     draft_sample_weight: float = 5.0
     pub_data_dir: str = "data"
     pub_patience: int = 5
+    seed: int = 42
 
 
 @dataclass
@@ -187,6 +188,7 @@ def _load_training(data: dict[str, Any], config: PipelineConfig) -> TrainingConf
         draft_sample_weight=float(data.get("draft_sample_weight", config.training.draft_sample_weight)),
         pub_data_dir=str(data.get("pub_data_dir", config.training.pub_data_dir)),
         pub_patience=int(data.get("pub_patience", config.training.pub_patience)),
+        seed=int(data.get("seed", config.training.seed)),
     )
 
 

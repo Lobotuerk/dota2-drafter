@@ -139,6 +139,11 @@ def parse_args(config=None, args=None) -> argparse.Namespace:
         if config and hasattr(config.training, "pub_patience")
         else 5
     )
+    seed_default = (
+        config.training.seed
+        if config and hasattr(config.training, "seed")
+        else 42
+    )
 
     parser.add_argument("--d_model", type=int, default=d_model_default, help=f"Transformer d_model (default: {d_model_default})")
     parser.add_argument("--nhead", type=int, default=nhead_default, help=f"Number of attention heads (default: {nhead_default})")
@@ -222,6 +227,12 @@ def parse_args(config=None, args=None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--gamma", type=float, default=gamma_default, help=f"Decay factor per major patch (default: {gamma_default})"
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=seed_default,
+        help=f"Deterministic seed for train/val split (default: {seed_default})",
     )
     parser.add_argument(
         "--step_loss_gamma",
@@ -565,6 +576,7 @@ def main() -> None:
             pub_data_dir=args.pub_data_dir,
             pub_epochs=args.pub_epochs,
             pub_patience=args.pub_patience,
+            seed=args.seed,
             stage1_checkpoint_path=args.stage1_checkpoint,
         )
 

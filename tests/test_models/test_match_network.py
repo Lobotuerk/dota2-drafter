@@ -479,13 +479,7 @@ def test_match_network_predict_proba_with_patch_ids():
 
 
 def test_separate_projections_gradient_flow():
-    """Verify that gradients flow correctly after FiLM patch contextual embedding change.
-
-    Since the value head now receives contextual embeddings (z) from the joint
-    embedding which uses project_policy for the hero projection, backward on
-    value loss will flow through project_policy. The key test is that the
-    SetTransformerHead can differentiate properly with the new architecture.
-    """
+    """Verify that gradients flow correctly through decoupled policy and value projections."""
     d_model = 32
     num_heroes = 20
     player_input_dim = 5
@@ -497,14 +491,15 @@ def test_separate_projections_gradient_flow():
         player_input_dim=player_input_dim,
     )
 
-    # Forward with dummy input
+    # Forward with dummy input and patch_ids
     x_draft = torch.zeros(batch_size, 24, 4)
     x_draft[:, :, 2] = torch.arange(24).repeat(batch_size, 1) % num_heroes
     x_draft[:, :, 0] = 1.0  # pick
     x_draft[:, :, 3] = torch.arange(24).float()
     player_comfort = torch.randn(batch_size, 10, player_input_dim)
+    patch_ids = torch.tensor([1, 2])
 
-    logits, mlm_logits = model(x_draft, player_comfort)
+    logits, mlm_logits = model(x_draft, player_comfort, patch_ids=patch_ids)
 
     # Zero any gradients
     model.zero_grad()
@@ -513,9 +508,15 @@ def test_separate_projections_gradient_flow():
     loss_value = logits.sum()
     loss_value.backward(retain_graph=True)
 
-    # project_value should have gradients, project_policy should NOT
-    assert model.match_network.joint_embedding.project_value.weight.grad is not None
-    assert model.match_network.joint_embedding.project_policy.weight.grad is None
+    joint = model.match_network.joint_embedding
+    # Value projections should have gradients, policy should NOT
+    assert joint.project_value.weight.grad is not None
+    assert joint.film_gamma_value.weight.grad is not None
+    assert joint.film_beta_value.weight.grad is not None
+
+    assert joint.project_policy.weight.grad is None
+    assert joint.film_gamma_policy.weight.grad is None
+    assert joint.film_beta_policy.weight.grad is None
 
     # Zero gradients again
     model.zero_grad()
@@ -524,9 +525,14 @@ def test_separate_projections_gradient_flow():
     loss_policy = mlm_logits.sum()
     loss_policy.backward()
 
-    # project_policy should have gradients, project_value should NOT
-    assert model.match_network.joint_embedding.project_policy.weight.grad is not None
-    assert model.match_network.joint_embedding.project_value.weight.grad is None
+    # Policy projections should have gradients, value should NOT
+    assert joint.project_policy.weight.grad is not None
+    assert joint.film_gamma_policy.weight.grad is not None
+    assert joint.film_beta_policy.weight.grad is not None
+
+    assert joint.project_value.weight.grad is None
+    assert joint.film_gamma_value.weight.grad is None
+    assert joint.film_beta_value.weight.grad is None
 
 
 def test_set_transformer_head_dual_channel_forward():

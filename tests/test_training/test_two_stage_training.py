@@ -227,6 +227,12 @@ def test_stage2_freezing_and_policy_only_training(dummy_model, dummy_draft_data,
     if hasattr(match_net.joint_embedding, "project_value"):
         for p in match_net.joint_embedding.project_value.parameters():
             assert not p.requires_grad
+    if hasattr(match_net.joint_embedding, "film_gamma_value"):
+        for p in match_net.joint_embedding.film_gamma_value.parameters():
+            assert not p.requires_grad
+    if hasattr(match_net.joint_embedding, "film_beta_value"):
+        for p in match_net.joint_embedding.film_beta_value.parameters():
+            assert not p.requires_grad
 
     # Verify that policy parameters are active
     for p in match_net.transformer_decoder.parameters():
@@ -234,6 +240,10 @@ def test_stage2_freezing_and_policy_only_training(dummy_model, dummy_draft_data,
     assert match_net.mlm_head.w_policy.weight.requires_grad
     assert match_net.joint_embedding.project_policy.weight.requires_grad
     assert not match_net.joint_embedding.project_value.weight.requires_grad
+    assert match_net.joint_embedding.film_gamma_policy.weight.requires_grad
+    assert match_net.joint_embedding.film_beta_policy.weight.requires_grad
+    assert not match_net.joint_embedding.film_gamma_value.weight.requires_grad
+    assert not match_net.joint_embedding.film_beta_value.weight.requires_grad
 
     # Check stage 2 checkpoint was written
     assert (tmp_path / "stage2_best_model.pt").exists()
@@ -241,6 +251,205 @@ def test_stage2_freezing_and_policy_only_training(dummy_model, dummy_draft_data,
     assert ckpt["checkpoint_metric"] == "val_loss"
     assert "val_loss" in ckpt
     assert "mlm_top5_accuracy" in ckpt
+
+
+def test_stage2_film_warm_start_transfer(dummy_model, dummy_draft_data, tmp_path):
+    """Verify Stage 2 warm-starts policy FiLM projections directly from trained value FiLM."""
+    x_drafts, y_labels, radiant_players, dire_players, patch_ids = dummy_draft_data
+
+    match_net = getattr(dummy_model, "match_network", dummy_model)
+    joint = match_net.joint_embedding
+
+    # Set distinct arbitrary weights on the value FiLM projections in the stage 1 model
+    with torch.no_grad():
+        joint.film_gamma_value.weight.fill_(3.1415)
+        joint.film_gamma_value.bias.fill_(0.42)
+        joint.film_beta_value.weight.fill_(-1.618)
+        joint.film_beta_value.bias.fill_(-0.99)
+
+        # Set policy FiLM to different initial values
+        joint.film_gamma_policy.weight.fill_(1.0)
+        joint.film_gamma_policy.bias.fill_(0.0)
+        joint.film_beta_policy.weight.fill_(0.0)
+        joint.film_beta_policy.bias.fill_(0.0)
+
+    # Save as Stage 1 checkpoint
+    stage1_path = tmp_path / "stage1_warmstart_test.pt"
+    dummy_state = {
+        "model_state": dummy_model.state_dict(),
+        "temperature": 1.0,
+        "stage": 1,
+    }
+    torch.save(dummy_state, stage1_path)
+
+    # Overwrite policy FiLM on dummy_model with garbage to ensure it gets overwritten
+    with torch.no_grad():
+        joint.film_gamma_policy.weight.fill_(99.0)
+        joint.film_beta_policy.weight.fill_(99.0)
+
+    config = TrainingConfig(
+        learning_rate=1e-3,
+        num_epochs=0,
+        batch_size=4,
+        device="cpu",
+        checkpoint_dir=str(tmp_path),
+        stage=2,
+        stage1_checkpoint_path=str(stage1_path),
+    )
+    trainer = TransformerTrainer(model=dummy_model, train_config=config)
+
+    trainer.train_stage_2(
+        x_drafts=x_drafts,
+        y_labels=y_labels,
+        radiant_players=radiant_players,
+        dire_players=dire_players,
+        patch_ids=patch_ids,
+        stage1_checkpoint_path=stage1_path,
+    )
+
+    # Verify policy FiLM was initialized with exact value FiLM weights from Stage 1 checkpoint
+    assert torch.allclose(joint.film_gamma_policy.weight, torch.tensor(3.1415))
+    assert torch.allclose(joint.film_gamma_policy.bias, torch.tensor(0.42))
+    assert torch.allclose(joint.film_beta_policy.weight, torch.tensor(-1.618))
+    assert torch.allclose(joint.film_beta_policy.bias, torch.tensor(-0.99))
+
+    # And policy FiLM is trainable, while value FiLM is frozen
+    assert joint.film_gamma_policy.weight.requires_grad
+    assert joint.film_beta_policy.weight.requires_grad
+    assert not joint.film_gamma_value.weight.requires_grad
+    assert not joint.film_beta_value.weight.requires_grad
+
+
+def test_stage1_strict_freezing_and_gradient_masking(dummy_model, dummy_draft_data, tmp_path):
+    """Verify Stage 1 strictly freezes decoder, mlm_head, project_policy, film_policy, with gradient masking."""
+    x_drafts, y_labels, radiant_players, dire_players, patch_ids = dummy_draft_data
+
+    config = TrainingConfig(
+        learning_rate=1e-3,
+        num_epochs=1,
+        pub_epochs=0,
+        batch_size=4,
+        device="cpu",
+        checkpoint_dir=str(tmp_path),
+        stage=1,
+    )
+    trainer = TransformerTrainer(model=dummy_model, train_config=config)
+
+    trainer.train_stage_1(
+        x_drafts=x_drafts,
+        y_labels=y_labels,
+        radiant_players=radiant_players,
+        dire_players=dire_players,
+        patch_ids=patch_ids,
+    )
+
+    match_net = getattr(dummy_model, "match_network", dummy_model)
+    joint = match_net.joint_embedding
+
+    # 1. Verify strict parameter freezing in Stage 1
+    # Policy path MUST be frozen
+    assert not joint.project_policy.weight.requires_grad
+    assert not joint.film_gamma_policy.weight.requires_grad
+    assert not joint.film_beta_policy.weight.requires_grad
+    for p in match_net.transformer_decoder.parameters():
+        assert not p.requires_grad
+    assert not match_net.mlm_head.w_policy.weight.requires_grad
+    assert not match_net.mlm_head.w_policy.bias.requires_grad
+    assert not match_net.mlm_head.tau.requires_grad
+    for p in match_net.mlm_head.role_head.parameters():
+        assert not p.requires_grad
+
+    # Value path MUST be active
+    assert joint.project_value.weight.requires_grad
+    assert joint.film_gamma_value.weight.requires_grad
+    assert joint.film_beta_value.weight.requires_grad
+    for p in match_net.set_transformer_head.parameters():
+        assert p.requires_grad
+
+    # 2. Verify gradient masking: frozen parameters have NO gradients
+    for p in match_net.transformer_decoder.parameters():
+        assert p.grad is None
+    assert match_net.mlm_head.w_policy.weight.grad is None
+    assert match_net.mlm_head.w_policy.bias.grad is None
+    assert match_net.mlm_head.tau.grad is None
+    for p in match_net.mlm_head.role_head.parameters():
+        assert p.grad is None
+    assert joint.project_policy.weight.grad is None
+    assert joint.film_gamma_policy.weight.grad is None
+    assert joint.film_beta_policy.weight.grad is None
+
+
+def test_stage2_100_percent_frozen_critic_and_gradient_masking(dummy_model, dummy_draft_data, tmp_path):
+    """Verify Stage 2 has 100% frozen critic and gradient masking."""
+    x_drafts, y_labels, radiant_players, dire_players, patch_ids = dummy_draft_data
+
+    # Save a fake stage 1 checkpoint first
+    stage1_path = tmp_path / "stage1_critic_freeze_test.pt"
+    dummy_state = {
+        "model_state": dummy_model.state_dict(),
+        "temperature": 1.0,
+        "stage": 1,
+    }
+    torch.save(dummy_state, stage1_path)
+
+    config = TrainingConfig(
+        learning_rate=1e-3,
+        num_epochs=1,
+        batch_size=4,
+        device="cpu",
+        checkpoint_dir=str(tmp_path),
+        stage=2,
+        stage1_checkpoint_path=str(stage1_path),
+    )
+    trainer = TransformerTrainer(model=dummy_model, train_config=config)
+
+    trainer.train_stage_2(
+        x_drafts=x_drafts,
+        y_labels=y_labels,
+        radiant_players=radiant_players,
+        dire_players=dire_players,
+        patch_ids=patch_ids,
+        stage1_checkpoint_path=stage1_path,
+    )
+
+    match_net = getattr(dummy_model, "match_network", dummy_model)
+    joint = match_net.joint_embedding
+
+    # 1. Verify 100% frozen critic in Stage 2
+    assert not joint.project_value.weight.requires_grad
+    assert not joint.film_gamma_value.weight.requires_grad
+    assert not joint.film_beta_value.weight.requires_grad
+    for p in match_net.set_transformer_head.parameters():
+        assert not p.requires_grad
+
+    # 2. Verify policy parameters active in Stage 2
+    assert joint.project_policy.weight.requires_grad
+    assert joint.film_gamma_policy.weight.requires_grad
+    assert joint.film_beta_policy.weight.requires_grad
+    for p in match_net.transformer_decoder.parameters():
+        assert p.requires_grad
+    assert match_net.mlm_head.w_policy.weight.requires_grad
+    assert match_net.mlm_head.w_policy.bias.requires_grad
+    assert match_net.mlm_head.tau.requires_grad
+    for p in match_net.mlm_head.role_head.parameters():
+        assert p.requires_grad
+
+    # 3. Verify gradient masking: 100% frozen critic has NO gradients
+    for p in match_net.set_transformer_head.parameters():
+        assert p.grad is None
+    assert joint.project_value.weight.grad is None
+    assert joint.film_gamma_value.weight.grad is None
+    assert joint.film_beta_value.weight.grad is None
+
+    # 4. Verify MatchNetwork forward produces detached logits when critic is frozen
+    batch_size = 2
+    x_test = torch.zeros(batch_size, 24, 4)
+    x_test[:, :, 0] = 1.0
+    x_test[:, :, 2] = 2.0
+    comfort_test = torch.zeros(batch_size, 10, 10)
+    logits, mlm_logits = dummy_model(x_test, comfort_test)
+    assert not logits.requires_grad
+    assert mlm_logits.requires_grad
 
 
 def test_stage2_validation_positive_advantage_conditioning(dummy_model):
@@ -722,6 +931,40 @@ def test_stage2_val_loss_patience_early_stopping(dummy_model, dummy_draft_data, 
     assert len(metrics.val_losses) == 3
     assert metrics.best_epoch == 1
     assert metrics.best_checkpoint_value == 1.0
+
+
+def test_deterministic_split_prevents_leakage(dummy_model):
+    """Verify _split_train_val uses deterministic torch.Generator to partition matches identically across stages."""
+    config = TrainingConfig(device="cpu", seed=42)
+    trainer = TransformerTrainer(model=dummy_model, train_config=config)
+
+    n = 100
+    # Create patch_ids with latest patch = 2, older patch = 1
+    patch_ids = [torch.tensor(2) if i < 60 else torch.tensor(1) for i in range(n)]
+
+    # Call split twice as would happen in Stage 1 and Stage 2
+    train_indices_s1, val_indices_s1 = trainer._split_train_val(n=n, patch_ids=patch_ids, val_ratio=0.4)
+    train_indices_s2, val_indices_s2 = trainer._split_train_val(n=n, patch_ids=patch_ids, val_ratio=0.4)
+
+    # 1. Exact reproducibility between stages
+    assert train_indices_s1 == train_indices_s2, "Stage 1 and Stage 2 train indices must be 100% identical"
+    assert val_indices_s1 == val_indices_s2, "Stage 1 and Stage 2 val indices must be 100% identical"
+
+    # 2. Strict partition within a stage: no leakage between train and val
+    assert set(train_indices_s1).isdisjoint(set(val_indices_s1)), "Train and val sets must have zero overlap"
+    assert len(train_indices_s1) + len(val_indices_s1) == n, "All samples must be accounted for"
+
+    # 3. Validation set must only contain matches from the latest patch
+    latest_patch_matches = set(range(60))
+    for idx in val_indices_s1:
+        assert idx in latest_patch_matches, "Validation set must strictly draw from the latest patch"
+
+    # 4. Changing seed produces a different deterministic split
+    config_diff = TrainingConfig(device="cpu", seed=12345)
+    trainer_diff = TransformerTrainer(model=dummy_model, train_config=config_diff)
+    train_indices_diff, val_indices_diff = trainer_diff._split_train_val(n=n, patch_ids=patch_ids, val_ratio=0.4)
+    assert train_indices_diff != train_indices_s1, "Different seeds must produce different partitions"
+
 
 
 

@@ -318,13 +318,21 @@ class JointEmbedding(nn.Module):
         self.w_team = nn.Embedding(2, d_model)
         self.w_patch = nn.Embedding(num_patches, d_model)
 
-        self.film_gamma = nn.Linear(d_model, d_model)
-        self.film_beta = nn.Linear(d_model, d_model)
+        # Decoupled FiLM projections for policy and value paths
+        self.film_gamma_policy = nn.Linear(d_model, d_model)
+        self.film_beta_policy = nn.Linear(d_model, d_model)
+        self.film_gamma_value = nn.Linear(d_model, d_model)
+        self.film_beta_value = nn.Linear(d_model, d_model)
 
-        nn.init.ones_(self.film_gamma.weight)
-        nn.init.zeros_(self.film_gamma.bias)
-        nn.init.zeros_(self.film_beta.weight)
-        nn.init.zeros_(self.film_beta.bias)
+        nn.init.ones_(self.film_gamma_policy.weight)
+        nn.init.zeros_(self.film_gamma_policy.bias)
+        nn.init.zeros_(self.film_beta_policy.weight)
+        nn.init.zeros_(self.film_beta_policy.bias)
+
+        nn.init.ones_(self.film_gamma_value.weight)
+        nn.init.zeros_(self.film_gamma_value.bias)
+        nn.init.zeros_(self.film_beta_value.weight)
+        nn.init.zeros_(self.film_beta_value.bias)
 
         self.pos_enc = SinusoidalPositionalEncoding(d_model, max_len=24)
 
@@ -351,8 +359,12 @@ class JointEmbedding(nn.Module):
         if patch_ids is not None:
             patch_ids_clamped = torch.clamp(patch_ids.to(device), 0, self.w_patch.num_embeddings - 1)
             e_patch = self.w_patch(patch_ids_clamped)
-            gamma = self.film_gamma(e_patch).unsqueeze(1)
-            beta = self.film_beta(e_patch).unsqueeze(1)
+            if for_value:
+                gamma = self.film_gamma_value(e_patch).unsqueeze(1)
+                beta = self.film_beta_value(e_patch).unsqueeze(1)
+            else:
+                gamma = self.film_gamma_policy(e_patch).unsqueeze(1)
+                beta = self.film_beta_policy(e_patch).unsqueeze(1)
             hero_projected = gamma * hero_projected + beta
 
         return hero_projected
@@ -421,8 +433,8 @@ class JointEmbedding(nn.Module):
         if patch_ids is not None:
             patch_ids_clamped = torch.clamp(patch_ids.to(device), 0, self.w_patch.num_embeddings - 1)
             e_patch = self.w_patch(patch_ids_clamped)
-            gamma = self.film_gamma(e_patch).unsqueeze(1)
-            beta = self.film_beta(e_patch).unsqueeze(1)
+            gamma = self.film_gamma_policy(e_patch).unsqueeze(1)
+            beta = self.film_beta_policy(e_patch).unsqueeze(1)
             z = gamma * z + beta
 
         return z
@@ -696,8 +708,14 @@ class HierarchicalTransformer(nn.Module):
         self.inhibition_penalty = role_collision * inhibition_enabled
 
         hero_indices = x_draft[:, :, 2]
-        pure_hero_embeds = self.joint_embedding.get_pure_hero_embeddings(hero_indices, patch_ids, for_value=True)
-        logits = self.set_transformer_head(pure_hero_embeds, x_draft)
+        critic_trainable = any(p.requires_grad for p in self.set_transformer_head.parameters())
+        if critic_trainable:
+            pure_hero_embeds = self.joint_embedding.get_pure_hero_embeddings(hero_indices, patch_ids, for_value=True)
+            logits = self.set_transformer_head(pure_hero_embeds, x_draft)
+        else:
+            with torch.no_grad():
+                pure_hero_embeds = self.joint_embedding.get_pure_hero_embeddings(hero_indices, patch_ids, for_value=True)
+                logits = self.set_transformer_head(pure_hero_embeds, x_draft)
 
         return logits, mlm_logits
 

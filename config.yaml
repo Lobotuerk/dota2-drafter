@@ -69,3 +69,4 @@ training:
   draft_sample_weight: 5.0
   pub_data_dir: "./data"
   pub_patience: 5
+  seed: 42

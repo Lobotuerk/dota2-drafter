@@ -38,35 +38,35 @@ state:
 
 # Graph construction settings
 graph:
-  wilson_threshold: 0.48 # Optuna best found
-  gamma: 0.75 # Optuna best found
+  wilson_threshold: 0.53 # Optuna best found (Trial 10)
+  gamma: 0.70 # Optuna best found (Trial 10)
 
 # Model architecture defaults
 model:
   d_model: 128 # Optuna best found
-  nhead: 8 # Optuna best found
-  dim_feedforward: 2048 # Optuna best found
+  nhead: 16 # Optuna best found (Trial 10)
+  dim_feedforward: 512 # Optuna best found (Trial 10 - prevents overfitting)
   num_layers_rgcn: 3
-  num_layers_transformer: 7
-  dropout: 0.18
+  num_layers_transformer: 19 # Optuna best found (Trial 10)
+  dropout: 0.21 # Optuna best found (Trial 10)
 
 # Training configuration defaults
 training:
-  learning_rate: 5.6e-05
+  learning_rate: 1.5e-04 # Optuna best found (Trial 10)
   step_loss_gamma: 0.23
-  augment: 25 # Optuna best found
-  batch_size: 128
-  skip_gram_lr: 0.0195
-  dgi_lr: 6.5e-3
-  rgcn_lr: 0.00011
-  checkpoint_metric: "val_auc"
-  aw_tau_start: 0.23
-  aw_tau_end: 0.1
+  augment: 30 # Optuna best found (Trial 10)
+  batch_size: 256 # Optuna best found (Trial 10)
+  skip_gram_lr: 0.186 # Optuna best found (Trial 10)
+  dgi_lr: 0.0164 # Optuna best found (Trial 10)
+  rgcn_lr: 1.46e-05 # Optuna best found (Trial 10)
+  checkpoint_metric: "val_brier"
+  aw_tau_start: 0.12 # Optuna best found (Trial 10)
+  aw_tau_end: 0.045 # Optuna best found (Trial 10)
   aw_tau_decay_epochs: 50
   aw_clip_min: 0.1
   aw_clip_max: 10.0
   stage: 1
-  draft_sample_weight: 5.0
+  draft_sample_weight: 9.87 # Optuna best found (Trial 10)
   pub_data_dir: "./data"
   pub_patience: 5
   seed: 42

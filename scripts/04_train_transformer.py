@@ -338,29 +338,38 @@ def load_data(data_dir: str):
     """Load all match batches from the data directory."""
     x_drafts, y_labels, radiant_players, dire_players = [], [], [], []
     patch_ids_list = []
+    match_ids_list = []
     data_path = Path(data_dir)
 
     for pt_file in sorted(data_path.glob("drafts_batch_*.pt")):
         try:
             batch = torch.load(pt_file, weights_only=True)
-        except FileNotFoundError:
+        except Exception:
             console.print(f"[bold yellow]Warning:[/bold yellow] Could not load {pt_file}, skipping.")
             continue
 
+        match_ids = batch.get("match_ids")
         for i in range(len(batch["x"])):
             x_drafts.append(batch["x"][i])
             y_labels.append(batch["y"][i])
             radiant_players.append(batch["radiant_players"][i])
             dire_players.append(batch["dire_players"][i])
-            
+            if match_ids and i < len(match_ids):
+                match_ids_list.append(str(match_ids[i]))
+            else:
+                match_ids_list.append(f"{pt_file.stem}_{i}")
+
             # Extract patch IDs if present in the dataset
             if "patch_ids" in batch:
-                patch_ids_list.append(batch["patch_ids"][i].item() if hasattr(batch["patch_ids"][i], 'item') else batch["patch_ids"][i])
+                patch_ids_list.append(
+                    batch["patch_ids"][i].item()
+                    if hasattr(batch["patch_ids"][i], "item")
+                    else batch["patch_ids"][i]
+                )
 
-    if patch_ids_list:
-        return x_drafts, y_labels, radiant_players, dire_players, patch_ids_list
-        
-    return x_drafts, y_labels, radiant_players, dire_players, None
+    patch_ret = patch_ids_list if patch_ids_list else None
+    match_ret = match_ids_list if match_ids_list else None
+    return x_drafts, y_labels, radiant_players, dire_players, patch_ret, match_ret
 
 
 def load_pub_data(data_dir: str):
@@ -473,7 +482,7 @@ def main() -> None:
             sys.exit(1)
 
         console.print("[bold blue]Loading data...[/bold blue]")
-        x_drafts, y_labels, radiant_players, dire_players, patch_ids = load_data(args.data_dir)
+        x_drafts, y_labels, radiant_players, dire_players, patch_ids, match_ids = load_data(args.data_dir)
 
         # Dynamically compute max hero index from loaded data
         max_hero_idx = args.num_heroes
@@ -503,7 +512,7 @@ def main() -> None:
         # The comfort matrix was built using the full vocab size from hero_indexer (which can be larger than max_hero_idx seen in current batches)
         if len(player_comfort_map) > 0:
             first_tensor = next(iter(player_comfort_map.values()))
-            player_input_dim = first_tensor.size(0)
+            player_input_dim = first_tensor.size(-1)
         else:
             player_input_dim = max_hero_idx * 2
         
@@ -601,6 +610,7 @@ def main() -> None:
             y_pubs=y_pubs if args.stage == 1 else None,
             patch_ids_pubs=patch_ids_pubs if args.stage == 1 else None,
             stage1_checkpoint_path=args.stage1_checkpoint,
+            match_ids=match_ids,
         )
 
         if args.wandb_project:
@@ -634,7 +644,7 @@ def main() -> None:
             sys.exit(1)
 
         console.print("[bold blue]Loading data for prediction...[/bold blue]")
-        x_drafts, y_labels, radiant_players, dire_players, patch_ids = load_data(args.data_dir)
+        x_drafts, y_labels, radiant_players, dire_players, patch_ids, match_ids = load_data(args.data_dir)
 
         # Dynamically compute max hero index from loaded data
         max_hero_idx = args.num_heroes
@@ -659,7 +669,7 @@ def main() -> None:
         # The comfort matrix was built using the full vocab size from hero_indexer (which can be larger than max_hero_idx seen in current batches)
         if len(player_comfort_map) > 0:
             first_tensor = next(iter(player_comfort_map.values()))
-            player_input_dim = first_tensor.size(0)
+            player_input_dim = first_tensor.size(-1)
         else:
             player_input_dim = max_hero_idx * 2
         

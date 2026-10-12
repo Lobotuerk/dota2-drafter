@@ -44,8 +44,9 @@ def apply_prefix_truncation(
     y_label: torch.Tensor,
     radiant_players: list[int],
     dire_players: list[int],
-    player_comfort_map: dict[int, torch.Tensor] | None = None,
+    player_comfort_map: dict[int | str, torch.Tensor] | None = None,
     player_input_dim: int = 127,
+    player_comfort: torch.Tensor | None = None,
 ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Apply multi-prefix sequence crop augmentation.
 
@@ -59,6 +60,7 @@ def apply_prefix_truncation(
         dire_players: List of Dire player account IDs.
         player_comfort_map: Optional mapping of account_id -> comfort tensor.
         player_input_dim: Number of features per comfort vector.
+        player_comfort: Optional pre-computed (10, C) comfort tensor.
 
     Returns:
         List of (x_draft, player_comfort, y) tuples for each truncation point.
@@ -66,29 +68,30 @@ def apply_prefix_truncation(
     truncation_points = [7, 9, 12, 18, 22, 24]
     samples = []
 
+    if player_comfort is None:
+        comfort_rows: list[torch.Tensor] = []
+        comfort_map = player_comfort_map or {}
+        for account_id in radiant_players:
+            if account_id == 0 or account_id not in comfort_map:
+                anon = torch.zeros(player_input_dim, dtype=torch.float32)
+                anon[player_input_dim // 2 :] = 0.5
+                comfort_rows.append(anon)
+            else:
+                comfort_rows.append(comfort_map[account_id])
+        for account_id in dire_players:
+            if account_id == 0 or account_id not in comfort_map:
+                anon = torch.zeros(player_input_dim, dtype=torch.float32)
+                anon[player_input_dim // 2 :] = 0.5
+                comfort_rows.append(anon)
+            else:
+                comfort_rows.append(comfort_map[account_id])
+        player_comfort = torch.stack(comfort_rows)
+
     for t in truncation_points:
         x_truncated = x_draft.clone()
         if t < 24:
             x_truncated[t:, :] = 0.0
             x_truncated[t:, 2] = -1.0  # Assign explicit hero padding sentinel
-
-        comfort_rows: list[torch.Tensor] = []
-        comfort_map = player_comfort_map or {}
-        for account_id in radiant_players:
-            if account_id == 0:
-                comfort_rows.append(torch.zeros(player_input_dim))
-            elif account_id in comfort_map:
-                comfort_rows.append(comfort_map[account_id])
-            else:
-                comfort_rows.append(torch.zeros(player_input_dim))
-        for account_id in dire_players:
-            if account_id == 0:
-                comfort_rows.append(torch.zeros(player_input_dim))
-            elif account_id in comfort_map:
-                comfort_rows.append(comfort_map[account_id])
-            else:
-                comfort_rows.append(torch.zeros(player_input_dim))
-        player_comfort = torch.stack(comfort_rows)
 
         samples.append((x_truncated, player_comfort, y_label))
 
@@ -100,8 +103,9 @@ def augment_draft_permutations(
     y_label: torch.Tensor,
     radiant_players: list[int],
     dire_players: list[int],
-    player_comfort_map: dict[int, torch.Tensor] | None = None,
+    player_comfort_map: dict[int | str, torch.Tensor] | None = None,
     player_input_dim: int = 127,
+    player_comfort: torch.Tensor | None = None,
 ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Apply intra-phase draft permutation augmentation.
 
@@ -115,6 +119,7 @@ def augment_draft_permutations(
         dire_players: List of Dire player account IDs.
         player_comfort_map: Optional mapping of account_id -> comfort tensor.
         player_input_dim: Number of features per comfort vector.
+        player_comfort: Optional pre-computed (10, C) comfort tensor.
 
     Returns:
         List of (x_draft, player_comfort, y) tuples including all permutation combinations.
@@ -142,22 +147,23 @@ def augment_draft_permutations(
     all_perm_combinations = list(itertools.product(*group_permutations))
 
     # Build player comfort row once (identical for all permutations of this match)
-    comfort_rows: list[torch.Tensor] = []
-    for account_id in radiant_players:
-        if account_id == 0:
-            comfort_rows.append(torch.zeros(player_input_dim))
-        elif account_id in comfort_map:
-            comfort_rows.append(comfort_map[account_id])
-        else:
-            comfort_rows.append(torch.zeros(player_input_dim))
-    for account_id in dire_players:
-        if account_id == 0:
-            comfort_rows.append(torch.zeros(player_input_dim))
-        elif account_id in comfort_map:
-            comfort_rows.append(comfort_map[account_id])
-        else:
-            comfort_rows.append(torch.zeros(player_input_dim))
-    player_comfort = torch.stack(comfort_rows)
+    if player_comfort is None:
+        comfort_rows: list[torch.Tensor] = []
+        for account_id in radiant_players:
+            if account_id == 0 or account_id not in comfort_map:
+                anon = torch.zeros(player_input_dim, dtype=torch.float32)
+                anon[player_input_dim // 2 :] = 0.5
+                comfort_rows.append(anon)
+            else:
+                comfort_rows.append(comfort_map[account_id])
+        for account_id in dire_players:
+            if account_id == 0 or account_id not in comfort_map:
+                anon = torch.zeros(player_input_dim, dtype=torch.float32)
+                anon[player_input_dim // 2 :] = 0.5
+                comfort_rows.append(anon)
+            else:
+                comfort_rows.append(comfort_map[account_id])
+        player_comfort = torch.stack(comfort_rows)
 
     for perm_comb in all_perm_combinations:
         x_permuted = x_draft.clone()
@@ -181,8 +187,9 @@ def augment_pub_permutations(
     y_label: torch.Tensor,
     radiant_players: list[int],
     dire_players: list[int],
-    player_comfort_map: dict[int, torch.Tensor] | None = None,
+    player_comfort_map: dict[int | str, torch.Tensor] | None = None,
     player_input_dim: int = 127,
+    player_comfort: torch.Tensor | None = None,
 ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Apply intra-team pick permutation augmentation for high-MMR pub matches.
 
@@ -198,28 +205,29 @@ def augment_pub_permutations(
         dire_players: List of Dire player account IDs.
         player_comfort_map: Optional mapping of account_id -> comfort tensor.
         player_input_dim: Number of features per comfort vector.
+        player_comfort: Optional pre-computed (10, C) comfort tensor.
 
     Returns:
         List of (x_draft, player_comfort, y) tuples including 64 permutation combinations.
     """
-    comfort_map = player_comfort_map or {}
-
-    comfort_rows: list[torch.Tensor] = []
-    for account_id in radiant_players:
-        if account_id == 0:
-            comfort_rows.append(torch.zeros(player_input_dim))
-        elif account_id in comfort_map:
-            comfort_rows.append(comfort_map[account_id])
-        else:
-            comfort_rows.append(torch.zeros(player_input_dim))
-    for account_id in dire_players:
-        if account_id == 0:
-            comfort_rows.append(torch.zeros(player_input_dim))
-        elif account_id in comfort_map:
-            comfort_rows.append(comfort_map[account_id])
-        else:
-            comfort_rows.append(torch.zeros(player_input_dim))
-    player_comfort = torch.stack(comfort_rows)
+    if player_comfort is None:
+        comfort_map = player_comfort_map or {}
+        comfort_rows: list[torch.Tensor] = []
+        for account_id in radiant_players:
+            if account_id == 0 or account_id not in comfort_map:
+                anon = torch.zeros(player_input_dim, dtype=torch.float32)
+                anon[player_input_dim // 2 :] = 0.5
+                comfort_rows.append(anon)
+            else:
+                comfort_rows.append(comfort_map[account_id])
+        for account_id in dire_players:
+            if account_id == 0 or account_id not in comfort_map:
+                anon = torch.zeros(player_input_dim, dtype=torch.float32)
+                anon[player_input_dim // 2 :] = 0.5
+                comfort_rows.append(anon)
+            else:
+                comfort_rows.append(comfort_map[account_id])
+        player_comfort = torch.stack(comfort_rows)
 
     # 8 distinct permutations for Radiant picks (indices 0..4)
     # Covering intra-round swaps: round 1 (0, 1), round 2 (2, 3), and cross-round swaps
@@ -348,10 +356,11 @@ class PlayerComfortDataset(Dataset):
         y_labels: list[torch.Tensor],
         radiant_players: list[list[int]],
         dire_players: list[list[int]],
-        player_comfort_map: dict[int, torch.Tensor] | None = None,
+        player_comfort_map: dict[int | str, torch.Tensor] | None = None,
         player_input_dim: int = 127,
         augment: int | bool = 0,
         patch_ids: list[torch.Tensor] | None = None,
+        match_ids: list[str] | None = None,
     ) -> None:
         """Initialize the dataset.
 
@@ -360,10 +369,12 @@ class PlayerComfortDataset(Dataset):
             y_labels: List of label tensors, each (1,).
             radiant_players: List of Radiant player account ID lists (5 IDs each).
             dire_players: List of Dire player account ID lists (5 IDs each).
-            player_comfort_map: Optional mapping of account_id -> comfort tensor (10, C).
+            player_comfort_map: Optional mapping of account_id -> comfort tensor (10, C) or match_id -> (10, C).
             player_input_dim: C, number of features per comfort vector.
             augment: If True, apply all variations (448). If an integer, precomputes all
                      variations but limits the exposed items to `augment` per match.
+            patch_ids: Optional list of patch ID tensors per match.
+            match_ids: Optional list of match ID strings per match.
         """
         self.x_drafts = x_drafts
         self.y_labels = y_labels
@@ -372,6 +383,7 @@ class PlayerComfortDataset(Dataset):
         self.player_comfort_map = player_comfort_map or {}
         self.player_input_dim = player_input_dim
         self.patch_ids = patch_ids
+        self.match_ids = match_ids
 
         # Parse augment type and determine limit per original match
         if isinstance(augment, bool):
@@ -425,11 +437,13 @@ class PlayerComfortDataset(Dataset):
                 radiant = radiant_players[base_idx]
                 dire = dire_players[base_idx]
                 patch_id = self.patch_ids[base_idx] if self.patch_ids else torch.tensor(0, dtype=torch.long)
+                comfort_for_base = self._build_player_comfort(base_idx)
 
                 if is_pub_draft(x_draft):
                     perm_samples = augment_pub_permutations(
                         x_draft, y, radiant, dire,
                         self.player_comfort_map, self.player_input_dim,
+                        player_comfort=comfort_for_base,
                     )
                     if needed_perms < len(perm_samples):
                         perm_samples = perm_samples[:needed_perms]
@@ -458,6 +472,7 @@ class PlayerComfortDataset(Dataset):
                     perm_samples = augment_draft_permutations(
                         x_draft, y, radiant, dire,
                         self.player_comfort_map, self.player_input_dim,
+                        player_comfort=comfort_for_base,
                     )
                     if needed_perms < len(perm_samples):
                         perm_samples = perm_samples[:needed_perms]
@@ -546,6 +561,15 @@ class PlayerComfortDataset(Dataset):
         Returns:
             Player comfort tensor of shape (10, player_input_dim).
         """
+        # 1. Point-in-time match comfort lookup if available
+        if self.match_ids and idx < len(self.match_ids):
+            mid = str(self.match_ids[idx])
+            if mid in self.player_comfort_map:
+                match_tensor = self.player_comfort_map[mid]
+                if isinstance(match_tensor, torch.Tensor) and match_tensor.dim() == 2 and match_tensor.size(0) == 10:
+                    return match_tensor
+
+        # 2. Fallback to per-player account_id lookup
         comfort_rows: list[torch.Tensor] = []
 
         for account_id in self.radiant_players[idx]:
@@ -554,7 +578,13 @@ class PlayerComfortDataset(Dataset):
                 anon[self.player_input_dim // 2 :] = 0.5  # Default Wilson Score to 0.5 (neutral winrate)
                 comfort_rows.append(anon)
             else:
-                comfort_rows.append(self.player_comfort_map[account_id])
+                p_vec = self.player_comfort_map[account_id]
+                if isinstance(p_vec, torch.Tensor) and p_vec.dim() == 1 and p_vec.size(0) == self.player_input_dim:
+                    comfort_rows.append(p_vec)
+                else:
+                    anon = torch.zeros(self.player_input_dim, dtype=torch.float32)
+                    anon[self.player_input_dim // 2 :] = 0.5
+                    comfort_rows.append(anon)
 
         for account_id in self.dire_players[idx]:
             if account_id == 0 or account_id not in self.player_comfort_map:
@@ -562,7 +592,13 @@ class PlayerComfortDataset(Dataset):
                 anon[self.player_input_dim // 2 :] = 0.5  # Default Wilson Score to 0.5 (neutral winrate)
                 comfort_rows.append(anon)
             else:
-                comfort_rows.append(self.player_comfort_map[account_id])
+                p_vec = self.player_comfort_map[account_id]
+                if isinstance(p_vec, torch.Tensor) and p_vec.dim() == 1 and p_vec.size(0) == self.player_input_dim:
+                    comfort_rows.append(p_vec)
+                else:
+                    anon = torch.zeros(self.player_input_dim, dtype=torch.float32)
+                    anon[self.player_input_dim // 2 :] = 0.5
+                    comfort_rows.append(anon)
 
         player_comfort = torch.stack(comfort_rows)
         return player_comfort
@@ -1395,11 +1431,12 @@ class TransformerTrainer:
         y_labels: list[torch.Tensor],
         radiant_players: list[list[int]] | None = None,
         dire_players: list[list[int]] | None = None,
-        player_comfort_map: dict[int, torch.Tensor] | None = None,
+        player_comfort_map: dict[int | str, torch.Tensor] | None = None,
         patch_ids: list[torch.Tensor] | None = None,
         x_pubs: list[torch.Tensor] | None = None,
         y_pubs: list[torch.Tensor] | None = None,
         patch_ids_pubs: list[torch.Tensor] | None = None,
+        match_ids: list[str] | None = None,
     ) -> TrainingMetrics:
         """Stage 1 entry point: prepare dataloaders and run train_value_head."""
         n = len(x_drafts)
@@ -1411,7 +1448,7 @@ class TransformerTrainer:
         player_input_dim = getattr(self.model, "player_input_dim", 127)
         if player_comfort_map:
             first_tensor = next(iter(player_comfort_map.values()))
-            player_input_dim = first_tensor.size(0)
+            player_input_dim = first_tensor.size(-1)
 
         train_dataset = PlayerComfortDataset(
             x_drafts=[x_drafts[i] for i in train_indices],
@@ -1422,6 +1459,7 @@ class TransformerTrainer:
             player_input_dim=player_input_dim,
             augment=self.config.augment,
             patch_ids=[patch_ids[i] for i in train_indices] if patch_ids else None,
+            match_ids=[match_ids[i] for i in train_indices] if match_ids else None,
         )
 
         val_dataset = PlayerComfortDataset(
@@ -1433,6 +1471,7 @@ class TransformerTrainer:
             player_input_dim=player_input_dim,
             augment=False,
             patch_ids=[patch_ids[i] for i in val_indices] if patch_ids else None,
+            match_ids=[match_ids[i] for i in val_indices] if match_ids else None,
         )
 
         drafts_loader = DataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True)
@@ -1467,9 +1506,10 @@ class TransformerTrainer:
         y_labels: list[torch.Tensor],
         radiant_players: list[list[int]],
         dire_players: list[list[int]],
-        player_comfort_map: dict[int, torch.Tensor] | None = None,
+        player_comfort_map: dict[int | str, torch.Tensor] | None = None,
         patch_ids: list[torch.Tensor] | None = None,
         stage1_checkpoint_path: str | Path | None = None,
+        match_ids: list[str] | None = None,
     ) -> TrainingMetrics:
         """Stage 2: Freeze Value Head and train Policy Head on draft games trajectories."""
         ckpt_path = (
@@ -1564,7 +1604,7 @@ class TransformerTrainer:
         player_input_dim = getattr(self.model, "player_input_dim", 127)
         if player_comfort_map:
             first_tensor = next(iter(player_comfort_map.values()))
-            player_input_dim = first_tensor.size(0)
+            player_input_dim = first_tensor.size(-1)
 
         train_dataset = PlayerComfortDataset(
             x_drafts=[x_drafts[i] for i in train_indices],
@@ -1575,6 +1615,7 @@ class TransformerTrainer:
             player_input_dim=player_input_dim,
             augment=self.config.augment,
             patch_ids=[patch_ids[i] for i in train_indices] if patch_ids else None,
+            match_ids=[match_ids[i] for i in train_indices] if match_ids else None,
         )
 
         val_dataset = PlayerComfortDataset(
@@ -1586,6 +1627,7 @@ class TransformerTrainer:
             player_input_dim=player_input_dim,
             augment=False,
             patch_ids=[patch_ids[i] for i in val_indices] if patch_ids else None,
+            match_ids=[match_ids[i] for i in val_indices] if match_ids else None,
         )
 
         train_loader = DataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True)
@@ -1785,12 +1827,13 @@ class TransformerTrainer:
         y_labels: list[torch.Tensor],
         radiant_players: list[list[int]],
         dire_players: list[list[int]],
-        player_comfort_map: dict[int, torch.Tensor] | None = None,
+        player_comfort_map: dict[int | str, torch.Tensor] | None = None,
         patch_ids: list[torch.Tensor] | None = None,
         x_pubs: list[torch.Tensor] | None = None,
         y_pubs: list[torch.Tensor] | None = None,
         patch_ids_pubs: list[torch.Tensor] | None = None,
         stage1_checkpoint_path: str | Path | None = None,
+        match_ids: list[str] | None = None,
     ) -> TrainingMetrics:
         """Run training pipeline. Dispatches to train_stage_1 or train_stage_2 if stage is configured."""
         if self.config.stage == 1:
@@ -1804,6 +1847,7 @@ class TransformerTrainer:
                 x_pubs=x_pubs,
                 y_pubs=y_pubs,
                 patch_ids_pubs=patch_ids_pubs,
+                match_ids=match_ids,
             )
         elif self.config.stage == 2:
             return self.train_stage_2(
@@ -1814,6 +1858,7 @@ class TransformerTrainer:
                 player_comfort_map=player_comfort_map,
                 patch_ids=patch_ids,
                 stage1_checkpoint_path=stage1_checkpoint_path,
+                match_ids=match_ids,
             )
         else:
             return self._train_joint(
@@ -1823,6 +1868,7 @@ class TransformerTrainer:
                 dire_players=dire_players,
                 player_comfort_map=player_comfort_map,
                 patch_ids=patch_ids,
+                match_ids=match_ids,
             )
 
     def _train_joint(
@@ -1831,8 +1877,9 @@ class TransformerTrainer:
         y_labels: list[torch.Tensor],
         radiant_players: list[list[int]],
         dire_players: list[list[int]],
-        player_comfort_map: dict[int, torch.Tensor] | None = None,
+        player_comfort_map: dict[int | str, torch.Tensor] | None = None,
         patch_ids: list[torch.Tensor] | None = None,
+        match_ids: list[str] | None = None,
     ) -> TrainingMetrics:
         """Run the full joint training loop with augmentation.
 
@@ -1841,7 +1888,9 @@ class TransformerTrainer:
             y_labels: List of label tensors, each (1,).
             radiant_players: List of Radiant player account ID lists.
             dire_players: List of Dire player account ID lists.
-            player_comfort_map: Optional mapping of account_id -> comfort tensor.
+            player_comfort_map: Optional mapping of account_id -> comfort tensor or match_id -> comfort tensor.
+            patch_ids: Optional list of patch ID tensors per match.
+            match_ids: Optional list of match ID strings per match.
 
         Returns:
             TrainingMetrics with full training history.
@@ -1852,7 +1901,7 @@ class TransformerTrainer:
         player_input_dim = getattr(self.model, "player_input_dim", 127)
         if player_comfort_map:
             first_tensor = next(iter(player_comfort_map.values()))
-            player_input_dim = first_tensor.size(0)
+            player_input_dim = first_tensor.size(-1)
 
         train_dataset = PlayerComfortDataset(
             x_drafts=[x_drafts[i] for i in train_indices],
@@ -1863,6 +1912,7 @@ class TransformerTrainer:
             player_input_dim=player_input_dim,
             augment=self.config.augment,
             patch_ids=[patch_ids[i] for i in train_indices] if patch_ids else None,
+            match_ids=[match_ids[i] for i in train_indices] if match_ids else None,
         )
 
         val_dataset = PlayerComfortDataset(
@@ -1874,6 +1924,7 @@ class TransformerTrainer:
             player_input_dim=player_input_dim,
             augment=False,
             patch_ids=[patch_ids[i] for i in val_indices] if patch_ids else None,
+            match_ids=[match_ids[i] for i in val_indices] if match_ids else None,
         )
 
         train_loader = DataLoader(train_dataset, batch_size=self.config.batch_size, shuffle=True)

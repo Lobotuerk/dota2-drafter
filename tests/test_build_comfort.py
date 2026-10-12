@@ -131,3 +131,23 @@ def test_build_comfort_functional(tmp_path: Path) -> None:
 
     # Anonymous player 0 should NOT be in the map
     assert 0 not in comfort_map
+
+    # Verify Point-in-Time per-match comfort tensors
+    assert "match_1" in comfort_map
+    assert "match_2" in comfort_map
+
+    m1_comfort = comfort_map["match_1"]
+    m2_comfort = comfort_map["match_2"]
+    assert m1_comfort.shape == (10, vocab_size * 2)
+    assert m2_comfort.shape == (10, vocab_size * 2)
+
+    # In match 1 (first chronological game), player 101 (row 0) had 0 prior games:
+    # All affinities 0.0, Wilson scores 0.5
+    assert torch.all(m1_comfort[0, :vocab_size] == 0.0)
+    assert torch.all(m1_comfort[0, vocab_size:] == 0.5)
+
+    # In match 2 (second chronological game), player 101 (row 0) had 1 prior game (hero 5 win in match 1):
+    # Affinity on hero 5 = 1.0, Wilson score = wilson_score(1, 1).
+    # Crucially, player 101's loss on match 2 is NOT present in m2_comfort!
+    assert torch.isclose(m2_comfort[0, 4], torch.tensor(1.0))
+    assert torch.isclose(m2_comfort[0, vocab_size + 4], torch.tensor(wilson_score(1, 1)))

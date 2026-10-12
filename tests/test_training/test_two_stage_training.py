@@ -966,6 +966,64 @@ def test_deterministic_split_prevents_leakage(dummy_model):
     assert train_indices_diff != train_indices_s1, "Different seeds must produce different partitions"
 
 
+def test_player_comfort_dataset_point_in_time_lookup():
+    """Verify PlayerComfortDataset retrieves point-in-time (10, C) comfort tensors via match_ids."""
+    from dota2drafter.training.transformer_trainer import PlayerComfortDataset
+
+    x_drafts = [torch.zeros(24, 4), torch.zeros(24, 4)]
+    y_labels = [torch.tensor([1.0]), torch.tensor([0.0])]
+    radiant_players = [[101, 102, 103, 104, 105], [101, 102, 103, 104, 105]]
+    dire_players = [[201, 202, 203, 204, 205], [201, 202, 203, 204, 205]]
+    match_ids = ["match_1001", "match_1002"]
+
+    # Point-in-time comfort map containing (10, C) tensors for specific match_ids
+    c_dim = 20
+    m1_tensor = torch.full((10, c_dim), 1.11)
+    m2_tensor = torch.full((10, c_dim), 2.22)
+    comfort_map = {
+        "match_1001": m1_tensor,
+        "match_1002": m2_tensor,
+        101: torch.full((c_dim,), 9.99),  # Fallback career vector
+    }
+
+    dataset = PlayerComfortDataset(
+        x_drafts=x_drafts,
+        y_labels=y_labels,
+        radiant_players=radiant_players,
+        dire_players=dire_players,
+        player_comfort_map=comfort_map,
+        player_input_dim=c_dim,
+        match_ids=match_ids,
+        augment=False,
+    )
+
+    # Sample 0 should receive m1_tensor
+    x0, c0, y0, p0 = dataset[0]
+    assert torch.allclose(c0, m1_tensor)
+
+    # Sample 1 should receive m2_tensor
+    x1, c1, y1, p1 = dataset[1]
+    assert torch.allclose(c1, m2_tensor)
+
+    # When match_ids are not present, fallback to per-player lookup
+    dataset_no_mid = PlayerComfortDataset(
+        x_drafts=x_drafts,
+        y_labels=y_labels,
+        radiant_players=radiant_players,
+        dire_players=dire_players,
+        player_comfort_map=comfort_map,
+        player_input_dim=c_dim,
+        match_ids=None,
+        augment=False,
+    )
+    _, c_fallback, _, _ = dataset_no_mid[0]
+    # Player 101 was present, should have 9.99 in row 0
+    assert torch.allclose(c_fallback[0], torch.full((c_dim,), 9.99))
+    # Player 102 was not in comfort_map, should have default neutral Wilson score in row 1
+    assert torch.all(c_fallback[1, : c_dim // 2] == 0.0)
+    assert torch.all(c_fallback[1, c_dim // 2 :] == 0.5)
+
+
 
 
 

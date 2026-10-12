@@ -95,7 +95,7 @@ def main(args: list[str] | None = None) -> None:
 
     # Determine vocab_size (ensuring compatibility with existing comfort tensors)
     if comfort_map:
-        vocab_size = next(iter(comfort_map.values())).size(0) // 2
+        vocab_size = next(iter(comfort_map.values())).size(-1) // 2
     else:
         vocab_size = max([int(v) for v in hero_data.keys()])
 

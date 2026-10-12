@@ -40,8 +40,10 @@ $$ z_t = \gamma_{patch} \cdot (Project(H_{GNN}[h_t]) + W_{type}(p_t) + W_{team}(
   - **Value Path:** $\gamma_{value}(e_{patch}), \beta_{value}(e_{patch})$ modulate pure hero embeddings feeding into the Set Transformer Head.
   This decoupling ensures that Stage 1 value fine-tuning cannot perturb policy meta-adaptations and vice-versa.
 
-### 2.2. Player Comfort Network (PCN)
-The model dynamically factors in the human element. The PCN takes a $(10, C)$ historical win/loss differential matrix for the players in the lobby and maps it to a $(10, d\_model)$ preference vector, which is cross-attended with the draft sequence in the Transformer.
+### 2.2. Player Comfort Network (PCN) & Point-in-Time Matrix
+The model dynamically factors in the human element. The PCN takes a $(10, C)$ historical comfort matrix for the 10 players in the lobby and maps it to a $(10, d\_model)$ preference vector, which is cross-attended with the draft sequence in the Transformer decoder.
+* **Leakage-Free Point-in-Time Generation:** To prevent temporal lookahead leakage and target contamination on the validation set, comfort vectors are computed along a chronological timeline. For each match $m_i$, its $(10, C)$ comfort tensor is built strictly from matches $m_0 \dots m_{i-1}$ played prior to that match. Neither the current match's hero selections nor its outcome are present in the input comfort matrix.
+* **Dual Snapshot System:** The offline builder outputs per-match point-in-time tensors (`match_id` $\rightarrow$ $(10, C)$) for zero-leakage training/evaluation, and a career snapshot (`account_id` $\rightarrow$ $(C,)$) for live interactive drafting.
 
 ### 2.3. Causal Masking
 The `HierarchicalTransformer` utilizes strict Causal Masking (`tgt_mask=causal_mask`). This prevents the self-attention mechanism from looking at future picks/bans when evaluating the current step, which is absolutely mandatory for real-time sequential evaluation during MCTS.
